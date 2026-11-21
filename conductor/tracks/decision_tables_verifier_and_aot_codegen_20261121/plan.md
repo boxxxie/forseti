@@ -9,12 +9,12 @@
 
 ## Phase 1: Interval/Domain Partitioning & ZEN-Style Static Table Verifier
 
-- [ ] Task: Implement column domain representations and disjoint interval/enum partitioning (Pattern E TDD)
-    - [ ] Write failing Pattern E unit tests for boolean, enum, integer/float interval constraints, string literal sets, wildcards (`-`), unsatisfiable cells (`E3002`), and domain exhaustion
-    - [ ] Implement `forseti/table_domain.odin` (`@(private)` internals) with bounded work budget telemetry
-- [ ] Task: Implement overlap, completeness gap, dead-rule, and witness generator (`E3001`, `W3001–W3006`) (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 ATDD specs & `#caller_location` table matrices in `specs/decision_tables_spec_test.odin` modeling Connect policy tables (`survivorship_gate`, `identity_routing`, `career_consolidation`, `event_lifecycle`) intentionally injected with overlaps, gaps, and shadowed rows, asserting exact witness counterexamples
-    - [ ] Implement `forseti/table_verify.odin` and wire diagnostics into `sema.odin` and `forseti verify-tables`
+- [x] Task: Implement column domain representations and disjoint interval/enum partitioning (Pattern E TDD)
+    - [x] Write failing Pattern E unit tests for boolean, enum, integer/float interval constraints, string literal sets, wildcards (`-`), unsatisfiable cells (`E3002`), and domain exhaustion
+    - [x] Implement `forseti/table_domain.odin` (`@(private)` internals) with bounded work budget telemetry
+- [x] Task: Implement overlap, completeness gap, dead-rule, and witness generator (`E3001`, `W3001–W3006`) (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 ATDD specs & `#caller_location` table matrices in `specs/decision_tables_spec_test.odin` modeling Connect policy tables (`survivorship_gate`, `identity_routing`, `career_consolidation`, `event_lifecycle`) intentionally injected with overlaps, gaps, and shadowed rows, asserting exact witness counterexamples
+    - [x] Implement `forseti/table_verify.odin` and wire diagnostics into `sema.odin` and `forseti verify-tables`
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Static Decision Table Verifier' (Protocol in workflow.md)
 
 ---

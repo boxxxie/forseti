@@ -933,6 +933,9 @@ analyze_ir :: proc(
 			}
 			for out_id, oi in row.outputs {
 				if oi < len(tbl.outputs) {
+					if ir.exprs[out_id].kind == .Wildcard {
+						continue
+					}
 					ot := sema_eval_expr(&ctx, nil, out_id) or_return
 					if !types_compatible(ir, tbl.outputs[oi].type, ot, out_id) {
 						sema_error(
@@ -995,5 +998,6 @@ analyze_ir :: proc(
 		}
 	}
 
+	verify_all_tables(ir, diags, telemetry) or_return
 	return nil
 }

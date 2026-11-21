@@ -9,7 +9,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 2: Verified DMN Decision Tables (`Tablex++` / `ZEN`), Static Gap/Overlap Proofs, Dual Cost-Tree/Bitset Compilers, and Tier 3 AOT Odin Codegen** *(Priority: Step 2 — Depends on Track 1)*
+- [~] **Track 2: Verified DMN Decision Tables (`Tablex++` / `ZEN`), Static Gap/Overlap Proofs, Dual Cost-Tree/Bitset Compilers, and Tier 3 AOT Odin Codegen** *(Priority: Step 2 — Depends on Track 1)*
   *Link: [./tracks/decision_tables_verifier_and_aot_codegen_20261121/](./tracks/decision_tables_verifier_and_aot_codegen_20261121/)*
 
 ---

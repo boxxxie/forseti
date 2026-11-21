@@ -154,6 +154,7 @@ then_policy_emits_diagnostic :: proc(
 	sev: forseti.Diagnostic_Severity,
 	line: u32,
 	col: u32,
+	substr: string = "",
 	loc := #caller_location,
 ) {
 	slot, ok := &w.policies[label]
@@ -162,7 +163,9 @@ then_policy_emits_diagnostic :: proc(
 	}
 	for d in slot.diags.items {
 		if d.code == code && d.severity == sev && d.line == line && d.col == col {
-			return
+			if len(substr) == 0 || strings.contains(d.message, substr) {
+				return
+			}
 		}
 	}
 	b: strings.Builder
@@ -197,6 +200,22 @@ then_external_and_internal_ir_match :: proc(w: ^World, label_a, label_b: string,
 		return
 	}
 	testing.expect(w.t, forseti.ir_structurally_equal(&slot_a.ir, &slot_b.ir), loc = loc)
+}
+
+upon_verifying_table_with_budget :: proc(
+	w: ^World,
+	label: string,
+	table_idx: u32,
+	max_budget: int,
+	loc := #caller_location,
+) {
+	upon_compiling_policy(w, label, loc = loc)
+	slot, ok := &w.policies[label]
+	if !ok || !slot.compiled {
+		return
+	}
+	err := driver_verify_table_with_budget(&slot.ir, table_idx, &slot.diags, &w.telemetry, max_budget)
+	testing.expect_value(w.t, err, nil, loc = loc)
 }
 
 given_cli_binary :: proc(w: ^World, loc := #caller_location) {

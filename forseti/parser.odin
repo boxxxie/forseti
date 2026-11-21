@@ -834,7 +834,15 @@ parse_table_rows_block :: proc(p: ^Parser) -> (rows: [dynamic]Ast_Table_Row, err
 		if peek(p).kind == .Double_Pipe {
 			_ = advance(p)
 			for peek(p).kind != .RBrace && peek(p).kind != .EOF && peek(p).kind != .Semicolon {
-				out_expr := parse_expr(p, 0) or_return
+				out_expr: Node_Id
+				cur := peek(p)
+				next := peek(p, 1)
+				if cur.kind == .Minus && (next.kind == .Pipe || next.kind == .Semicolon || next.kind == .RBrace || next.kind == .EOF) {
+					_ = advance(p)
+					out_expr = ast_add_node(p.pool, Ast_Node{span = cur.span, payload = Ast_Wildcard{}}) or_return
+				} else {
+					out_expr = parse_expr(p, 0) or_return
+				}
 				append(&outs, out_expr)
 				if peek(p).kind == .Pipe {
 					_ = advance(p)

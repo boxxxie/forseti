@@ -42,6 +42,16 @@ driver_compile_internal :: proc(
 	return nil
 }
 
+driver_verify_table_with_budget :: proc(
+	ir: ^forseti.Rulebase_IR,
+	table_idx: u32,
+	diags: ^forseti.Diagnostic_List,
+	telemetry: ^forseti.Telemetry_Sink,
+	max_budget: int,
+) -> mem.Allocator_Error {
+	return forseti.verify_decision_table(ir, table_idx, diags, telemetry, forseti.Verify_Options{max_budget = max_budget})
+}
+
 driver_cleanup_cli_dir :: proc(ptr: rawptr) {
 	p := (^string)(ptr)
 	if p != nil {
