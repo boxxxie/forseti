@@ -596,16 +596,14 @@ driver_attempt_invalid_memory_open :: proc(
 	mem_core := xitdb.core_memory_init()
 	defer _ = xitdb.core_destroy(&mem_core)
 
-	init_hasher := xitdb.fast_hasher() if init_cfg.mode == .Fast_Memory else xitdb.sha1_hasher()
-	init_opts := xitdb.Database_Options{skip_memory_crc = init_cfg.skip_memory_crc}
-	_, err1 := xitdb.database_init_with_options(&mem_core, init_hasher, init_opts)
+	init_hasher := forseti.fast_hasher() if init_cfg.mode == .Fast_Memory else xitdb.sha1_hasher()
+	_, err1 := xitdb.database_init(&mem_core, init_hasher)
 	if err1 != nil {
 		return forseti.xitdb_to_store_err(err1)
 	}
 
-	reopen_hasher := xitdb.fast_hasher() if reopen_cfg.mode == .Fast_Memory else xitdb.sha1_hasher()
-	reopen_opts := xitdb.Database_Options{skip_memory_crc = reopen_cfg.skip_memory_crc}
-	_, err2 := xitdb.database_init_with_options(&mem_core, reopen_hasher, reopen_opts)
+	reopen_hasher := forseti.fast_hasher() if reopen_cfg.mode == .Fast_Memory else xitdb.sha1_hasher()
+	_, err2 := xitdb.database_init(&mem_core, reopen_hasher)
 	return forseti.xitdb_to_store_err(err2)
 }
 

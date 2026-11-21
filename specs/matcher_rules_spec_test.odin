@@ -208,7 +208,7 @@ query orgs_by_domain(dom: string) {
 	then_compilation_has_zero_diagnostics(&w, "sq")
 	upon_compiling_rulebase(&w, "sq", "rb")
 
-	given_standalone_store(&w, "db", forseti.Xitdb_Config{mode = .Fast_Memory, skip_memory_crc = true})
+	given_standalone_store(&w, "db", forseti.Xitdb_Config{mode = .Fast_Memory})
 	given_watched_collection(&w, "db", ".orgs.raw")
 	upon_committing_mdm_orgs(&w, "db", {
 		{id = "org:1", name = "ACME HQ", country = "DE", domain = "acme.com", employees = 250, active = true},

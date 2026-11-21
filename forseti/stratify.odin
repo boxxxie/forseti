@@ -2,6 +2,7 @@ package forseti
 
 import "core:fmt"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:slice"
 import "core:strings"
 
@@ -246,31 +247,51 @@ stratify_ir :: proc(
 	if ir == nil {
 		return {}, nil
 	}
+	strat_scratch: vmem.Arena
+	if vmem.arena_init_growing(&strat_scratch) != nil {
+		return {}, .Out_Of_Memory
+	}
+	defer vmem.arena_destroy(&strat_scratch)
+	sa := vmem.arena_allocator(&strat_scratch)
+
 	plan.allocator = allocator
 	plan.pred_to_node = make(map[String_Id]u32, len(ir.bindings) + 8, allocator)
 
 	pred_names := make([dynamic]String_Id, 0, len(ir.bindings) + 8, allocator)
-	adj := make([dynamic][dynamic]Dep_Edge, 0, len(ir.bindings) + 8, context.temp_allocator)
+	adj := make([dynamic][dynamic]Dep_Edge, 0, len(ir.bindings) + 8, sa)
 
 	for b in ir.bindings {
-		_ = _ensure_pred_node(b.name, &pred_names, &plan.pred_to_node, &adj, context.temp_allocator)
+		_ = _ensure_pred_node(b.name, &pred_names, &plan.pred_to_node, &adj, sa)
 	}
 
-	rule_deps := make([][]_Body_Pred_Ref, len(ir.rules), context.temp_allocator)
-	rule_heads := make([][dynamic]String_Id, len(ir.rules), context.temp_allocator)
+	_Dep_Edge_Key :: struct {
+		from_node: u32,
+		to_node:   u32,
+		is_neg:    bool,
+		is_accum:  bool,
+	}
+	seen_edges := make(map[_Dep_Edge_Key]bool, len(ir.bindings) * 4 + 16, sa)
+	deps := make([dynamic]_Body_Pred_Ref, 0, 8, sa)
 
 	for r, ri in ir.rules {
-		deps := make([dynamic]_Body_Pred_Ref, 0, 4, context.temp_allocator)
+		clear(&deps)
 		_collect_clause_deps(r.when_clauses, false, false, &deps)
-		rule_deps[ri] = deps[:]
 
-		heads := make([dynamic]String_Id, 0, 2, context.temp_allocator)
 		for act in r.then_actions {
 			if act.kind == .Assert && act.target != EMPTY_STRING {
-				append(&heads, act.target)
-				h_node := _ensure_pred_node(act.target, &pred_names, &plan.pred_to_node, &adj, context.temp_allocator)
+				h_node := _ensure_pred_node(act.target, &pred_names, &plan.pred_to_node, &adj, sa)
 				for dep in deps {
-					d_node := _ensure_pred_node(dep.pred, &pred_names, &plan.pred_to_node, &adj, context.temp_allocator)
+					d_node := _ensure_pred_node(dep.pred, &pred_names, &plan.pred_to_node, &adj, sa)
+					ek := _Dep_Edge_Key{
+						from_node = h_node,
+						to_node   = d_node,
+						is_neg    = dep.is_neg,
+						is_accum  = dep.is_accum,
+					}
+					if ek in seen_edges {
+						continue
+					}
+					seen_edges[ek] = true
 					append(&adj[h_node], Dep_Edge{
 						from_node = h_node,
 						to_node   = d_node,
@@ -286,9 +307,8 @@ stratify_ir :: proc(
 			}
 		}
 		for dep in deps {
-			_ = _ensure_pred_node(dep.pred, &pred_names, &plan.pred_to_node, &adj, context.temp_allocator)
+			_ = _ensure_pred_node(dep.pred, &pred_names, &plan.pred_to_node, &adj, sa)
 		}
-		rule_heads[ri] = heads
 	}
 
 	n := len(pred_names)
@@ -296,15 +316,15 @@ stratify_ir :: proc(
 	plan.pred_scc = make([]u32, n, allocator)
 	plan.pred_stratum = make([]u32, n, allocator)
 
-	raw_sccs := make([dynamic][dynamic]u32, 0, max(n, 4), context.temp_allocator)
+	raw_sccs := make([dynamic][dynamic]u32, 0, max(n, 4), sa)
 	ts := _Tarjan_State{
 		adj      = adj[:],
-		index    = make([]i32, n, context.temp_allocator),
-		lowlink  = make([]i32, n, context.temp_allocator),
-		on_stack = make([]bool, n, context.temp_allocator),
-		stack    = make([dynamic]u32, 0, n, context.temp_allocator),
+		index    = make([]i32, n, sa),
+		lowlink  = make([]i32, n, sa),
+		on_stack = make([]bool, n, sa),
+		stack    = make([dynamic]u32, 0, n, sa),
 		sccs     = &raw_sccs,
-		alloc    = context.temp_allocator,
+		alloc    = sa,
 	}
 	for i := 0; i < n; i += 1 {
 		ts.index[i] = -1
@@ -323,7 +343,7 @@ stratify_ir :: proc(
 	}
 
 	plan.sccs = make([dynamic]Scc_Info, num_scc, allocator)
-	scc_stratum := make([]u32, num_scc, context.temp_allocator)
+	scc_stratum := make([]u32, num_scc, sa)
 
 	// Tarjan finishes dependencies first (adj = head -> body_dep), so iterate si = 0 ..< num_scc.
 	for comp, si in raw_sccs {
@@ -359,7 +379,7 @@ stratify_ir :: proc(
 		}
 
 		if has_bad {
-			cycle_str := _format_unstratified_cycle(ir, adj[:], plan.pred_scc, u32(si), first_bad, context.temp_allocator)
+			cycle_str := _format_unstratified_cycle(ir, adj[:], plan.pred_scc, u32(si), first_bad, sa)
 			if !plan.has_unstratified_cycle {
 				plan.has_unstratified_cycle = true
 				plan.first_cycle_trace = strings.clone(cycle_str, allocator) or_return
@@ -407,13 +427,13 @@ stratify_ir :: proc(
 	max_stratum := u32(0)
 
 	for r, ri in ir.rules {
-		_ = r
 		st := u32(0)
 		is_rec := false
-		heads := rule_heads[ri]
-		if len(heads) > 0 {
-			for h in heads {
-				if hnode, ok := plan.pred_to_node[h]; ok {
+		has_head := false
+		for act in r.then_actions {
+			if act.kind == .Assert && act.target != EMPTY_STRING {
+				has_head = true
+				if hnode, ok := plan.pred_to_node[act.target]; ok {
 					hst := plan.pred_stratum[hnode]
 					if hst > st {
 						st = hst
@@ -423,8 +443,11 @@ stratify_ir :: proc(
 					}
 				}
 			}
-		} else {
-			for dep in rule_deps[ri] {
+		}
+		if !has_head {
+			clear(&deps)
+			_collect_clause_deps(r.when_clauses, false, false, &deps)
+			for dep in deps {
 				if dnode, ok := plan.pred_to_node[dep.pred]; ok {
 					dst := plan.pred_stratum[dnode]
 					if dep.is_neg || dep.is_accum || plan.sccs[plan.pred_scc[dnode]].is_recursive {

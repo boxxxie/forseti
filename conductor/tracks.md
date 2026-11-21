@@ -29,7 +29,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 6: Longitudinal `hugi`/`obench` Scaling Benchmarks (`10` to `1,000,000` Rules) & Telemetry-Guided Optimization** *(Priority: Step 6 — Depends on Tracks 2, 3, 4, 5)*
+- [~] **Track 6: Longitudinal `hugi`/`obench` Scaling Benchmarks (`10` to `1,000,000` Rules) & Telemetry-Guided Optimization** *(Priority: Step 6 — Depends on Tracks 2, 3, 4, 5)*
   *Link: [./tracks/million_rule_benchmarks_and_telemetry_suite_20261121/](./tracks/million_rule_benchmarks_and_telemetry_suite_20261121/)*
 
 ---

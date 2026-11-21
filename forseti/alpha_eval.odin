@@ -18,9 +18,9 @@ fact_get_field :: proc(s: ^Session, f: ^Fact, field_idx: i16) -> (Value, bool) {
 	bdef := s.rb.bindings[f.binding_idx]
 	schema := s.rb.schemas[bdef.schema_id]
 	sf := schema.fields[field_idx]
-	fname := interner_get(&s.rb.interner, sf.name)
-	path := [1]string{fname}
-	val, found, err := cursor_read_field_path(f.cursor, path[:], &s.interner, sf.type.kind)
+	pk := s.rb.schema_field_hashes[bdef.schema_id][field_idx]
+	path := [1]Prehashed_Key{pk}
+	val, found, err := cursor_read_field_path_prehashed(f.cursor, path[:], &s.interner, sf.type.kind)
 	if err != nil || !found {
 		return {}, false
 	}

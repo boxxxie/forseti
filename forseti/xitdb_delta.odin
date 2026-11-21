@@ -33,6 +33,7 @@ Sync_Result :: struct {
 @(private)
 Watched_Collection :: struct {
 	path:                 string,
+	path_keys:            []Prehashed_Key,
 	has_prev:             bool,
 	prev_collection_slot: xitdb.Slot,
 	logical_keys:         map[string]u64,
@@ -82,6 +83,7 @@ delta_syncer_destroy :: proc(s: ^Delta_Syncer) {
 			delete(k, s.allocator)
 		}
 		delete(wc.logical_keys)
+		delete(wc.path_keys, s.allocator)
 		delete(wc.path, s.allocator)
 	}
 	delete(s.watched)
@@ -107,11 +109,38 @@ delta_syncer_watch :: proc(s: ^Delta_Syncer, path: string) -> Store_Error {
 		delete(cloned, s.allocator)
 		return err2
 	}
+	seg_count := 0
+	rest := cloned
+	for {
+		_, has := _next_path_segment(&rest)
+		if !has {
+			break
+		}
+		seg_count += 1
+	}
+	path_keys, err3 := make([]Prehashed_Key, seg_count, s.allocator)
+	if err3 != nil {
+		delete(lkeys)
+		delete(cloned, s.allocator)
+		return err3
+	}
+	rest = cloned
+	pi := 0
+	for {
+		seg, has := _next_path_segment(&rest)
+		if !has {
+			break
+		}
+		path_keys[pi] = prehashed_key_make(seg)
+		pi += 1
+	}
 	_, aerr := append(&s.watched, Watched_Collection{
 		path         = cloned,
+		path_keys    = path_keys,
 		logical_keys = lkeys,
 	})
 	if aerr != nil {
+		delete(path_keys, s.allocator)
 		delete(lkeys)
 		delete(cloned, s.allocator)
 		return aerr
@@ -456,7 +485,7 @@ delta_syncer_sync :: proc(
 	out.was_compacted = compacted
 
 	for &wc in s.watched {
-		cur_col_cur, cur_ok, cc_err := store_resolve_path(cur_m_cur, wc.path)
+		cur_col_cur, cur_ok, cc_err := store_resolve_path_prehashed(cur_m_cur, wc.path_keys)
 		if cc_err != nil {
 			return cc_err
 		}
@@ -481,7 +510,7 @@ delta_syncer_sync :: proc(
 			continue
 		}
 
-		prev_col_cur, prev_ok, pc_err := store_resolve_path(prev_m_cur, wc.path)
+		prev_col_cur, prev_ok, pc_err := store_resolve_path_prehashed(prev_m_cur, wc.path_keys)
 		if pc_err != nil {
 			return pc_err
 		}

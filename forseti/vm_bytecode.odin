@@ -55,6 +55,7 @@ Field_Access_Desc :: struct {
 	fact_slot:     u8,
 	field_idx:     i16,
 	segments:      []string,
+	seg_hashes:    []Prehashed_Key,
 	expected_type: Type_Kind,
 }
 
@@ -131,14 +132,17 @@ reg_free :: proc(ra: ^Reg_Alloc, reg: u8) {
 
 @(private)
 Vm_Compiler :: struct {
-	env:          ^Vm_Compile_Env,
-	ra:           Reg_Alloc,
-	code:         [dynamic]Instruction,
-	consts:       [dynamic]Value,
-	field_refs:   [dynamic]Field_Access_Desc,
-	decide_calls: [dynamic]Decide_Call_Desc,
-	ranges:       [dynamic]Range_Desc,
-	alloc:        mem.Allocator,
+	env:           ^Vm_Compile_Env,
+	ra:            Reg_Alloc,
+	code:          [dynamic]Instruction,
+	consts:        [dynamic]Value,
+	field_refs:    [dynamic]Field_Access_Desc,
+	decide_calls:  [dynamic]Decide_Call_Desc,
+	ranges:        [dynamic]Range_Desc,
+	tmp_segs:      [dynamic]String_Id,
+	tmp_end_jmps:  [dynamic]int,
+	scratch_alloc: mem.Allocator,
+	alloc:         mem.Allocator,
 }
 
 vm_program_destroy :: proc(p: ^Bytecode_Program) {
@@ -148,6 +152,7 @@ vm_program_destroy :: proc(p: ^Bytecode_Program) {
 	if p.allocator.procedure != nil {
 		for fr in p.field_refs {
 			delete(fr.segments, p.allocator)
+			delete(fr.seg_hashes, p.allocator)
 		}
 		for dc in p.decide_calls {
 			delete(dc.args, p.allocator)
@@ -232,11 +237,12 @@ vmc_collect_field_chain :: proc(
 
 @(private)
 vmc_compile_field_access :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Error) {
-	segs := make([dynamic]String_Id, 0, 4, context.temp_allocator)
-	base_eid, chain_ok := vmc_collect_field_chain(c, eid, &segs)
-	if !chain_ok || base_eid == INVALID_EXPR || len(segs) == 0 {
+	clear(&c.tmp_segs)
+	base_eid, chain_ok := vmc_collect_field_chain(c, eid, &c.tmp_segs)
+	if !chain_ok || base_eid == INVALID_EXPR || len(c.tmp_segs) == 0 {
 		return 0, .Unsupported_Expr
 	}
+	segs := c.tmp_segs[:]
 	base_expr := c.env.ir.exprs[base_eid]
 	if base_expr.kind != .Var {
 		return 0, .Unsupported_Expr
@@ -282,14 +288,18 @@ vmc_compile_field_access :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err
 				}
 			}
 			str_segs := make([]string, len(segs), c.alloc)
+			seg_hashes := make([]Prehashed_Key, len(segs), c.alloc)
 			for sid, si in segs {
-				str_segs[si] = ir_string(c.env.ir, sid)
+				s := ir_string(c.env.ir, sid)
+				str_segs[si] = s
+				seg_hashes[si] = prehashed_key_make(s)
 			}
 			ref_idx := u16(len(c.field_refs))
 			append(&c.field_refs, Field_Access_Desc{
 				fact_slot     = u8(fi),
 				field_idx     = field_idx,
 				segments      = str_segs,
+				seg_hashes    = seg_hashes,
 				expected_type = exp_type,
 			})
 			r, r_ok := reg_alloc(&c.ra)
@@ -474,25 +484,27 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 			return 0, .Register_Overflow
 		}
 		vmc_emit_load_const(c, res_r, false)
-		end_jmps := make([dynamic]int, 0, int(e.extra_span.count), context.temp_allocator)
+		end_start := len(c.tmp_end_jmps)
 
 		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
 			cand_r, cerr := vmc_compile_expr(c, c.env.ir.extra_exprs[i])
 			if cerr != .None {
+				resize(&c.tmp_end_jmps, end_start)
 				reg_free(&c.ra, lhs_r)
 				reg_free(&c.ra, res_r)
 				return 0, cerr
 			}
 			append(&c.code, Instruction{op = .Eq, dst = res_r, lhs = lhs_r, rhs = cand_r})
 			reg_free(&c.ra, cand_r)
-			append(&end_jmps, len(c.code))
+			append(&c.tmp_end_jmps, len(c.code))
 			append(&c.code, Instruction{op = .Jmp_If_True, dst = res_r, lhs = 0, rhs = 0})
 		}
-		for ji in end_jmps {
+		for ji in c.tmp_end_jmps[end_start:] {
 			skip := len(c.code) - (ji + 1)
 			c.code[ji].lhs = u8(skip >> 8)
 			c.code[ji].rhs = u8(skip & 0xff)
 		}
+		resize(&c.tmp_end_jmps, end_start)
 		reg_free(&c.ra, lhs_r)
 		return res_r, .None
 
@@ -500,6 +512,62 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 		return 0, .Unsupported_Expr
 	}
 	return 0, .Unsupported_Expr
+}
+
+// Initializes a reusable Vm_Compiler backed by `scratch_alloc`.
+vm_compiler_init_scratch :: proc(c: ^Vm_Compiler, scratch_alloc: mem.Allocator) {
+	c^ = Vm_Compiler{
+		code          = make([dynamic]Instruction, 0, 16, scratch_alloc),
+		consts        = make([dynamic]Value, 0, 8, scratch_alloc),
+		field_refs    = make([dynamic]Field_Access_Desc, 0, 8, scratch_alloc),
+		decide_calls  = make([dynamic]Decide_Call_Desc, 0, 2, scratch_alloc),
+		ranges        = make([dynamic]Range_Desc, 0, 2, scratch_alloc),
+		tmp_segs      = make([dynamic]String_Id, 0, 4, scratch_alloc),
+		tmp_end_jmps  = make([dynamic]int, 0, 8, scratch_alloc),
+		scratch_alloc = scratch_alloc,
+	}
+}
+
+@(private)
+_vm_compiler_reset_for_compile :: proc(c: ^Vm_Compiler, env: ^Vm_Compile_Env, alloc: mem.Allocator) {
+	c.env = env
+	c.ra = {}
+	c.alloc = alloc
+	clear(&c.code)
+	clear(&c.consts)
+	clear(&c.field_refs)
+	clear(&c.decide_calls)
+	clear(&c.ranges)
+	clear(&c.tmp_segs)
+	clear(&c.tmp_end_jmps)
+}
+
+// Compiles a single Expr_IR into a standalone register-recycled Bytecode_Program using a reusable scratch compiler.
+vm_compile_expr_reusable :: proc(
+	c: ^Vm_Compiler,
+	env: ^Vm_Compile_Env,
+	eid: Expr_Id,
+	alloc := context.allocator,
+) -> (prog: Bytecode_Program, err: Vm_Error) {
+	if c == nil || env == nil || env.ir == nil {
+		return {}, .Unsupported_Expr
+	}
+	_vm_compiler_reset_for_compile(c, env, alloc)
+	defer if err != .None {
+		for fr in c.field_refs {
+			delete(fr.segments, alloc)
+			delete(fr.seg_hashes, alloc)
+		}
+		for dc in c.decide_calls {
+			delete(dc.args, alloc)
+		}
+	}
+
+	res_reg := vmc_compile_expr(c, eid) or_return
+	append(&c.code, Instruction{op = .Halt, dst = res_reg, lhs = 0, rhs = 0})
+	reg_free(&c.ra, res_reg)
+
+	return _finalize_vm_program(c), .None
 }
 
 // Compiles a single Expr_IR into a standalone register-recycled Bytecode_Program ending with .Halt.
@@ -511,61 +579,35 @@ vm_compile_expr :: proc(
 	if env == nil || env.ir == nil {
 		return {}, .Unsupported_Expr
 	}
-	c := Vm_Compiler{
-		env          = env,
-		code         = make([dynamic]Instruction, 0, 16, context.temp_allocator),
-		consts       = make([dynamic]Value, 0, 8, context.temp_allocator),
-		field_refs   = make([dynamic]Field_Access_Desc, 0, 4, context.temp_allocator),
-		decide_calls = make([dynamic]Decide_Call_Desc, 0, 2, context.temp_allocator),
-		ranges       = make([dynamic]Range_Desc, 0, 2, context.temp_allocator),
-		alloc        = alloc,
-	}
-	defer if err != .None {
-		for fr in c.field_refs {
-			delete(fr.segments, alloc)
-		}
-		for dc in c.decide_calls {
-			delete(dc.args, alloc)
-		}
-	}
-
-	res_reg := vmc_compile_expr(&c, eid) or_return
-	append(&c.code, Instruction{op = .Halt, dst = res_reg, lhs = 0, rhs = 0})
-	reg_free(&c.ra, res_reg)
-
-	return _finalize_vm_program(&c), .None
+	c: Vm_Compiler
+	vm_compiler_init_scratch(&c, context.temp_allocator)
+	return vm_compile_expr_reusable(&c, env, eid, alloc)
 }
 
-// Compiles a `decide table_name(col: expr, ...)` clause into bytecode storing result into `decide_slot`.
-vm_compile_decide :: proc(
+// Compiles a `decide table_name(col: expr, ...)` clause using a reusable scratch compiler.
+vm_compile_decide_reusable :: proc(
+	c: ^Vm_Compiler,
 	env: ^Vm_Compile_Env,
 	table_name: String_Id,
 	args: []Field_Binding_IR,
 	decide_slot: u8,
 	alloc := context.allocator,
 ) -> (prog: Bytecode_Program, err: Vm_Error) {
-	if env == nil || env.ir == nil {
+	if c == nil || env == nil || env.ir == nil {
 		return {}, .Unsupported_Expr
 	}
-	c := Vm_Compiler{
-		env          = env,
-		code         = make([dynamic]Instruction, 0, 16, context.temp_allocator),
-		consts       = make([dynamic]Value, 0, 8, context.temp_allocator),
-		field_refs   = make([dynamic]Field_Access_Desc, 0, 8, context.temp_allocator),
-		decide_calls = make([dynamic]Decide_Call_Desc, 0, 2, context.temp_allocator),
-		ranges       = make([dynamic]Range_Desc, 0, 2, context.temp_allocator),
-		alloc        = alloc,
-	}
+	_vm_compiler_reset_for_compile(c, env, alloc)
 	defer if err != .None {
 		for fr in c.field_refs {
 			delete(fr.segments, alloc)
+			delete(fr.seg_hashes, alloc)
 		}
 		for dc in c.decide_calls {
 			delete(dc.args, alloc)
 		}
 	}
 
-	tidx, tok := vmc_find_table(&c, table_name)
+	tidx, tok := vmc_find_table(c, table_name)
 	if !tok || int(tidx) >= len(env.ir.tables) {
 		return {}, .Unknown_Table
 	}
@@ -578,7 +620,7 @@ vm_compile_decide :: proc(
 			delete(arg_specs, alloc)
 			return {}, .Missing_Field
 		}
-		r, r_err := vmc_compile_expr(&c, fb.expr)
+		r, r_err := vmc_compile_expr(c, fb.expr)
 		if r_err != .None {
 			for j := 0; j < i; j += 1 {
 				reg_free(&c.ra, arg_specs[j].reg)
@@ -615,7 +657,23 @@ vm_compile_decide :: proc(
 	append(&c.code, Instruction{op = .Halt, dst = out_reg, lhs = 0, rhs = 0})
 	reg_free(&c.ra, out_reg)
 
-	return _finalize_vm_program(&c), .None
+	return _finalize_vm_program(c), .None
+}
+
+// Compiles a `decide table_name(col: expr, ...)` clause into bytecode storing result into `decide_slot`.
+vm_compile_decide :: proc(
+	env: ^Vm_Compile_Env,
+	table_name: String_Id,
+	args: []Field_Binding_IR,
+	decide_slot: u8,
+	alloc := context.allocator,
+) -> (prog: Bytecode_Program, err: Vm_Error) {
+	if env == nil || env.ir == nil {
+		return {}, .Unsupported_Expr
+	}
+	c: Vm_Compiler
+	vm_compiler_init_scratch(&c, context.temp_allocator)
+	return vm_compile_decide_reusable(&c, env, table_name, args, decide_slot, alloc)
 }
 
 @(private)

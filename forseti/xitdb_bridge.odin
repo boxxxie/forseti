@@ -14,11 +14,10 @@ Xitdb_Mode :: enum u8 {
 	Fast_Memory,
 }
 
-// Xitdb_Config configures xitdb initialization guardrails and opt-in fast-memory features.
+// Xitdb_Config configures xitdb initialization guardrails and opt-in fast-memory hasher.
 Xitdb_Config :: struct {
-	mode:            Xitdb_Mode,
-	custom_hasher:   xitdb.Hasher,
-	skip_memory_crc: bool,
+	mode:          Xitdb_Mode,
+	custom_hasher: xitdb.Hasher,
 }
 
 Store_Mode :: enum u8 {
@@ -92,31 +91,26 @@ _core_has_disk_backing :: proc(core: ^xitdb.Core) -> bool {
 }
 
 @(private)
-_resolve_xitdb_hasher_and_opts :: proc(
+_resolve_xitdb_hasher :: proc(
 	cfg: Xitdb_Config,
 	is_disk: bool,
-) -> (h: xitdb.Hasher, opts: xitdb.Database_Options, err: Store_Error) {
+) -> (h: xitdb.Hasher, err: Store_Error) {
 	if is_disk {
-		if cfg.mode == .Fast_Memory || cfg.custom_hasher.id == xitdb.FAST_HASH_ID {
-			return {}, {}, .Disk_Fast_Mode_Forbidden
-		}
-		if cfg.skip_memory_crc {
-			return {}, {}, .Invalid_Config
+		if cfg.mode == .Fast_Memory || cfg.custom_hasher.id == FAST_HASH_ID {
+			return {}, .Disk_Fast_Mode_Forbidden
 		}
 	}
 
 	switch cfg.mode {
 	case .Safe_V2:
-		if cfg.skip_memory_crc || cfg.custom_hasher.id == xitdb.FAST_HASH_ID {
-			return {}, {}, .Invalid_Config
+		if cfg.custom_hasher.id == FAST_HASH_ID {
+			return {}, .Invalid_Config
 		}
 		h = cfg.custom_hasher if cfg.custom_hasher.hash_proc != nil else xitdb.sha1_hasher()
-		opts = xitdb.Database_Options{skip_memory_crc = false}
 	case .Fast_Memory:
-		h = cfg.custom_hasher if cfg.custom_hasher.hash_proc != nil else xitdb.fast_hasher()
-		opts = xitdb.Database_Options{skip_memory_crc = cfg.skip_memory_crc}
+		h = cfg.custom_hasher if cfg.custom_hasher.hash_proc != nil else fast_hasher()
 	}
-	return h, opts, nil
+	return h, nil
 }
 
 // Initializes an in-memory xitdb store inside `b` (never move `b` after calling).
@@ -129,7 +123,7 @@ store_bridge_init_standalone :: proc(
 	if b == nil {
 		return .Invalid_Config
 	}
-	h, opts, r_err := _resolve_xitdb_hasher_and_opts(cfg, is_disk = false)
+	h, r_err := _resolve_xitdb_hasher(cfg, is_disk = false)
 	if r_err != nil {
 		return r_err
 	}
@@ -143,7 +137,7 @@ store_bridge_init_standalone :: proc(
 		allocator = allocator,
 	}
 	b.owned_core = xitdb.core_memory_init(allocator)
-	db, db_err := xitdb.database_init_with_options(&b.owned_core, h, opts)
+	db, db_err := xitdb.database_init(&b.owned_core, h)
 	if db_err != nil {
 		_ = xitdb.core_destroy(&b.owned_core)
 		b^ = {}
@@ -166,7 +160,7 @@ store_bridge_open_file :: proc(
 	if b == nil || len(path) == 0 {
 		return .Invalid_Config if b == nil else .Empty_Path
 	}
-	h, opts, r_err := _resolve_xitdb_hasher_and_opts(cfg, is_disk = true)
+	h, r_err := _resolve_xitdb_hasher(cfg, is_disk = true)
 	if r_err != nil {
 		return r_err
 	}
@@ -186,7 +180,7 @@ store_bridge_open_file :: proc(
 		telemetry  = telemetry,
 		allocator  = allocator,
 	}
-	db, db_err := xitdb.database_init_with_options(&b.owned_core, h, opts)
+	db, db_err := xitdb.database_init(&b.owned_core, h)
 	if db_err != nil {
 		_ = xitdb.core_destroy(&b.owned_core, close_file = true)
 		b^ = {}
@@ -209,7 +203,7 @@ store_bridge_init_attached :: proc(
 		return .Invalid_Config
 	}
 	is_disk := _core_has_disk_backing(db.core)
-	_, _, r_err := _resolve_xitdb_hasher_and_opts(cfg, is_disk)
+	_, r_err := _resolve_xitdb_hasher(cfg, is_disk)
 	if r_err != nil {
 		return r_err
 	}
@@ -411,6 +405,74 @@ store_resolve_path :: proc(
 	}
 }
 
+// Resolves a pre-hashed path slice relative to `moment_cur` without runtime string parsing or hashing.
+store_resolve_path_prehashed :: proc(
+	moment_cur: xitdb.Read_Cursor,
+	path_keys: []Prehashed_Key,
+) -> (cur: xitdb.Read_Cursor, found: bool, err: Store_Error) {
+	cur = moment_cur
+	for i := 0; i < len(path_keys); i += 1 {
+		pk := &path_keys[i]
+		next_cur, next_ok, l_err := store_lookup_record_prehashed(cur, pk)
+		if l_err != nil {
+			return {}, false, l_err
+		}
+		if !next_ok {
+			return {}, false, nil
+		}
+		cur = next_cur
+	}
+	return cur, true, nil
+}
+
+// Looks up a pre-hashed key inside a map-like xitdb cursor (`Hash_Map`, `Counted_Hash_Map`, `Sorted_Map`, or sets).
+store_lookup_record_prehashed :: proc(
+	col_cur: xitdb.Read_Cursor,
+	pk: ^Prehashed_Key,
+) -> (cur: xitdb.Read_Cursor, found: bool, err: Store_Error) {
+	sp, sp_err := xitdb.cursor_resolved(col_cur)
+	if sp_err != nil {
+		return {}, false, xitdb_to_store_err(sp_err)
+	}
+	#partial switch sp.slot.tag {
+	case .None:
+		return {}, false, nil
+	case .Hash_Map, .Counted_Hash_Map:
+		rm := xitdb.Read_Hash_Map{cursor = col_cur}
+		mc, g_err := hash_map_get_cursor_prehashed(rm, pk)
+		if g_err != nil {
+			return {}, false, xitdb_to_store_err(g_err)
+		}
+		res, ok := mc.?
+		return res, ok, nil
+	case .Sorted_Map:
+		sm := xitdb.Read_Sorted_Map{cursor = col_cur}
+		mc, g_err := xitdb.sorted_map_get_cursor(sm, pk.key)
+		if g_err != nil {
+			return {}, false, xitdb_to_store_err(g_err)
+		}
+		res, ok := mc.?
+		return res, ok, nil
+	case .Hash_Set, .Counted_Hash_Set:
+		hs := xitdb.Read_Hash_Set{cursor = col_cur}
+		mc, g_err := hash_set_get_cursor_prehashed(hs, pk)
+		if g_err != nil {
+			return {}, false, xitdb_to_store_err(g_err)
+		}
+		res, ok := mc.?
+		return res, ok, nil
+	case .Sorted_Set:
+		ss := xitdb.Read_Sorted_Set{cursor = col_cur}
+		contains, c_err := xitdb.sorted_set_contains(ss, pk.key)
+		if c_err != nil {
+			return {}, false, xitdb_to_store_err(c_err)
+		}
+		return col_cur, contains, nil
+	case:
+		return {}, false, .Not_A_Collection
+	}
+}
+
 // Looks up a key inside a map-like xitdb cursor (`Hash_Map`, `Counted_Hash_Map`, `Sorted_Map`, or sets).
 store_lookup_record :: proc(
 	col_cur: xitdb.Read_Cursor,
@@ -484,6 +546,34 @@ _walk_write_path_parent :: proc(
 		}
 		cur = next_wc
 	}
+}
+
+// Ensures intermediate Hash_Map nodes exist along pre-hashed `path_keys` and initializes the leaf Write_Hash_Map.
+store_write_path_ensure_map_prehashed :: proc(
+	moment_wc: ^xitdb.Write_Cursor,
+	path_keys: []Prehashed_Key,
+) -> (m: xitdb.Write_Hash_Map, err: Store_Error) {
+	if moment_wc == nil {
+		return {}, .Invalid_Config
+	}
+	cur := moment_wc^
+	for i := 0; i < len(path_keys); i += 1 {
+		pk := &path_keys[i]
+		hm, h_err := xitdb.write_hash_map_init(cur)
+		if h_err != nil {
+			return {}, xitdb_to_store_err(h_err)
+		}
+		next_wc, n_err := hash_map_put_cursor_prehashed(&hm, pk)
+		if n_err != nil {
+			return {}, xitdb_to_store_err(n_err)
+		}
+		cur = next_wc
+	}
+	hm, h_err := xitdb.write_hash_map_init(cur)
+	if h_err != nil {
+		return {}, xitdb_to_store_err(h_err)
+	}
+	return hm, nil
 }
 
 // Ensures intermediate Hash_Map nodes exist along `dot_path` and initializes the leaf as a Write_Hash_Map.

@@ -112,20 +112,19 @@ test_xitdb_safe_v2_wire_layout_and_fast_hasher :: proc(t: ^testing.T) {
 	testing.expect_value(t, sb_safe.db.header.version, u16(2))
 	testing.expect_value(t, sb_safe.db.header.hash_size, u16(20))
 	testing.expect_value(t, sb_safe.db.header.hash_id, u32(0))
-	testing.expect(t, !sb_safe.db.skip_memory_crc)
 
 	safe_csz, _ := xitdb.database_committed_size(sb_safe.db)
 	safe_trailer, t_err := xitdb.database_read_root_trailer(sb_safe.db, safe_csz)
 	testing.expect_value(t, t_err, nil)
 	testing.expect(t, safe_trailer.checksum != 0)
 
-	// Opt-in Fast_Memory uses 16-byte fast_hasher ("fh16") and zeroes CRC trailer when requested.
+	// Opt-in Fast_Memory uses Forseti's 16-byte fast_hasher ("fh16") while keeping xitdb CRC-64/XZ trailers.
 	sb_fast := new(forseti.Store_Bridge)
 	testing.expect_value(
 		t,
 		forseti.store_bridge_init_standalone(
 			sb_fast,
-			forseti.Xitdb_Config{mode = .Fast_Memory, skip_memory_crc = true},
+			forseti.Xitdb_Config{mode = .Fast_Memory},
 		),
 		nil,
 	)
@@ -135,20 +134,26 @@ test_xitdb_safe_v2_wire_layout_and_fast_hasher :: proc(t: ^testing.T) {
 	}
 
 	testing.expect_value(t, sb_fast.db.header.hash_size, u16(16))
-	testing.expect_value(t, sb_fast.db.header.hash_id, xitdb.FAST_HASH_ID)
-	testing.expect(t, sb_fast.db.skip_memory_crc)
+	testing.expect_value(t, sb_fast.db.header.hash_id, forseti.FAST_HASH_ID)
 
 	fast_csz, _ := xitdb.database_committed_size(sb_fast.db)
 	fast_trailer, ft_err := xitdb.database_read_root_trailer(sb_fast.db, fast_csz)
 	testing.expect_value(t, ft_err, nil)
-	testing.expect_value(t, fast_trailer.checksum, u64(0))
+	testing.expect(t, fast_trailer.checksum != 0)
 
 	d1, d2, d3: [16]u8
-	xitdb.fast_hash128_sum_into(transmute([]u8)string("org:acme"), d1[:])
-	xitdb.fast_hash128_sum_into(transmute([]u8)string("org:acme"), d2[:])
-	xitdb.fast_hash128_sum_into(transmute([]u8)string("org:beta"), d3[:])
+	forseti.fast_hash128_sum_into(transmute([]u8)string("org:acme"), d1[:])
+	forseti.fast_hash128_sum_into(transmute([]u8)string("org:acme"), d2[:])
+	forseti.fast_hash128_sum_into(transmute([]u8)string("org:beta"), d3[:])
 	testing.expect(t, slice.equal(d1[:], d2[:]))
 	testing.expect(t, !slice.equal(d1[:], d3[:]))
+
+	// Prehashed_Key matches runtime SHA-1 & fast128 digests identically.
+	pk := forseti.prehashed_key_make("org:acme")
+	testing.expect(t, slice.equal(pk.fast128[:], d1[:]))
+	sha1_rt: [20]u8
+	xitdb.sha1_sum_into(transmute([]u8)string("org:acme"), sha1_rt[:])
+	testing.expect(t, slice.equal(pk.sha1[:], sha1_rt[:]))
 }
 
 @(test)
@@ -156,7 +161,7 @@ test_xitdb_sorted_diff_with_stats_and_eav_helpers :: proc(t: ^testing.T) {
 	core := xitdb.core_memory_init()
 	defer _ = xitdb.core_destroy(&core)
 
-	db, d_err := xitdb.database_init(&core, xitdb.fast_hasher())
+	db, d_err := xitdb.database_init(&core, forseti.fast_hasher())
 	testing.expect_value(t, d_err, nil)
 
 	// Wait: database_init works cleanly with custom fast_hasher without skip_memory_crc!

@@ -164,12 +164,14 @@ Rulebase :: struct {
 	rules:             []Rule_Compiled,
 	queries:           []Query_Compiled,
 	programs:          []Bytecode_Program,
-	strata_count:      u32,
-	stratum_recursive: []bool,
-	stratum_rules:     [][]u32,
-	zero_input_segs:   []u32,
-	sccs:              []Scc_Info,
-	telemetry:         ^Telemetry_Sink,
+	strata_count:        u32,
+	stratum_recursive:   []bool,
+	stratum_rules:       [][]u32,
+	zero_input_segs:     []u32,
+	sccs:                []Scc_Info,
+	schema_field_hashes: [][]Prehashed_Key,
+	binding_path_hashes: [][]Prehashed_Key,
+	telemetry:           ^Telemetry_Sink,
 }
 
 value_to_key :: proc "contextless" (v: Value) -> (k: Value_Key, ok: bool) {
@@ -223,6 +225,7 @@ Rb_Build_Ctx :: struct {
 	ir:              ^Rulebase_IR,
 	rb:              ^Rulebase,
 	alloc:           mem.Allocator,
+	scratch_alloc:   mem.Allocator,
 	alpha_nodes:     [dynamic]Alpha_Node,
 	alpha_terminals: [dynamic]Alpha_Terminal,
 	beta_nodes:      [dynamic]Beta_Node_Def,
@@ -234,6 +237,16 @@ Rb_Build_Ctx :: struct {
 	rule_stratum:    []u32,
 	rule_recursive:  []bool,
 	shared_count:    u64,
+	bound_vars:      map[String_Id]u16,
+	var_map:         map[String_Id]u8,
+	fact_descs:      [dynamic]Vm_Fact_Slot_Desc,
+	decide_descs:    [dynamic]Vm_Decide_Slot_Desc,
+	input_links:     [dynamic]Segment_Input_Link,
+	pat_preds:       [dynamic]Alpha_Pred,
+	pat_binds:       [dynamic]Alpha_Field_Bind,
+	pat_joins:       [dynamic]Join_Key_Pair,
+	pat_res:         [dynamic]u32,
+	vm_compiler:     Vm_Compiler,
 }
 
 @(private)
@@ -436,10 +449,14 @@ compile_pattern_clause :: proc(
 		})
 	}
 
-	preds := make([dynamic]Alpha_Pred, 0, len(cl.fields), context.temp_allocator)
-	bind_list := make([dynamic]Alpha_Field_Bind, 0, len(cl.fields), context.temp_allocator)
-	join_list := make([dynamic]Join_Key_Pair, 0, 4, context.temp_allocator)
-	res_list := make([dynamic]u32, 0, 2, context.temp_allocator)
+	clear(&ctx.pat_preds)
+	clear(&ctx.pat_binds)
+	clear(&ctx.pat_joins)
+	clear(&ctx.pat_res)
+	preds := &ctx.pat_preds
+	bind_list := &ctx.pat_binds
+	join_list := &ctx.pat_joins
+	res_list := &ctx.pat_res
 
 	for fb in cl.fields {
 		fidx := -1
@@ -464,7 +481,7 @@ compile_pattern_clause :: proc(
 				}
 			}
 			vk, _ := value_to_key(v)
-			append(&preds, Alpha_Pred{
+			append(preds, Alpha_Pred{
 				is_eq     = true,
 				field_idx = i16(fidx),
 				eq_key    = vk,
@@ -482,14 +499,14 @@ compile_pattern_clause :: proc(
 				}
 				if ex.binary_op == .Eq {
 					vk, _ := value_to_key(v)
-					append(&preds, Alpha_Pred{
+					append(preds, Alpha_Pred{
 						is_eq     = true,
 						field_idx = i16(fidx),
 						eq_key    = vk,
 						const_val = v,
 					})
 				} else {
-					append(&preds, Alpha_Pred{
+					append(preds, Alpha_Pred{
 						is_eq     = false,
 						field_idx = i16(fidx),
 						op        = ex.binary_op,
@@ -501,7 +518,7 @@ compile_pattern_clause :: proc(
 		}
 		if ex.kind == .Var {
 			if existing_slot, seen := bound_vars^[ex.str_id]; seen {
-				append(&join_list, Join_Key_Pair{
+				append(join_list, Join_Key_Pair{
 					left_var_slot   = existing_slot,
 					right_field_idx = i16(fidx),
 				})
@@ -510,7 +527,7 @@ compile_pattern_clause :: proc(
 			slot := next_var^
 			next_var^ += 1
 			bound_vars^[ex.str_id] = slot
-			append(&bind_list, Alpha_Field_Bind{
+			append(bind_list, Alpha_Field_Bind{
 				field_idx = i16(fidx),
 				var_slot  = slot,
 			})
@@ -519,17 +536,17 @@ compile_pattern_clause :: proc(
 
 		// Residual field expression evaluated against already-bound vars & current fact.
 		// Compile `expr_rhs == cur_fact.field_name` cleanly via VM.
-		var_map := make(map[String_Id]u8, len(bound_vars^), context.temp_allocator)
+		clear(&ctx.var_map)
 		for k, v in bound_vars^ {
-			var_map[k] = u8(v)
+			ctx.var_map[k] = u8(v)
 		}
 		env := Vm_Compile_Env{
 			ir         = ctx.ir,
 			tables     = ctx.rb.tables,
-			var_names  = var_map,
+			var_names  = ctx.var_map,
 			fact_descs = fact_descs[:],
 		}
-		prog, verr := vm_compile_expr(&env, fb.expr, ctx.alloc)
+		prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, fb.expr, ctx.alloc)
 		if verr != .None {
 			return 0, 0, nil, nil, nil, .Vm_Compile_Failed
 		}
@@ -537,16 +554,16 @@ compile_pattern_clause :: proc(
 		_ = pat_slot
 	}
 
-	alpha_id = insert_alpha_chain(ctx, bidx, preds[:], bind_list[:])
+	alpha_id = insert_alpha_chain(ctx, bidx, preds^[:], bind_list^[:])
 
-	out_binds := make([]Alpha_Field_Bind, len(bind_list), ctx.alloc)
-	copy(out_binds, bind_list[:])
+	out_binds := make([]Alpha_Field_Bind, len(bind_list^), ctx.alloc)
+	copy(out_binds, bind_list^[:])
 
-	out_joins := make([]Join_Key_Pair, len(join_list), ctx.alloc)
-	copy(out_joins, join_list[:])
+	out_joins := make([]Join_Key_Pair, len(join_list^), ctx.alloc)
+	copy(out_joins, join_list^[:])
 
-	out_res := make([]u32, len(res_list), ctx.alloc)
-	copy(out_res, res_list[:])
+	out_res := make([]u32, len(res_list^), ctx.alloc)
+	copy(out_res, res_list^[:])
 
 	return alpha_id, bidx, out_binds, out_joins, out_res, .None
 }
@@ -618,21 +635,39 @@ rulebase_compile :: proc(
 		rb.table_by_name[ir.tables[ti].name] = u32(ti)
 	}
 
+	build_scratch: vmem.Arena
+	if vmem.arena_init_growing(&build_scratch) != nil {
+		return {}, .Alloc_Failed
+	}
+	defer vmem.arena_destroy(&build_scratch)
+	sa := vmem.arena_allocator(&build_scratch)
+
 	ctx := Rb_Build_Ctx{
 		ir              = ir,
 		rb              = &rb,
 		alloc           = a,
-		alpha_nodes     = make([dynamic]Alpha_Node, 0, max(len(ir.rules), 16), context.temp_allocator),
-		alpha_terminals = make([dynamic]Alpha_Terminal, 0, max(len(ir.rules), 16), context.temp_allocator),
-		beta_nodes      = make([dynamic]Beta_Node_Def, 0, max(len(ir.rules) * 2, 16), context.temp_allocator),
-		subnetworks     = make([dynamic]Subnetwork_Def, 0, 8, context.temp_allocator),
-		segments        = make([dynamic]Segment_Def, 0, max(len(ir.rules), 16), context.temp_allocator),
-		zero_input_segs = make([dynamic]u32, 0, 4, context.temp_allocator),
-		programs        = make([dynamic]Bytecode_Program, 0, max(len(ir.rules), 16), context.temp_allocator),
-		sub_lists       = make(map[u32][dynamic]Alpha_Segment_Target, 32, context.temp_allocator),
+		scratch_alloc   = sa,
+		alpha_nodes     = make([dynamic]Alpha_Node, 0, max(len(ir.rules), 16), sa),
+		alpha_terminals = make([dynamic]Alpha_Terminal, 0, max(len(ir.rules), 16), sa),
+		beta_nodes      = make([dynamic]Beta_Node_Def, 0, max(len(ir.rules) * 2, 16), sa),
+		subnetworks     = make([dynamic]Subnetwork_Def, 0, 8, sa),
+		segments        = make([dynamic]Segment_Def, 0, max(len(ir.rules), 16), sa),
+		zero_input_segs = make([dynamic]u32, 0, 4, sa),
+		programs        = make([dynamic]Bytecode_Program, 0, max(len(ir.rules), 16), sa),
+		sub_lists       = make(map[u32][dynamic]Alpha_Segment_Target, 32, sa),
 		rule_stratum    = strat_plan.rule_stratum,
 		rule_recursive  = strat_plan.rule_recursive,
+		bound_vars      = make(map[String_Id]u16, 16, sa),
+		var_map         = make(map[String_Id]u8, 16, sa),
+		fact_descs      = make([dynamic]Vm_Fact_Slot_Desc, 0, 8, sa),
+		decide_descs    = make([dynamic]Vm_Decide_Slot_Desc, 0, 4, sa),
+		input_links     = make([dynamic]Segment_Input_Link, 0, 8, sa),
+		pat_preds       = make([dynamic]Alpha_Pred, 0, 8, sa),
+		pat_binds       = make([dynamic]Alpha_Field_Bind, 0, 8, sa),
+		pat_joins       = make([dynamic]Join_Key_Pair, 0, 4, sa),
+		pat_res         = make([dynamic]u32, 0, 2, sa),
 	}
+	vm_compiler_init_scratch(&ctx.vm_compiler, sa)
 
 	rb.alpha_roots = make([]Alpha_Root, len(ir.bindings), a)
 	for bi := 0; bi < len(ir.bindings); bi += 1 {
@@ -678,18 +713,60 @@ rulebase_compile :: proc(
 
 	rb.programs = make([]Bytecode_Program, len(ctx.programs), a)
 	copy(rb.programs, ctx.programs[:])
+	// Re-point VM Field_Access_Desc segment strings onto rb.interner so programs outlive ir_destroy.
+	for &prog in rb.programs {
+		for &fr in prog.field_refs {
+			for si := 0; si < len(fr.segments); si += 1 {
+				seg_str := fr.segments[si]
+				if rb_sid, has_sid := rb.interner.lookup[seg_str]; has_sid {
+					canon := interner_get(&rb.interner, rb_sid)
+					fr.segments[si] = canon
+					if si < len(fr.seg_hashes) {
+						fr.seg_hashes[si].key = canon
+					}
+				}
+			}
+		}
+	}
 
+	// Pre-hash static schema fields, binding paths, and rule names once at compile time.
+	rb.schema_field_hashes = make([][]Prehashed_Key, len(rb.schemas), a)
+	for sch, sci in rb.schemas {
+		fhashes := make([]Prehashed_Key, len(sch.fields), a)
+		for sf, sfi in sch.fields {
+			fhashes[sfi] = prehashed_key_make(interner_get(&rb.interner, sf.name))
+		}
+		rb.schema_field_hashes[sci] = fhashes
+	}
+	rb.binding_path_hashes = make([][]Prehashed_Key, len(rb.bindings), a)
+	for bd, bi in rb.bindings {
+		fcount := 0
+		for seg in bd.segments {
+			if seg.kind == .Field {
+				fcount += 1
+			}
+		}
+		phashes := make([]Prehashed_Key, fcount, a)
+		pi := 0
+		for seg in bd.segments {
+			if seg.kind == .Field {
+				phashes[pi] = prehashed_key_make(interner_get(&rb.interner, seg.text))
+				pi += 1
+			}
+		}
+		rb.binding_path_hashes[bi] = phashes
+	}
 	// Materialize stratification topology on Rulebase arena.
 	rb.strata_count = strat_plan.strata_count
 	rb.stratum_recursive = make([]bool, strat_plan.strata_count, a)
 	copy(rb.stratum_recursive, strat_plan.stratum_recursive)
 
-	stratum_counts := make([]int, strat_plan.strata_count, context.temp_allocator)
+	stratum_counts := make([]int, strat_plan.strata_count, sa)
 	for rc in rb.rules {
 		stratum_counts[rc.stratum] += 1
 	}
 	rb.stratum_rules = make([][]u32, strat_plan.strata_count, a)
-	stratum_cursors := make([]int, strat_plan.strata_count, context.temp_allocator)
+	stratum_cursors := make([]int, strat_plan.strata_count, sa)
 	for si in 0 ..< int(strat_plan.strata_count) {
 		rb.stratum_rules[si] = make([]u32, stratum_counts[si], a)
 	}
@@ -714,6 +791,7 @@ rulebase_compile :: proc(
 
 	telemetry_count_add(telemetry, .Alpha_Nodes_Shared, ctx.shared_count)
 	telemetry_count_add(telemetry, .Segments_Created, u64(len(rb.segments)))
+	telemetry_watermark_arena(telemetry, u64(rb.arena.total_used))
 	ok_done = true
 	return rb, .None
 }

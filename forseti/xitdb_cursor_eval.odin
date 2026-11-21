@@ -21,6 +21,15 @@ write_bool_to_hash_map :: proc(m: ^xitdb.Write_Hash_Map, key: string, val: bool)
 	return nil
 }
 
+write_bool_to_hash_map_prehashed :: proc(m: ^xitdb.Write_Hash_Map, pk: ^Prehashed_Key, val: bool) -> Store_Error {
+	raw := _BOOL_TRUE_BYTES[:] if val else _BOOL_FALSE_BYTES[:]
+	data := xitdb.new_tagged_bytes(raw, BOOL_FORMAT_TAG[:])
+	if err := hash_map_put_prehashed(m, pk, data); err != nil {
+		return xitdb_to_store_err(err)
+	}
+	return nil
+}
+
 // Converts a Forseti Value to xitdb Writeable_Data (bool encodes inline as 9-byte Short_Bytes with "bl" format tag).
 value_to_writeable_data :: proc(
 	val: Value,
@@ -235,6 +244,86 @@ cursor_read_field_path :: proc(
 		case .Sorted_Map:
 			sm := xitdb.Read_Sorted_Map{cursor = cur}
 			mc, g_err := xitdb.sorted_map_get_cursor(sm, fields[i])
+			if g_err != nil {
+				return {}, false, xitdb_to_store_err(g_err)
+			}
+			next_cur, ok := mc.?
+			if !ok {
+				return {}, false, nil
+			}
+			cur = next_cur
+		case:
+			return {}, false, .Not_A_Collection
+		}
+	}
+	return cursor_read_value(cur, interner, expected_type)
+}
+
+// Walks pre-hashed static path segments on a record cursor, reading leaf slots directly
+// without runtime string hashing or redundant Read_Cursor construction.
+cursor_read_field_path_prehashed :: proc(
+	record_cur: xitdb.Read_Cursor,
+	keys: []Prehashed_Key,
+	interner: ^String_Interner,
+	expected_type: Type_Kind = .Unknown,
+) -> (val: Value, found: bool, err: Store_Error) {
+	cur := record_cur
+	for i := 0; i < len(keys); i += 1 {
+		pk := &keys[i]
+		sp, sp_err := xitdb.cursor_resolved(cur)
+		if sp_err != nil {
+			return {}, false, xitdb_to_store_err(sp_err)
+		}
+		is_last := i == len(keys) - 1
+		#partial switch sp.slot.tag {
+		case .None:
+			return {}, false, nil
+		case .Hash_Set, .Counted_Hash_Set:
+			if !is_last {
+				return {}, false, .Not_A_Collection
+			}
+			hs := xitdb.Read_Hash_Set{cursor = cur}
+			mc, g_err := hash_set_get_slot_prehashed(hs, pk)
+			if g_err != nil {
+				return {}, false, xitdb_to_store_err(g_err)
+			}
+			_, present := mc.?
+			return Value(present), true, nil
+		case .Sorted_Set:
+			if !is_last {
+				return {}, false, .Not_A_Collection
+			}
+			ss := xitdb.Read_Sorted_Set{cursor = cur}
+			present, c_err := xitdb.sorted_set_contains(ss, pk.key)
+			if c_err != nil {
+				return {}, false, xitdb_to_store_err(c_err)
+			}
+			return Value(present), true, nil
+		case .Hash_Map, .Counted_Hash_Map:
+			rm := xitdb.Read_Hash_Map{cursor = cur}
+			if is_last {
+				ms, s_err := hash_map_get_slot_prehashed(rm, pk)
+				if s_err != nil {
+					return {}, false, xitdb_to_store_err(s_err)
+				}
+				slot, ok := ms.?
+				if !ok {
+					return {}, false, nil
+				}
+				return decode_slot_to_value(cur.db, slot, interner, expected_type)
+			}
+			mc, g_err := hash_map_get_cursor_prehashed(rm, pk)
+			if g_err != nil {
+				return {}, false, xitdb_to_store_err(g_err)
+			}
+			next_cur, ok := mc.?
+			if !ok {
+				return {}, false, nil
+			}
+			cur = next_cur
+		case .Sorted_Map:
+			sm := xitdb.Read_Sorted_Map{cursor = cur}
+			mc, g_err := xitdb.sorted_map_get_cursor(sm, pk.key)
 			if g_err != nil {
 				return {}, false, xitdb_to_store_err(g_err)
 			}

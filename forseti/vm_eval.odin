@@ -207,7 +207,14 @@ _vm_helper_load_field :: proc "contextless" (vm: ^Vm_State, dst: u8, ref_idx: u1
 
 	context = vm.saved_ctx
 	if vm.sess_interner != nil {
-		raw_val, found, f_err := cursor_read_field_path(fb.cursor, fr.segments, vm.sess_interner, fr.expected_type)
+		raw_val: Value
+		found: bool
+		f_err: Store_Error
+		if len(fr.seg_hashes) > 0 {
+			raw_val, found, f_err = cursor_read_field_path_prehashed(fb.cursor, fr.seg_hashes, vm.sess_interner, fr.expected_type)
+		} else {
+			raw_val, found, f_err = cursor_read_field_path(fb.cursor, fr.segments, vm.sess_interner, fr.expected_type)
+		}
 		if f_err != nil || !found {
 			vm.err = .Missing_Field
 			return
@@ -234,7 +241,14 @@ _vm_helper_load_field :: proc "contextless" (vm: ^Vm_State, dst: u8, ref_idx: u1
 	}
 	defer interner_destroy(&tmp_int)
 
-	raw_val, found, f_err := cursor_read_field_path(fb.cursor, fr.segments, &tmp_int, fr.expected_type)
+	raw_val: Value
+	found: bool
+	f_err: Store_Error
+	if len(fr.seg_hashes) > 0 {
+		raw_val, found, f_err = cursor_read_field_path_prehashed(fb.cursor, fr.seg_hashes, &tmp_int, fr.expected_type)
+	} else {
+		raw_val, found, f_err = cursor_read_field_path(fb.cursor, fr.segments, &tmp_int, fr.expected_type)
+	}
 	if f_err != nil || !found {
 		vm.err = .Missing_Field
 		return

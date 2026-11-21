@@ -438,7 +438,7 @@ rule flag_canon_org phase "audit" salience 10 {
 	upon_compiling_rulebase(&w, "v1", "rb1")
 	upon_compiling_rulebase(&w, "v2", "rb2")
 
-	given_standalone_store(&w, "db", forseti.Xitdb_Config{mode = .Fast_Memory, skip_memory_crc = true})
+	given_standalone_store(&w, "db", forseti.Xitdb_Config{mode = .Fast_Memory})
 	given_watched_collection(&w, "db", ".orgs.raw")
 	upon_committing_mdm_orgs(&w, "db", {
 		{id = "org:1", name = "ACME HQ", country = "DE", domain = "acme.com", employees = 250, active = true},

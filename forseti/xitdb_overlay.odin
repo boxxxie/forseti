@@ -41,8 +41,7 @@ fork_create :: proc(
 		fork^ = {}
 	}
 
-	opts := xitdb.Database_Options{skip_memory_crc = parent.db.skip_memory_crc}
-	ov_db, db_err := xitdb.database_init_with_options(&fork.overlay_core, parent.db.hasher, opts)
+	ov_db, db_err := xitdb.database_init(&fork.overlay_core, parent.db.hasher)
 	if db_err != nil {
 		return xitdb_to_store_err(db_err)
 	}

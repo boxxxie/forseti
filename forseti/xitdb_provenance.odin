@@ -12,7 +12,6 @@ _Commit_Audit_Ctx :: struct {
 _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
 	ctx := (^_Commit_Audit_Ctx)(user_data)
 	s := ctx.sess
-	path_buf: [256]u8 = ---
 	id_buf: [64]u8 = ---
 
 	// 1. Sync derived.* collections: remove retracted keys previously committed, put current alive derived facts.
@@ -20,11 +19,11 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 		if bdef.kind != .Derived {
 			continue
 		}
-		path := _binding_dot_path(s.rb, bdef, path_buf[:])
-		if len(path) == 0 {
+		path_keys := s.rb.binding_path_hashes[bi]
+		if len(path_keys) == 0 {
 			continue
 		}
-		col_map, err := store_write_path_ensure_map(moment_wc, path)
+		col_map, err := store_write_path_ensure_map_prehashed(moment_wc, path_keys)
 		if err != nil {
 			return .Write_Failed
 		}
@@ -47,6 +46,7 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 		}
 
 		schema := s.rb.schemas[bdef.schema_id]
+		fhashes := s.rb.schema_field_hashes[bdef.schema_id]
 		for &f in s.facts {
 			if !f.alive || f.binding_idx != u16(bi) {
 				continue
@@ -54,31 +54,31 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			kstr := session_string(s, f.key)
 			rec_wc := xitdb.hash_map_put_cursor(&col_map, kstr) or_return
 			rec_m := xitdb.write_hash_map_init(rec_wc) or_return
-			for sf, sfi in schema.fields {
+			for _, sfi in schema.fields {
 				if sfi >= len(f.fields) || f.fields[sfi] == nil {
 					continue
 				}
-				fname := interner_get(&s.rb.interner, sf.name)
+				pk := &fhashes[sfi]
 				val := f.fields[sfi]
 				switch v in val {
 				case bool:
-					if b_err := write_bool_to_hash_map(&rec_m, fname, v); b_err != nil {
+					if b_err := write_bool_to_hash_map_prehashed(&rec_m, pk, v); b_err != nil {
 						return .Write_Failed
 					}
 				case i32:
-					xitdb.hash_map_put(&rec_m, fname, i64(v)) or_return
+					hash_map_put_prehashed(&rec_m, pk, i64(v)) or_return
 				case i64:
-					xitdb.hash_map_put(&rec_m, fname, v) or_return
+					hash_map_put_prehashed(&rec_m, pk, v) or_return
 				case f64:
-					xitdb.hash_map_put(&rec_m, fname, v) or_return
+					hash_map_put_prehashed(&rec_m, pk, v) or_return
 				case String_Id:
-					xitdb.hash_map_put(&rec_m, fname, session_string(s, v)) or_return
+					hash_map_put_prehashed(&rec_m, pk, session_string(s, v)) or_return
 				case Entity_Id:
-					xitdb.hash_map_put(&rec_m, fname, u64(v)) or_return
+					hash_map_put_prehashed(&rec_m, pk, u64(v)) or_return
 				case Time_Ns:
-					xitdb.hash_map_put(&rec_m, fname, i64(v)) or_return
+					hash_map_put_prehashed(&rec_m, pk, i64(v)) or_return
 				case Enum_Val:
-					xitdb.hash_map_put(&rec_m, fname, i64(v.variant)) or_return
+					hash_map_put_prehashed(&rec_m, pk, i64(v.variant)) or_return
 				}
 			}
 			s.committed_derived[Fact_Lookup_Key{binding_idx = u16(bi), key = f.key}] = true
@@ -91,61 +91,72 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 	}
 
 	root_m := xitdb.write_hash_map_init(moment_wc^) or_return
+	ak := audit_static_keys()
 
-	dec_wc := xitdb.hash_map_put_cursor(&root_m, "decisions") or_return
+	dec_wc := hash_map_put_cursor_prehashed(&root_m, &ak.decisions) or_return
 	dec_m := xitdb.write_hash_map_init(dec_wc) or_return
 
-	idx_wc := xitdb.hash_map_put_cursor(&root_m, "idx") or_return
+	idx_wc := hash_map_put_cursor_prehashed(&root_m, &ak.idx) or_return
 	idx_m := xitdb.write_hash_map_init(idx_wc) or_return
-	by_ent_wc := xitdb.hash_map_put_cursor(&idx_m, "decisions_by_entity") or_return
+	by_ent_wc := hash_map_put_cursor_prehashed(&idx_m, &ak.decisions_by_entity) or_return
 	by_ent_m := xitdb.write_hash_map_init(by_ent_wc) or_return
-	by_rule_wc := xitdb.hash_map_put_cursor(&idx_m, "decisions_by_rule") or_return
+	by_rule_wc := hash_map_put_cursor_prehashed(&idx_m, &ak.decisions_by_rule) or_return
 	by_rule_m := xitdb.write_hash_map_init(by_rule_wc) or_return
 
 	// Reset __tx fresh per transaction so __tx.decision_ids reflects this commit only.
-	_, _ = xitdb.hash_map_remove(&root_m, "__tx")
-	tx_wc := xitdb.hash_map_put_cursor(&root_m, "__tx") or_return
+	_, _ = hash_map_remove_prehashed(&root_m, &ak.tx_root)
+	tx_wc := hash_map_put_cursor_prehashed(&root_m, &ak.tx_root) or_return
 	tx_m := xitdb.write_hash_map_init(tx_wc) or_return
 
-	xitdb.hash_map_put(&tx_m, "tx_seq", i64(s.provenance.tx_seq)) or_return
+	hash_map_put_prehashed(&tx_m, &ak.tx_seq, i64(s.provenance.tx_seq)) or_return
 	mod_name := interner_get(&s.rb.interner, s.rb.module_name)
-	xitdb.hash_map_put(&tx_m, "module", mod_name) or_return
+	hash_map_put_prehashed(&tx_m, &ak.module, mod_name) or_return
 
-	tx_dec_ids_wc := xitdb.hash_map_put_cursor(&tx_m, "decision_ids") or_return
+	tx_dec_ids_wc := hash_map_put_cursor_prehashed(&tx_m, &ak.decision_ids) or_return
 	tx_dec_ids_arr := xitdb.write_array_list_init(tx_dec_ids_wc) or_return
 
-	rver_wc := xitdb.hash_map_put_cursor(&tx_m, "rule_versions") or_return
+	rver_wc := hash_map_put_cursor_prehashed(&tx_m, &ak.rule_versions) or_return
 	rver_m := xitdb.write_hash_map_init(rver_wc) or_return
 
 	used_rules := make(map[u32]bool, 8, context.temp_allocator)
+	rule_pks := make(map[u32]Prehashed_Key, 8, context.temp_allocator)
+	unknown_rule_pk := prehashed_key_make("unknown")
 
 	// Commit every derivation generated in the session (including retractions weighted -1 or active +1).
 	n_deriv := len(s.provenance.derivs)
 	for di := 1; di < n_deriv; di += 1 {
 		d := s.provenance.derivs[di]
 		did_str := fmt.bprintf(id_buf[:], "dec:%d", di)
+		did_pk := prehashed_key_make(did_str)
 
-		drec_wc := xitdb.hash_map_put_cursor(&dec_m, did_str) or_return
+		drec_wc := hash_map_put_cursor_prehashed(&dec_m, &did_pk) or_return
 		drec_m := xitdb.write_hash_map_init(drec_wc) or_return
 
+		rname_pk := &unknown_rule_pk
 		rname := "unknown"
 		rver := "1.0"
 		if int(d.rule_id) < len(s.rb.rules) {
 			rc := s.rb.rules[d.rule_id]
-			rname = interner_get(&s.rb.interner, rc.name)
+			if pk_ptr, has_pk := &rule_pks[d.rule_id]; has_pk {
+				rname_pk = pk_ptr
+			} else {
+				rule_pks[d.rule_id] = prehashed_key_make(interner_get(&s.rb.interner, rc.name))
+				rname_pk = &rule_pks[d.rule_id]
+			}
+			rname = rname_pk.key
 			if rc.version != EMPTY_STRING {
 				rver = interner_get(&s.rb.interner, rc.version)
 			}
 			used_rules[d.rule_id] = true
 		}
 
-		xitdb.hash_map_put(&drec_m, "rule", rname) or_return
-		xitdb.hash_map_put(&drec_m, "rule_version", rver) or_return
-		xitdb.hash_map_put(&drec_m, "proof_height", i64(d.proof_height)) or_return
-		xitdb.hash_map_put(&drec_m, "weight", i64(d.weight)) or_return
-		xitdb.hash_map_put(&drec_m, "tx_seq", i64(d.tx_seq)) or_return
-		xitdb.hash_map_put(&drec_m, "derived_fact_id", i64(d.derived_fact)) or_return
-		if err_b := write_bool_to_hash_map(&drec_m, "alive", d.alive); err_b != nil {
+		hash_map_put_prehashed(&drec_m, &ak.rule, rname) or_return
+		hash_map_put_prehashed(&drec_m, &ak.rule_version, rver) or_return
+		hash_map_put_prehashed(&drec_m, &ak.proof_height, i64(d.proof_height)) or_return
+		hash_map_put_prehashed(&drec_m, &ak.weight, i64(d.weight)) or_return
+		hash_map_put_prehashed(&drec_m, &ak.tx_seq, i64(d.tx_seq)) or_return
+		hash_map_put_prehashed(&drec_m, &ak.derived_fact_id, i64(d.derived_fact)) or_return
+		if err_b := write_bool_to_hash_map_prehashed(&drec_m, &ak.alive, d.alive); err_b != nil {
 			return .Write_Failed
 		}
 
@@ -153,28 +164,28 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			df := &s.facts[d.derived_fact]
 			dbind := interner_get(&s.rb.interner, s.rb.bindings[df.binding_idx].name)
 			dkey := session_string(s, df.key)
-			xitdb.hash_map_put(&drec_m, "derived_binding", dbind) or_return
-			xitdb.hash_map_put(&drec_m, "derived_key", dkey) or_return
+			hash_map_put_prehashed(&drec_m, &ak.derived_binding, dbind) or_return
+			hash_map_put_prehashed(&drec_m, &ak.derived_key, dkey) or_return
 
 			ent_wc := xitdb.hash_map_put_cursor(&by_ent_m, dkey) or_return
 			ent_set := xitdb.write_hash_set_init(ent_wc) or_return
-			xitdb.hash_set_put(&ent_set, did_str) or_return
+			hash_set_put_prehashed(&ent_set, &did_pk) or_return
 		}
 
 		if d.table_idx != INVALID_TABLE_IDX && int(d.table_idx) < len(s.rb.tables) {
 			ct := &s.rb.tables[d.table_idx]
 			tname := compiled_table_string(ct, ct.table_name)
-			xitdb.hash_map_put(&drec_m, "table", tname) or_return
+			hash_map_put_prehashed(&drec_m, &ak.table, tname) or_return
 			if d.table_row_id != INVALID_ROW_ID && int(d.table_row_id) < len(ct.row_ids) {
 				row_str := compiled_table_string(ct, ct.row_ids[d.table_row_id])
-				xitdb.hash_map_put(&drec_m, "table_row", row_str) or_return
+				hash_map_put_prehashed(&drec_m, &ak.table_row, row_str) or_return
 			}
 		}
 
 		// Record parent facts & index under idx.decisions_by_entity for each parent key too.
 		parents := provenance_parents(&s.provenance, Derivation_Id(di))
-		_, _ = xitdb.hash_map_remove(&drec_m, "parents")
-		par_wc := xitdb.hash_map_put_cursor(&drec_m, "parents") or_return
+		_, _ = hash_map_remove_prehashed(&drec_m, &ak.parents)
+		par_wc := hash_map_put_cursor_prehashed(&drec_m, &ak.parents) or_return
 		par_arr := xitdb.write_array_list_init(par_wc) or_return
 		for pf in parents {
 			if pf != INVALID_FACT && int(pf) < len(s.facts) {
@@ -183,15 +194,15 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 					xitdb.array_list_append(&par_arr, pkey) or_return
 					pent_wc := xitdb.hash_map_put_cursor(&by_ent_m, pkey) or_return
 					pent_set := xitdb.write_hash_set_init(pent_wc) or_return
-					xitdb.hash_set_put(&pent_set, did_str) or_return
+					hash_set_put_prehashed(&pent_set, &did_pk) or_return
 				}
 			}
 		}
 
 		// Index under idx.decisions_by_rule[rname].
-		rset_wc := xitdb.hash_map_put_cursor(&by_rule_m, rname) or_return
+		rset_wc := hash_map_put_cursor_prehashed(&by_rule_m, rname_pk) or_return
 		rset := xitdb.write_hash_set_init(rset_wc) or_return
-		xitdb.hash_set_put(&rset, did_str) or_return
+		hash_set_put_prehashed(&rset, &did_pk) or_return
 	}
 
 	for did in s.provenance.last_tx_derivs {
@@ -200,9 +211,9 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 	}
 	for rid in used_rules {
 		rc := s.rb.rules[rid]
-		rname := interner_get(&s.rb.interner, rc.name)
+		rname_pk := &rule_pks[rid]
 		rver := interner_get(&s.rb.interner, rc.version) if rc.version != EMPTY_STRING else "1.0"
-		xitdb.hash_map_put(&rver_m, rname, rver) or_return
+		hash_map_put_prehashed(&rver_m, rname_pk, rver) or_return
 	}
 	return nil
 }

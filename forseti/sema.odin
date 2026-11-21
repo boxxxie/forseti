@@ -2,6 +2,7 @@ package forseti
 
 import "core:fmt"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:slice"
 import "core:strings"
 
@@ -16,15 +17,19 @@ Scope_Var :: struct {
 
 @(private)
 Sema_Ctx :: struct {
-	ir:          ^Rulebase_IR,
-	diags:       ^Diagnostic_List,
-	telemetry:   ^Telemetry_Sink,
-	schema_map:  map[String_Id]u32,
-	binding_map: map[String_Id]u32,
-	table_map:   map[String_Id]u32,
-	schema_ref:  []bool,
-	binding_ref: []bool,
-	table_ref:   []bool,
+	ir:            ^Rulebase_IR,
+	diags:         ^Diagnostic_List,
+	telemetry:     ^Telemetry_Sink,
+	scratch_alloc: mem.Allocator,
+	schema_map:    map[String_Id]u32,
+	binding_map:   map[String_Id]u32,
+	table_map:     map[String_Id]u32,
+	schema_ref:    []bool,
+	binding_ref:   []bool,
+	table_ref:     []bool,
+	seen_fields:   map[String_Id]bool,
+	pop_buf:       [dynamic]String_Id,
+	unused_buf:    [dynamic]Scope_Var,
 }
 
 @(private)
@@ -405,14 +410,14 @@ bind_scope_var :: proc(
 }
 
 @(private)
-pop_scope_depth :: proc(scope: ^map[String_Id]Scope_Var, min_keep_depth: int) {
-	to_remove := make([dynamic]String_Id, 0, 8, context.temp_allocator)
+pop_scope_depth :: proc(ctx: ^Sema_Ctx, scope: ^map[String_Id]Scope_Var, min_keep_depth: int) {
+	clear(&ctx.pop_buf)
 	for k, v in scope^ {
 		if v.depth > min_keep_depth {
-			append(&to_remove, k)
+			append(&ctx.pop_buf, k)
 		}
 	}
-	for k in to_remove {
+	for k in ctx.pop_buf {
 		delete_key(scope, k)
 	}
 }
@@ -561,7 +566,7 @@ sema_analyze_clauses :: proc(
 				has_not^ = true
 			}
 			sema_analyze_clauses(ctx, scope, cl.children, depth + 1, nil, nil, nil) or_return
-			pop_scope_depth(scope, depth)
+			pop_scope_depth(ctx, scope, depth)
 
 		case .Accum:
 			sema_analyze_clauses(ctx, scope, cl.inner_pat, depth + 1, nil, nil, nil) or_return
@@ -581,7 +586,7 @@ sema_analyze_clauses :: proc(
 					fmt.tprintf("accumulator '%s' requires numeric input, got %s", accum_op_str(cl.accum_op), type_kind_str(agg_t.kind)),
 				) or_return
 			}
-			pop_scope_depth(scope, depth)
+			pop_scope_depth(ctx, scope, depth)
 
 			res_t := agg_t
 			switch cl.accum_op {
@@ -611,7 +616,7 @@ sema_analyze_clauses :: proc(
 			} else {
 				ctx.table_ref[tid] = true
 				tbl := ctx.ir.tables[tid]
-				seen_args := make(map[String_Id]bool, len(cl.fields) + 1, context.temp_allocator)
+				clear(&ctx.seen_fields)
 				for fb in cl.fields {
 					at := sema_eval_expr(ctx, scope, fb.expr, true) or_return
 					col, c_ok := find_table_col(tbl.inputs, fb.name)
@@ -624,10 +629,10 @@ sema_analyze_clauses :: proc(
 						) or_return
 						continue
 					}
-					if fb.name in seen_args {
+					if fb.name in ctx.seen_fields {
 						sema_error(ctx, .E2005, fb.span, fmt.tprintf("duplicate argument %q in decide", ir_string(ctx.ir, fb.name))) or_return
 					}
-					seen_args[fb.name] = true
+					ctx.seen_fields[fb.name] = true
 					if !types_compatible(ctx.ir, col.type, at, fb.expr) {
 						sema_error(
 							ctx,
@@ -638,7 +643,7 @@ sema_analyze_clauses :: proc(
 					}
 				}
 				for col in tbl.inputs {
-					if !(col.name in seen_args) {
+					if !(col.name in ctx.seen_fields) {
 						sema_error(
 							ctx,
 							.E2005,
@@ -701,7 +706,7 @@ sema_analyze_actions :: proc(
 			}
 
 			schema := ctx.ir.schemas[sid]
-			seen := make(map[String_Id]bool, len(act.fields) + 1, context.temp_allocator)
+			clear(&ctx.seen_fields)
 			for fb in act.fields {
 				vt := sema_eval_expr(ctx, scope, fb.expr, true) or_return
 				fdef, f_ok := find_schema_field(schema, fb.name)
@@ -714,10 +719,10 @@ sema_analyze_actions :: proc(
 					) or_return
 					continue
 				}
-				if fb.name in seen {
+				if fb.name in ctx.seen_fields {
 					sema_error(ctx, .E2005, fb.span, fmt.tprintf("duplicate field %q in assert", ir_string(ctx.ir, fb.name))) or_return
 				}
-				seen[fb.name] = true
+				ctx.seen_fields[fb.name] = true
 				if !types_compatible(ctx.ir, fdef.type, vt, fb.expr) {
 					sema_error(
 						ctx,
@@ -728,7 +733,7 @@ sema_analyze_actions :: proc(
 				}
 			}
 			for fdef in schema.fields {
-				if !(fdef.name in seen) {
+				if !(fdef.name in ctx.seen_fields) {
 					sema_error(
 						ctx,
 						.E2005,
@@ -783,7 +788,7 @@ sema_analyze_actions :: proc(
 
 @(private)
 emit_unused_var_warnings :: proc(ctx: ^Sema_Ctx, scope: ^map[String_Id]Scope_Var) -> mem.Allocator_Error {
-	unused := make([dynamic]Scope_Var, 0, 8, context.temp_allocator)
+	clear(&ctx.unused_buf)
 	for _, sv in scope^ {
 		if sv.used {
 			continue
@@ -792,12 +797,12 @@ emit_unused_var_warnings :: proc(ctx: ^Sema_Ctx, scope: ^map[String_Id]Scope_Var
 		if strings.has_prefix(name, "?_") {
 			continue
 		}
-		append(&unused, sv)
+		append(&ctx.unused_buf, sv)
 	}
-	slice.sort_by(unused[:], proc(a, b: Scope_Var) -> bool {
+	slice.sort_by(ctx.unused_buf[:], proc(a, b: Scope_Var) -> bool {
 		return a.span.offset < b.span.offset
 	})
-	for sv in unused {
+	for sv in ctx.unused_buf {
 		sema_warn(
 			ctx,
 			.W2001,
@@ -821,26 +826,38 @@ analyze_ir :: proc(
 	scope_tel := telemetry_span_begin(telemetry, .Analyze, "analyze")
 	defer telemetry_span_end(telemetry, scope_tel)
 
-	ctx := Sema_Ctx{
-		ir        = ir,
-		diags     = diags,
-		telemetry = telemetry,
+	sema_scratch: vmem.Arena
+	if vmem.arena_init_growing(&sema_scratch) != nil {
+		return .Out_Of_Memory
 	}
-	ctx.schema_map = make(map[String_Id]u32, max(len(ir.schemas), 8), context.temp_allocator)
-	ctx.binding_map = make(map[String_Id]u32, max(len(ir.bindings), 8), context.temp_allocator)
-	ctx.table_map = make(map[String_Id]u32, max(len(ir.tables), 8), context.temp_allocator)
-	ctx.schema_ref = make([]bool, len(ir.schemas), context.temp_allocator)
-	ctx.binding_ref = make([]bool, len(ir.bindings), context.temp_allocator)
-	ctx.table_ref = make([]bool, len(ir.tables), context.temp_allocator)
+	defer vmem.arena_destroy(&sema_scratch)
+	sa := vmem.arena_allocator(&sema_scratch)
+
+	ctx := Sema_Ctx{
+		ir            = ir,
+		diags         = diags,
+		telemetry     = telemetry,
+		scratch_alloc = sa,
+	}
+	ctx.schema_map = make(map[String_Id]u32, max(len(ir.schemas), 8), sa)
+	ctx.binding_map = make(map[String_Id]u32, max(len(ir.bindings), 8), sa)
+	ctx.table_map = make(map[String_Id]u32, max(len(ir.tables), 8), sa)
+	ctx.schema_ref = make([]bool, len(ir.schemas), sa)
+	ctx.binding_ref = make([]bool, len(ir.bindings), sa)
+	ctx.table_ref = make([]bool, len(ir.tables), sa)
+	ctx.seen_fields = make(map[String_Id]bool, 16, sa)
+	ctx.pop_buf = make([dynamic]String_Id, 0, 8, sa)
+	ctx.unused_buf = make([dynamic]Scope_Var, 0, 8, sa)
 
 	// Pass 1: Symbol tables & duplicate detection (E2004)
+	fset := make(map[String_Id]bool, 16, sa)
 	for s, si in ir.schemas {
 		if s.name in ctx.schema_map {
 			sema_error(&ctx, .E2004, s.span, fmt.tprintf("duplicate schema %q", ir_string(ir, s.name))) or_return
 		} else {
 			ctx.schema_map[s.name] = u32(si)
 		}
-		fset := make(map[String_Id]bool, max(len(s.fields), 4), context.temp_allocator)
+		clear(&fset)
 		for f in s.fields {
 			if f.name in fset {
 				sema_error(&ctx, .E2004, f.span, fmt.tprintf("duplicate field %q in schema %q", ir_string(ir, f.name), ir_string(ir, s.name))) or_return
@@ -868,27 +885,30 @@ analyze_ir :: proc(
 		}
 	}
 
+	in_cols := make(map[String_Id]bool, 8, sa)
+	out_cols := make(map[String_Id]bool, 8, sa)
+	row_ids := make(map[String_Id]bool, 16, sa)
 	for tbl, ti in ir.tables {
 		if tbl.name in ctx.table_map {
 			sema_error(&ctx, .E2004, tbl.span, fmt.tprintf("duplicate decision table %q", ir_string(ir, tbl.name))) or_return
 		} else {
 			ctx.table_map[tbl.name] = u32(ti)
 		}
-		in_cols := make(map[String_Id]bool, max(len(tbl.inputs), 4), context.temp_allocator)
+		clear(&in_cols)
 		for c in tbl.inputs {
 			if c.name in in_cols {
 				sema_error(&ctx, .E2004, c.span, fmt.tprintf("duplicate input column %q in table %q", ir_string(ir, c.name), ir_string(ir, tbl.name))) or_return
 			}
 			in_cols[c.name] = true
 		}
-		out_cols := make(map[String_Id]bool, max(len(tbl.outputs), 4), context.temp_allocator)
+		clear(&out_cols)
 		for c in tbl.outputs {
 			if c.name in out_cols {
 				sema_error(&ctx, .E2004, c.span, fmt.tprintf("duplicate output column %q in table %q", ir_string(ir, c.name), ir_string(ir, tbl.name))) or_return
 			}
 			out_cols[c.name] = true
 		}
-		row_ids := make(map[String_Id]bool, max(len(tbl.rows), 8), context.temp_allocator)
+		clear(&row_ids)
 		for row in tbl.rows {
 			if row.id != EMPTY_STRING {
 				if row.id in row_ids {
@@ -899,7 +919,7 @@ analyze_ir :: proc(
 		}
 	}
 
-	rule_names := make(map[String_Id]bool, max(len(ir.rules), 8), context.temp_allocator)
+	rule_names := make(map[String_Id]bool, max(len(ir.rules), 8), sa)
 	for r in ir.rules {
 		if r.name in rule_names {
 			sema_error(&ctx, .E2004, r.span, fmt.tprintf("duplicate rule %q", ir_string(ir, r.name))) or_return
@@ -907,7 +927,7 @@ analyze_ir :: proc(
 		rule_names[r.name] = true
 	}
 
-	query_names := make(map[String_Id]bool, max(len(ir.queries), 8), context.temp_allocator)
+	query_names := make(map[String_Id]bool, max(len(ir.queries), 8), sa)
 	for q in ir.queries {
 		if q.name in query_names {
 			sema_error(&ctx, .E2004, q.span, fmt.tprintf("duplicate query %q", ir_string(ir, q.name))) or_return
@@ -958,11 +978,13 @@ analyze_ir :: proc(
 		}
 	}
 
-	// Pass 3: Rule & Query body validation
+	// Pass 3: Rule & Query body validation (reuse per-rule scratch containers on sema_scratch)
+	scope := make(map[String_Id]Scope_Var, 16, sa)
+	matched_targets := make([dynamic]String_Id, 0, 8, sa)
 	for r in ir.rules {
-		scope := make(map[String_Id]Scope_Var, 16, context.temp_allocator)
+		clear(&scope)
+		clear(&matched_targets)
 		positive_count := 0
-		matched_targets := make([dynamic]String_Id, 0, 4, context.temp_allocator)
 		has_not := false
 
 		sema_analyze_clauses(&ctx, &scope, r.when_clauses, 0, &positive_count, &matched_targets, &has_not) or_return
@@ -971,7 +993,8 @@ analyze_ir :: proc(
 	}
 
 	for q in ir.queries {
-		scope := make(map[String_Id]Scope_Var, 8, context.temp_allocator)
+		clear(&scope)
+		clear(&matched_targets)
 		for p in q.params {
 			qvar_name := fmt.tprintf("?%s", ir_string(ir, p.name))
 			qid := intern(&ir.interner, qvar_name) or_return
@@ -984,7 +1007,6 @@ analyze_ir :: proc(
 			}
 		}
 		positive_count := 0
-		matched_targets := make([dynamic]String_Id, 0, 4, context.temp_allocator)
 		has_not := false
 		sema_analyze_clauses(&ctx, &scope, q.when_clauses, 0, &positive_count, &matched_targets, &has_not) or_return
 	}

@@ -54,15 +54,19 @@ Segment_Def :: struct {
 _append_alpha_sub :: proc(ctx: ^Rb_Build_Ctx, alpha_mem_id: u32, seg_id: u32, bit_mask: u64, notify_only := false) {
 	list, has := &ctx.sub_lists[alpha_mem_id]
 	if !has {
-		ctx.sub_lists[alpha_mem_id] = make([dynamic]Alpha_Segment_Target, 0, 2, context.temp_allocator)
+		ctx.sub_lists[alpha_mem_id] = make([dynamic]Alpha_Segment_Target, 0, 2, ctx.scratch_alloc)
 		list = &ctx.sub_lists[alpha_mem_id]
 	}
-	for existing in list {
-		if existing.seg_id == seg_id && existing.input_bit == bit_mask && existing.notify_only == notify_only {
+	target := Alpha_Segment_Target{seg_id = seg_id, input_bit = bit_mask, notify_only = notify_only}
+	n := len(list^)
+	// Same segment appends in rule/node order, so a short tail scan avoids O(N^2) work at 1M rules.
+	check_from := n - 8 if n > 8 else 0
+	for i := n - 1; i >= check_from; i -= 1 {
+		if list^[i] == target {
 			return
 		}
 	}
-	append(list, Alpha_Segment_Target{seg_id = seg_id, input_bit = bit_mask, notify_only = notify_only})
+	append(list, target)
 }
 
 @(private)
@@ -127,16 +131,16 @@ _compile_subnetwork :: proc(
 	accum_guard := INVALID_EXPR,
 	out_var_slot := u16(0),
 ) -> (sub_id: u32, err: Compile_Error) {
-	sub_vars := make(map[String_Id]u16, len(outer_vars) + 8, context.temp_allocator)
+	sub_vars := make(map[String_Id]u16, len(outer_vars) + 8, ctx.scratch_alloc)
 	for k, v in outer_vars {
 		sub_vars[k] = v
 	}
 	sub_next_var := outer_next_var
-	sub_fact_descs := make([dynamic]Vm_Fact_Slot_Desc, len(outer_fact_descs), len(outer_fact_descs) + 4, context.temp_allocator)
+	sub_fact_descs := make([dynamic]Vm_Fact_Slot_Desc, len(outer_fact_descs), len(outer_fact_descs) + 4, ctx.scratch_alloc)
 	copy(sub_fact_descs[:], outer_fact_descs)
 
-	steps := make([dynamic]Subnetwork_Step, 0, len(sub_clauses) + 1, context.temp_allocator)
-	group_slots := make([dynamic]u16, 0, 4, context.temp_allocator)
+	steps := make([dynamic]Subnetwork_Step, 0, len(sub_clauses) + 1, ctx.scratch_alloc)
+	group_slots := make([dynamic]u16, 0, 4, ctx.scratch_alloc)
 	uses_outer_fact := false
 
 	add_group_slot := proc(slots: ^[dynamic]u16, s: u16) {
@@ -181,18 +185,18 @@ _compile_subnetwork :: proc(
 
 		case .Where:
 			_collect_expr_outer_vars(ctx.ir, cl.expr, outer_vars, outer_fact_descs, &group_slots, &uses_outer_fact)
-			var_map := make(map[String_Id]u8, len(sub_vars), context.temp_allocator)
+			clear(&ctx.var_map)
 			for k, v in sub_vars {
-				var_map[k] = u8(v)
+				ctx.var_map[k] = u8(v)
 			}
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
-				var_names    = var_map,
+				var_names    = ctx.var_map,
 				fact_descs   = sub_fact_descs[:],
 				decide_descs = outer_decide_descs,
 			}
-			prog, verr := vm_compile_expr(&env, cl.expr, ctx.alloc)
+			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, cl.expr, ctx.alloc)
 			if verr != .None {
 				return 0, .Vm_Compile_Failed
 			}
@@ -225,18 +229,18 @@ _compile_subnetwork :: proc(
 				}
 			}
 			if acc_expr_fslot < 0 {
-				var_map := make(map[String_Id]u8, len(sub_vars), context.temp_allocator)
+				clear(&ctx.var_map)
 				for k, v in sub_vars {
-					var_map[k] = u8(v)
+					ctx.var_map[k] = u8(v)
 				}
 				env := Vm_Compile_Env{
 					ir           = ctx.ir,
 					tables       = ctx.rb.tables,
-					var_names    = var_map,
+					var_names    = ctx.var_map,
 					fact_descs   = sub_fact_descs[:],
 					decide_descs = outer_decide_descs,
 				}
-				prog, verr := vm_compile_expr(&env, accum_expr, ctx.alloc)
+				prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, accum_expr, ctx.alloc)
 				if verr != .None {
 					return 0, .Vm_Compile_Failed
 				}
@@ -247,18 +251,18 @@ _compile_subnetwork :: proc(
 
 		if accum_guard != INVALID_EXPR {
 			_collect_expr_outer_vars(ctx.ir, accum_guard, outer_vars, outer_fact_descs, &group_slots, &uses_outer_fact)
-			var_map := make(map[String_Id]u8, len(sub_vars), context.temp_allocator)
+			clear(&ctx.var_map)
 			for k, v in sub_vars {
-				var_map[k] = u8(v)
+				ctx.var_map[k] = u8(v)
 			}
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
-				var_names    = var_map,
+				var_names    = ctx.var_map,
 				fact_descs   = sub_fact_descs[:],
 				decide_descs = outer_decide_descs,
 			}
-			prog, verr := vm_compile_expr(&env, accum_guard, ctx.alloc)
+			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, accum_guard, ctx.alloc)
 			if verr != .None {
 				return 0, .Vm_Compile_Failed
 			}
@@ -294,14 +298,18 @@ build_compiled_rule :: proc(
 	rdef: Rule_Def,
 	rule_id: u32,
 ) -> (rc: Rule_Compiled, err: Compile_Error) {
-	bound_vars := make(map[String_Id]u16, 16, context.temp_allocator)
+	clear(&ctx.bound_vars)
+	clear(&ctx.fact_descs)
+	clear(&ctx.decide_descs)
+	clear(&ctx.input_links)
+	bound_vars := &ctx.bound_vars
 	next_var: u16 = 0
-	fact_descs := make([dynamic]Vm_Fact_Slot_Desc, 0, 4, context.temp_allocator)
-	decide_descs := make([dynamic]Vm_Decide_Slot_Desc, 0, 2, context.temp_allocator)
+	fact_descs := &ctx.fact_descs
+	decide_descs := &ctx.decide_descs
 
 	seg_id := u32(len(ctx.segments))
 	node_start := u32(len(ctx.beta_nodes))
-	input_links := make([dynamic]Segment_Input_Link, 0, 4, context.temp_allocator)
+	input_links := &ctx.input_links
 	first_decide_table := INVALID_TABLE_IDX
 
 	pat_idx := u8(0)
@@ -311,21 +319,21 @@ build_compiled_rule :: proc(
 			if pat_idx >= MAX_RULE_PATTERNS {
 				return {}, .Too_Many_Patterns
 			}
-			fslot := u8(len(fact_descs))
+			fslot := u8(len(fact_descs^))
 			alpha_id, _, binds, joins, _, c_err := compile_pattern_clause(
 				ctx,
 				cl,
 				fslot,
-				&bound_vars,
+				bound_vars,
 				&next_var,
-				&fact_descs,
+				fact_descs,
 			)
 			if c_err != .None {
 				return {}, c_err
 			}
 
 			bit_mask := u64(1) << pat_idx
-			append(&input_links, Segment_Input_Link{
+			append(input_links, Segment_Input_Link{
 				alpha_mem_id = alpha_id,
 				bit_mask     = bit_mask,
 			})
@@ -347,10 +355,10 @@ build_compiled_rule :: proc(
 				ctx,
 				seg_id,
 				cl.children,
-				bound_vars,
+				bound_vars^,
 				next_var,
-				fact_descs[:],
-				decide_descs[:],
+				fact_descs^[:],
+				decide_descs^[:],
 			) or_return
 			bn_kind := Beta_Node_Kind.Not if cl.kind == .Not else Beta_Node_Kind.Exists
 			append(&ctx.beta_nodes, Beta_Node_Def{
@@ -366,10 +374,10 @@ build_compiled_rule :: proc(
 				ctx,
 				seg_id,
 				cl.inner_pat,
-				bound_vars,
+				bound_vars^,
 				next_var,
-				fact_descs[:],
-				decide_descs[:],
+				fact_descs^[:],
+				decide_descs^[:],
 				is_accum = true,
 				accum_op = cl.accum_op,
 				accum_expr = cl.expr,
@@ -377,7 +385,7 @@ build_compiled_rule :: proc(
 				out_var_slot = vslot,
 			) or_return
 			if cl.bind_var != EMPTY_STRING {
-				bound_vars[cl.bind_var] = vslot
+				bound_vars^[cl.bind_var] = vslot
 			}
 			append(&ctx.beta_nodes, Beta_Node_Def{
 				id            = u32(len(ctx.beta_nodes)),
@@ -388,7 +396,7 @@ build_compiled_rule :: proc(
 			})
 
 		case .Decide:
-			dslot := u8(len(decide_descs))
+			dslot := u8(len(decide_descs^))
 			tidx, tok := ctx.rb.table_by_name[cl.target]
 			if !tok {
 				return {}, .Unknown_Binding
@@ -396,24 +404,24 @@ build_compiled_rule :: proc(
 			if first_decide_table == INVALID_TABLE_IDX {
 				first_decide_table = u16(tidx)
 			}
-			var_map := make(map[String_Id]u8, len(bound_vars), context.temp_allocator)
-			for k, v in bound_vars {
-				var_map[k] = u8(v)
+			clear(&ctx.var_map)
+			for k, v in bound_vars^ {
+				ctx.var_map[k] = u8(v)
 			}
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
-				var_names    = var_map,
-				fact_descs   = fact_descs[:],
-				decide_descs = decide_descs[:],
+				var_names    = ctx.var_map,
+				fact_descs   = fact_descs^[:],
+				decide_descs = decide_descs^[:],
 			}
-			prog, verr := vm_compile_decide(&env, cl.target, cl.fields, dslot, ctx.alloc)
+			prog, verr := vm_compile_decide_reusable(&ctx.vm_compiler, &env, cl.target, cl.fields, dslot, ctx.alloc)
 			if verr != .None {
 				return {}, .Vm_Compile_Failed
 			}
 			pidx := u32(len(ctx.programs))
 			append(&ctx.programs, prog)
-			append(&decide_descs, Vm_Decide_Slot_Desc{
+			append(decide_descs, Vm_Decide_Slot_Desc{
 				var_name  = cl.bind_var,
 				table_idx = tidx,
 			})
@@ -425,18 +433,18 @@ build_compiled_rule :: proc(
 			})
 
 		case .Where:
-			var_map := make(map[String_Id]u8, len(bound_vars), context.temp_allocator)
-			for k, v in bound_vars {
-				var_map[k] = u8(v)
+			clear(&ctx.var_map)
+			for k, v in bound_vars^ {
+				ctx.var_map[k] = u8(v)
 			}
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
-				var_names    = var_map,
-				fact_descs   = fact_descs[:],
-				decide_descs = decide_descs[:],
+				var_names    = ctx.var_map,
+				fact_descs   = fact_descs^[:],
+				decide_descs = decide_descs^[:],
 			}
-			prog, verr := vm_compile_expr(&env, cl.expr, ctx.alloc)
+			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, cl.expr, ctx.alloc)
 			if verr != .None {
 				return {}, .Vm_Compile_Failed
 			}
@@ -449,18 +457,18 @@ build_compiled_rule :: proc(
 			})
 
 		case .Let:
-			var_map := make(map[String_Id]u8, len(bound_vars), context.temp_allocator)
-			for k, v in bound_vars {
-				var_map[k] = u8(v)
+			clear(&ctx.var_map)
+			for k, v in bound_vars^ {
+				ctx.var_map[k] = u8(v)
 			}
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
-				var_names    = var_map,
-				fact_descs   = fact_descs[:],
-				decide_descs = decide_descs[:],
+				var_names    = ctx.var_map,
+				fact_descs   = fact_descs^[:],
+				decide_descs = decide_descs^[:],
 			}
-			prog, verr := vm_compile_expr(&env, cl.expr, ctx.alloc)
+			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, cl.expr, ctx.alloc)
 			if verr != .None {
 				return {}, .Vm_Compile_Failed
 			}
@@ -468,7 +476,7 @@ build_compiled_rule :: proc(
 			append(&ctx.programs, prog)
 			vslot := next_var
 			next_var += 1
-			bound_vars[cl.bind_var] = vslot
+			bound_vars^[cl.bind_var] = vslot
 			append(&ctx.beta_nodes, Beta_Node_Def{
 				id       = u32(len(ctx.beta_nodes)),
 				kind     = .Bind,
@@ -492,8 +500,8 @@ build_compiled_rule :: proc(
 		all_mask = 0
 		append(&ctx.zero_input_segs, seg_id)
 	}
-	links := make([]Segment_Input_Link, len(input_links), ctx.alloc)
-	copy(links, input_links[:])
+	links := make([]Segment_Input_Link, len(input_links^), ctx.alloc)
+	copy(links, input_links^[:])
 	append(&ctx.segments, Segment_Def{
 		id              = seg_id,
 		node_start      = node_start,
@@ -507,9 +515,9 @@ build_compiled_rule :: proc(
 	seg_ids[0] = seg_id
 
 	// Compile actions
-	var_map := make(map[String_Id]u8, len(bound_vars), context.temp_allocator)
-	for k, v in bound_vars {
-		var_map[k] = u8(v)
+	clear(&ctx.var_map)
+	for k, v in bound_vars^ {
+		ctx.var_map[k] = u8(v)
 	}
 	actions := make([]Compiled_Action, len(rdef.then_actions), ctx.alloc)
 	for act, ai in rdef.then_actions {
@@ -542,11 +550,11 @@ build_compiled_rule :: proc(
 				env := Vm_Compile_Env{
 					ir           = ctx.ir,
 					tables       = ctx.rb.tables,
-					var_names    = var_map,
-					fact_descs   = fact_descs[:],
-					decide_descs = decide_descs[:],
+					var_names    = ctx.var_map,
+					fact_descs   = fact_descs^[:],
+					decide_descs = decide_descs^[:],
 				}
-				prog, verr := vm_compile_expr(&env, fb.expr, ctx.alloc)
+				prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, fb.expr, ctx.alloc)
 				if verr != .None {
 					return {}, .Vm_Compile_Failed
 				}
@@ -562,7 +570,7 @@ build_compiled_rule :: proc(
 			if act.expr != INVALID_EXPR {
 				re := ctx.ir.exprs[act.expr]
 				if re.kind == .Var {
-					for fd, fi in fact_descs {
+					for fd, fi in fact_descs^ {
 						if fd.var_name == re.str_id {
 							ca.retract_slot = i16(fi)
 							break
@@ -577,11 +585,11 @@ build_compiled_rule :: proc(
 				env := Vm_Compile_Env{
 					ir           = ctx.ir,
 					tables       = ctx.rb.tables,
-					var_names    = var_map,
-					fact_descs   = fact_descs[:],
-					decide_descs = decide_descs[:],
+					var_names    = ctx.var_map,
+					fact_descs   = fact_descs^[:],
+					decide_descs = decide_descs^[:],
 				}
-				prog, verr := vm_compile_expr(&env, fb.expr, ctx.alloc)
+				prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, fb.expr, ctx.alloc)
 				if verr != .None {
 					return {}, .Vm_Compile_Failed
 				}
@@ -620,8 +628,8 @@ build_compiled_rule :: proc(
 		segment_ids      = seg_ids,
 		actions          = actions,
 		var_count        = next_var,
-		fact_slot_count  = u8(len(fact_descs)),
-		decide_slots     = u8(len(decide_descs)),
+		fact_slot_count  = u8(len(fact_descs^)),
+		decide_slots     = u8(len(decide_descs^)),
 	}, .None
 }
 
@@ -631,9 +639,11 @@ build_compiled_query :: proc(
 	qdef: Query_Def,
 	qid: u32,
 ) -> (qc: Query_Compiled, err: Compile_Error) {
-	bound_vars := make(map[String_Id]u16, 16, context.temp_allocator)
+	clear(&ctx.bound_vars)
+	clear(&ctx.fact_descs)
+	bound_vars := &ctx.bound_vars
 	next_var: u16 = 0
-	fact_descs := make([dynamic]Vm_Fact_Slot_Desc, 0, 4, context.temp_allocator)
+	fact_descs := &ctx.fact_descs
 
 	pnames := make([]String_Id, len(qdef.params), ctx.alloc)
 	ptypes := make([]Type_Ref, len(qdef.params), ctx.alloc)
@@ -646,28 +656,28 @@ build_compiled_query :: proc(
 			qvar_buf[0] = '?'
 			copy(qvar_buf[1:], pname_str)
 			qvar_str := string(qvar_buf[:1 + len(pname_str)])
-			if qid, q_ok := ctx.rb.interner.lookup[qvar_str]; q_ok {
-				bound_vars[qid] = next_var
+			if q_sid, q_ok := ctx.rb.interner.lookup[qvar_str]; q_ok {
+				bound_vars^[q_sid] = next_var
 			} else if new_id, i_err := intern(&ctx.rb.interner, qvar_str); i_err == nil {
-				bound_vars[new_id] = next_var
+				bound_vars^[new_id] = next_var
 			}
 		}
-		bound_vars[qp.name] = next_var
+		bound_vars^[qp.name] = next_var
 		next_var += 1
 	}
 
-	steps := make([dynamic]Query_Step, 0, len(qdef.when_clauses), context.temp_allocator)
+	steps := make([dynamic]Query_Step, 0, len(qdef.when_clauses), ctx.scratch_alloc)
 	for cl in qdef.when_clauses {
 		#partial switch cl.kind {
 		case .Pattern:
-			fslot := u8(len(fact_descs))
+			fslot := u8(len(fact_descs^))
 			alpha_id, bidx, binds, joins, _, c_err := compile_pattern_clause(
 				ctx,
 				cl,
 				fslot,
-				&bound_vars,
+				bound_vars,
 				&next_var,
-				&fact_descs,
+				fact_descs,
 			)
 			if c_err != .None {
 				return {}, c_err
@@ -681,17 +691,17 @@ build_compiled_query :: proc(
 				guard_prog   = -1,
 			})
 		case .Where:
-			var_map := make(map[String_Id]u8, len(bound_vars), context.temp_allocator)
-			for k, v in bound_vars {
-				var_map[k] = u8(v)
+			clear(&ctx.var_map)
+			for k, v in bound_vars^ {
+				ctx.var_map[k] = u8(v)
 			}
 			env := Vm_Compile_Env{
 				ir         = ctx.ir,
 				tables     = ctx.rb.tables,
-				var_names  = var_map,
-				fact_descs = fact_descs[:],
+				var_names  = ctx.var_map,
+				fact_descs = fact_descs^[:],
 			}
-			prog, verr := vm_compile_expr(&env, cl.expr, ctx.alloc)
+			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, cl.expr, ctx.alloc)
 			if verr != .None {
 				return {}, .Vm_Compile_Failed
 			}
@@ -705,7 +715,7 @@ build_compiled_query :: proc(
 
 	_ = slice.sort_by_cmp
 	vnames := make([]String_Id, next_var, ctx.alloc)
-	for k, slot in bound_vars {
+	for k, slot in bound_vars^ {
 		if int(slot) < len(vnames) {
 			kstr := ir_string(ctx.ir, k)
 			if len(kstr) > 0 && kstr[0] == '?' {

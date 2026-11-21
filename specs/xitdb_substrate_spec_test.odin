@@ -94,7 +94,7 @@ spec_incremental_delta_sync_100k_records :: proc(t: ^testing.T) {
 	world_init(&w, t)
 	defer world_destroy(&w)
 
-	given_standalone_store(&w, "scale", forseti.Xitdb_Config{mode = .Fast_Memory, skip_memory_crc = true})
+	given_standalone_store(&w, "scale", forseti.Xitdb_Config{mode = .Fast_Memory})
 	given_watched_collection(&w, "scale", ".orgs.raw")
 
 	upon_bulk_seeding_records(&w, "scale", ".orgs.raw", 100_000)
@@ -205,10 +205,10 @@ spec_safe_v2_vs_fast_memory_guardrails :: proc(t: ^testing.T) {
 	world_init(&w, t)
 	defer world_destroy(&w)
 
-	// 1. Safe_V2 rejects skip_memory_crc = true.
+	// 1. Safe_V2 rejects fast_hasher override.
 	upon_attempting_invalid_memory_open(
 		&w,
-		forseti.Xitdb_Config{mode = .Safe_V2, skip_memory_crc = true},
+		forseti.Xitdb_Config{mode = .Safe_V2, custom_hasher = forseti.fast_hasher()},
 		forseti.Xitdb_Config{},
 		reopen_existing = false,
 	)
@@ -218,37 +218,37 @@ spec_safe_v2_vs_fast_memory_guardrails :: proc(t: ^testing.T) {
 	upon_attempting_invalid_file_open(
 		&w,
 		"bad_fast.xit",
-		forseti.Xitdb_Config{mode = .Fast_Memory, skip_memory_crc = true},
+		forseti.Xitdb_Config{mode = .Fast_Memory},
 		forseti.Xitdb_Config{},
 		reopen_existing = false,
 	)
 	then_store_error_is(&w, forseti.Store_Bridge_Error.Disk_Fast_Mode_Forbidden)
 
-	// 3. Disk-backed buffered file rejects Safe_V2 + skip_memory_crc = true.
+	// 3. Disk-backed buffered file rejects Safe_V2 + custom fast_hasher override.
 	upon_attempting_invalid_file_open(
 		&w,
 		"bad_crc.xit",
-		forseti.Xitdb_Config{mode = .Safe_V2, skip_memory_crc = true},
+		forseti.Xitdb_Config{mode = .Safe_V2, custom_hasher = forseti.fast_hasher()},
 		forseti.Xitdb_Config{},
 		reopen_existing = false,
 	)
-	then_store_error_is(&w, forseti.Store_Bridge_Error.Invalid_Config)
+	then_store_error_is(&w, forseti.Store_Bridge_Error.Disk_Fast_Mode_Forbidden)
 
 	// 4. Opening a Safe_V2 SHA-1 file with Fast_Memory fast_hasher fails hash validation cleanly.
 	upon_attempting_invalid_memory_open(
 		&w,
 		forseti.Xitdb_Config{mode = .Safe_V2},
-		forseti.Xitdb_Config{mode = .Fast_Memory, skip_memory_crc = true},
+		forseti.Xitdb_Config{mode = .Fast_Memory},
 		reopen_existing = true,
 	)
-	then_store_error_is(&w, xitdb.Xitdb_Error.Invalid_Hash_Id)
+	then_store_error_is(&w, xitdb.Xitdb_Error.Invalid_Hash_Size)
 
 	// 5. Opening a Fast_Memory DB with Safe_V2 SHA-1 fails hash validation cleanly.
 	upon_attempting_invalid_memory_open(
 		&w,
-		forseti.Xitdb_Config{mode = .Fast_Memory, skip_memory_crc = true},
+		forseti.Xitdb_Config{mode = .Fast_Memory},
 		forseti.Xitdb_Config{mode = .Safe_V2},
 		reopen_existing = true,
 	)
-	then_store_error_is(&w, xitdb.Xitdb_Error.Invalid_Hash_Id)
+	then_store_error_is(&w, xitdb.Xitdb_Error.Invalid_Hash_Size)
 }
