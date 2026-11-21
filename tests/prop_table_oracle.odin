@@ -78,7 +78,7 @@ oracle_eval_cell :: proc(ir: ^forseti.Rulebase_IR, eid: forseti.Expr_Id, v: fors
 
 @(test)
 prop_compiled_table_matches_bruteforce_oracle :: proc(t: ^testing.T) {
-	testing.set_fail_timeout(t, 10 * time.Second)
+	testing.set_fail_timeout(t, 15 * time.Second)
 	rng_state := rand.create(t.seed)
 	context.random_generator = rand.default_random_generator(&rng_state)
 

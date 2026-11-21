@@ -347,3 +347,97 @@ table field_rev_merge version "1.0" hit Reverse_Merge {
 	upon_deciding_table(&w, "multi", "field_rev_merge", "rev_res", {true, true})
 	then_decision_outputs_are(&w, "rev_res", {"Acme Bill", "starter"}, expected_hits = 2)
 }
+
+@(test)
+spec_aot_codegen_passes_strict_vet_and_matches_runtime :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	policy_src := `module aot_mdm version "1.0"
+
+table gate_first version "1.0" hit First {
+  inputs { score: i64, locked: bool, tag: string }
+  outputs { action: string }
+  rows {
+    r1: -     | true  | -      || "locked";
+    r2: >= 80 | false | "vip"  || "fast_track";
+    r3: -     | -     | -      || "standard";
+  }
+}
+
+table score_sum version "1.0" hit Collect_Sum {
+  inputs { a: bool, b: bool }
+  outputs { pts: i64 }
+  rows {
+    r1: true  | -     || 10;
+    r2: -     | true  || 25;
+    r3: false | false || 0;
+  }
+}
+
+table row_merge version "1.0" hit Merge {
+  inputs { a: bool, b: bool }
+  outputs { name: string, tier: string }
+  rows {
+    r1: true  | -     || "Primary" | -;
+    r2: -     | true  || "Secondary" | "gold";
+    r3: false | false || - | -;
+  }
+}
+
+table row_rev_merge version "1.0" hit Reverse_Merge {
+  inputs { a: bool, b: bool }
+  outputs { name: string, tier: string }
+  rows {
+    r1: true  | -     || "Primary" | "silver";
+    r2: -     | true  || "Override" | -;
+    r3: false | false || - | -;
+  }
+}
+
+query q() {
+  ?_1 := decide gate_first(score: 10, locked: false, tag: "std")
+  ?_2 := decide score_sum(a: true, b: true)
+  ?_3 := decide row_merge(a: true, b: true)
+  ?_4 := decide row_rev_merge(a: true, b: true)
+}`
+
+	given_external_policy(&w, "aot", policy_src, "aot.forseti")
+	upon_compiling_policy(&w, "aot")
+	then_compilation_has_zero_diagnostics(&w, "aot")
+
+	harness_test := `package generated_tables
+
+import "core:testing"
+
+@(test)
+test_aot_generated_parity :: proc(t: ^testing.T) {
+	r1 := decide_gate_first(Gate_First_Input{score = 10, locked = true, tag = "x"})
+	testing.expect(t, r1.matched)
+	testing.expect_value(t, r1.action, "locked")
+	testing.expect_value(t, r1.row_id, "r1")
+
+	r2 := decide_gate_first(Gate_First_Input{score = 95, locked = false, tag = "vip"})
+	testing.expect(t, r2.matched)
+	testing.expect_value(t, r2.action, "fast_track")
+
+	rs := decide_score_sum(Score_Sum_Input{a = true, b = true})
+	testing.expect(t, rs.matched)
+	testing.expect_value(t, rs.pts, i64(35))
+	testing.expect_value(t, rs.matched_count, u32(2))
+
+	rm := decide_row_merge(Row_Merge_Input{a = true, b = true})
+	testing.expect(t, rm.matched)
+	testing.expect_value(t, rm.name, "Primary")
+	testing.expect_value(t, rm.tier, "gold")
+
+	rr := decide_row_rev_merge(Row_Rev_Merge_Input{a = true, b = true})
+	testing.expect(t, rr.matched)
+	testing.expect_value(t, rr.name, "Override")
+	testing.expect_value(t, rr.tier, "silver")
+}`
+
+	upon_generating_and_verifying_aot_odin(&w, "aot", "generated_tables", harness_test)
+	then_aot_odin_checks_and_passes_tests(&w)
+}

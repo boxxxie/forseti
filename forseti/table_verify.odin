@@ -10,6 +10,8 @@ Verify_Options :: struct {
 	max_budget:    int,
 }
 
+MAX_VERIFY_ROWS :: #config(MAX_VERIFY_ROWS, 128)
+
 @(private)
 Verify_Ctx :: struct {
 	ir:              ^Rulebase_IR,
@@ -119,11 +121,24 @@ verify_decision_table :: proc(
 	telemetry: ^Telemetry_Sink = nil,
 	opts := Verify_Options{},
 ) -> (err: mem.Allocator_Error) {
-	if ir == nil || int(table_idx) >= len(ir.tables) {
+	if ir == nil || diags == nil || int(table_idx) >= len(ir.tables) {
 		return nil
 	}
 	tbl := ir.tables[table_idx]
 	if len(tbl.inputs) == 0 || len(tbl.rows) == 0 {
+		return nil
+	}
+	if len(tbl.rows) > MAX_VERIFY_ROWS && tbl.verify_flags == {} {
+		diag_add(
+			diags,
+			ir.line_starts,
+			.W3006,
+			.Warning,
+			tbl.span,
+			fmt.tprintf("verification skipped on large %d-row decision table %q (exceeds MAX_VERIFY_ROWS=%d)", len(tbl.rows), ir_string(ir, tbl.name), MAX_VERIFY_ROWS),
+			"add verify(...) explicitly or increase MAX_VERIFY_ROWS",
+			telemetry,
+		) or_return
 		return nil
 	}
 
@@ -205,6 +220,9 @@ verify_decision_table :: proc(
 	}
 
 	// Pairwise overlap (E3001) and duplicate/adjacent mergeable rule detection (W3003)
+	budget := opts.max_budget if opts.max_budget > 0 else MAX_VERIFY_BUDGET
+	pair_steps := 0
+	pair_budget_exceeded := false
 	check_unique := tbl.hit_policy == .Unique || .No_Overlap in tbl.verify_flags || .Strict in tbl.verify_flags
 	check_any := tbl.hit_policy == .Any
 	overlap_box := make([][]u64, col_count, arena_alloc) or_return
@@ -212,13 +230,18 @@ verify_decision_table :: proc(
 		overlap_box[ci] = make([]u64, doms[ci].word_count, arena_alloc) or_return
 	}
 
-	for i in 0 ..< row_count {
+	pair_outer: for i in 0 ..< row_count {
 		if row_has_unsat[i] {
 			continue
 		}
 		for j in i + 1 ..< row_count {
 			if row_has_unsat[j] {
 				continue
+			}
+			pair_steps += 1
+			if pair_steps > budget {
+				pair_budget_exceeded = true
+				break pair_outer
 			}
 
 			if check_unique || check_any {
@@ -285,17 +308,17 @@ verify_decision_table :: proc(
 	}
 
 	// Bounded disjoint-remainder DFS for dead/shadowed rules (W3002), completeness gaps (W3001), and budget limit (W3006)
-	budget := opts.max_budget if opts.max_budget > 0 else MAX_VERIFY_BUDGET
 	ctx := Verify_Ctx{
-		ir            = ir,
-		tbl           = tbl,
-		doms          = doms,
-		row_masks     = row_masks,
-		row_has_unsat = row_has_unsat,
-		reachable     = make([]bool, row_count, arena_alloc) or_return,
-		gap_witnesses = make([dynamic]string, 0, 4, arena_alloc),
-		budget        = budget,
-		alloc         = arena_alloc,
+		ir              = ir,
+		tbl             = tbl,
+		doms            = doms,
+		row_masks       = row_masks,
+		row_has_unsat   = row_has_unsat,
+		reachable       = make([]bool, row_count, arena_alloc) or_return,
+		gap_witnesses   = make([dynamic]string, 0, 4, arena_alloc),
+		budget          = budget,
+		budget_exceeded = pair_budget_exceeded,
+		alloc           = arena_alloc,
 	}
 
 	full_region := make([][]u64, col_count, arena_alloc) or_return
@@ -304,7 +327,9 @@ verify_decision_table :: proc(
 		mask_set_all(full_region[ci], len(doms[ci].atoms))
 	}
 
-	verify_region_dfs(&ctx, 0, full_region) or_return
+	if !ctx.budget_exceeded {
+		verify_region_dfs(&ctx, 0, full_region) or_return
+	}
 
 	if ctx.budget_exceeded || any_truncated {
 		diag_add(

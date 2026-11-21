@@ -17,19 +17,25 @@ Cli_Options :: struct {
 	format:             Cli_Format,
 	warnings_as_errors: bool,
 	telemetry_path:     string,
+	out_path:           string,
+	pkg_name:           string,
 }
 
 print_usage :: proc() {
 	fmt.println(`Usage: forseti <command> [options] <file.forseti>
 
 Commands:
-  check    Validate syntax, types, variable bindings, and lints
-  ast      Parse source and print deterministic S-expression AST
-  ir       Compile source and print canonical Rulebase_IR summary
+  check          Validate syntax, types, variable bindings, and lints
+  verify-tables  Run domain-partitioning static verification across all tables
+  gen            Generate standalone "contextless" Odin procedures for tables
+  ast            Parse source and print deterministic S-expression AST
+  ir             Compile source and print canonical Rulebase_IR summary
 
 Options:
-  --format=human|json      Output format for 'check' (default: human)
+  --format=human|json      Output format for 'check' / 'verify-tables' (default: human)
   --warnings-as-errors     Treat compiler warnings (W*) as non-zero exit failures
+  --out <file.odin>        Output file for 'gen' (default: stdout)
+  --package <name>         Package name for generated Odin code (default: generated_tables)
   --telemetry <out.json>   Export compile telemetry (Chrome Trace JSON, or JSONL for .jsonl)
   -h, --help               Show this help message`)
 }
@@ -67,6 +73,24 @@ parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, o
 			opts.telemetry_path = args[i]
 		} else if strings.has_prefix(arg, "--telemetry=") {
 			opts.telemetry_path = arg[len("--telemetry="):]
+		} else if arg == "--out" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("error: --out requires a file path argument")
+				return {}, false, false
+			}
+			i += 1
+			opts.out_path = args[i]
+		} else if strings.has_prefix(arg, "--out=") {
+			opts.out_path = arg[len("--out="):]
+		} else if arg == "--package" {
+			if i + 1 >= len(args) {
+				fmt.eprintln("error: --package requires a package name")
+				return {}, false, false
+			}
+			i += 1
+			opts.pkg_name = args[i]
+		} else if strings.has_prefix(arg, "--package=") {
+			opts.pkg_name = arg[len("--package="):]
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("error: unknown option %q", arg)
 			return {}, false, false
@@ -153,7 +177,7 @@ run_cli :: proc() -> int {
 	defer forseti.telemetry_destroy(&telemetry)
 
 	switch opts.subcmd {
-	case "check":
+	case "check", "verify-tables":
 		ir, c_err := forseti.compile_source(src, opts.file_path, &diags, &telemetry, context.allocator)
 		if c_err != nil {
 			fmt.eprintfln("error: compilation failed: %v", c_err)
@@ -172,7 +196,11 @@ run_cli :: proc() -> int {
 		} else {
 			emit_human_diagnostics(&diags, src, opts.file_path)
 			if len(diags.items) == 0 {
-				fmt.printfln("OK: %s (0 errors, 0 warnings)", opts.file_path)
+				if opts.subcmd == "verify-tables" {
+					fmt.printfln("OK: %s (%d table(s) verified, 0 errors, 0 warnings)", opts.file_path, len(ir.tables))
+				} else {
+					fmt.printfln("OK: %s (0 errors, 0 warnings)", opts.file_path)
+				}
 			}
 		}
 
@@ -181,6 +209,41 @@ run_cli :: proc() -> int {
 		}
 		if diags.error_count > 0 || (opts.warnings_as_errors && diags.warning_count > 0) {
 			return 1
+		}
+		return 0
+
+	case "gen":
+		ir, c_err := forseti.compile_source(src, opts.file_path, &diags, &telemetry, context.allocator)
+		if c_err != nil {
+			fmt.eprintfln("error: compile failed: %v", c_err)
+			return 2
+		}
+		defer forseti.ir_destroy(&ir)
+
+		emit_human_diagnostics(&diags, src, opts.file_path)
+		if diags.error_count > 0 || (opts.warnings_as_errors && diags.warning_count > 0) {
+			return 1
+		}
+
+		pkg := opts.pkg_name if len(opts.pkg_name) > 0 else "generated_tables"
+		gen_src, g_err := forseti.codegen_odin_module(&ir, pkg, context.allocator)
+		if g_err != nil {
+			fmt.eprintfln("error: codegen failed: %v", g_err)
+			return 2
+		}
+		defer delete(gen_src)
+
+		if len(opts.out_path) > 0 {
+			if w_err := os.write_entire_file(opts.out_path, gen_src); w_err != nil {
+				fmt.eprintfln("error: failed writing %q: %v", opts.out_path, w_err)
+				return 2
+			}
+		} else {
+			fmt.print(gen_src)
+		}
+
+		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
+			return 2
 		}
 		return 0
 

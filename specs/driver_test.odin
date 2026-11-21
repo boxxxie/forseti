@@ -5,6 +5,7 @@ import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:path/filepath"
+import "core:strings"
 import "core:testing"
 import "../forseti"
 
@@ -133,6 +134,93 @@ driver_eval_table :: proc(
 	run.alloc_count = len(track.allocation_map)
 	mem.tracking_allocator_destroy(&track)
 	return run, ""
+}
+
+driver_strict_check_single_file :: proc(path: string) -> (ok: bool, err_msg: string) {
+	cmd := []string{
+		"odin",
+		"check",
+		path,
+		"-file",
+		"-no-entry-point",
+		"-vet",
+		"-vet-tabs",
+		"-strict-style",
+		"-disallow-do",
+		"-warnings-as-errors",
+	}
+	state, stdout, stderr, exec_err := os.process_exec(os.Process_Desc{command = cmd}, context.temp_allocator)
+	if exec_err != nil {
+		return false, fmt.tprintf("exec failed: %v", exec_err)
+	}
+	if state.exit_code != 0 {
+		return false, fmt.tprintf("%s %s", string(stdout), string(stderr))
+	}
+	return true, ""
+}
+
+driver_verify_aot_codegen :: proc(
+	t: ^testing.T,
+	ir: ^forseti.Rulebase_IR,
+	pkg_name: string,
+	test_src: string,
+	arena: ^vmem.Arena,
+) -> (check_ok: bool, test_ok: bool, err_msg: string) {
+	gen_src, g_err := forseti.codegen_odin_module(ir, pkg_name, context.temp_allocator)
+	if g_err != nil {
+		return false, false, fmt.tprintf("codegen error: %v", g_err)
+	}
+
+	dir, d_err := os.make_directory_temp("", "forseti_aot_*", context.allocator)
+	if d_err != nil {
+		return false, false, fmt.tprintf("make_directory_temp error: %v", d_err)
+	}
+	cleanup_ptr := new(string)
+	cleanup_ptr^ = dir
+	testing.cleanup(t, driver_cleanup_cli_dir, rawptr(cleanup_ptr))
+
+	gen_path, _ := filepath.join({dir, "tables_gen.odin"}, context.temp_allocator)
+	test_path, _ := filepath.join({dir, "tables_gen_test.odin"}, context.temp_allocator)
+	if os.write_entire_file(gen_path, gen_src) != nil || os.write_entire_file(test_path, test_src) != nil {
+		return false, false, "failed writing generated files"
+	}
+
+	check_cmd := []string{
+		"odin",
+		"check",
+		dir,
+		"-no-entry-point",
+		"-vet",
+		"-vet-tabs",
+		"-strict-style",
+		"-disallow-do",
+		"-warnings-as-errors",
+	}
+	c_state, c_out, c_err, c_exec := os.process_exec(os.Process_Desc{command = check_cmd}, context.temp_allocator)
+	if c_exec != nil || c_state.exit_code != 0 {
+		msg, _ := strings.clone(fmt.tprintf("odin check: %s %s\n--- SOURCE ---\n%s", string(c_out), string(c_err), gen_src), vmem.arena_allocator(arena))
+		return false, false, msg
+	}
+	check_ok = true
+
+	test_cmd := []string{
+		"odin",
+		"test",
+		dir,
+		"-vet",
+		"-vet-tabs",
+		"-strict-style",
+		"-disallow-do",
+		"-warnings-as-errors",
+		"-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true",
+		"-define:ODIN_TEST_FANCY=false",
+	}
+	t_state, t_out, t_err, t_exec := os.process_exec(os.Process_Desc{command = test_cmd}, context.temp_allocator)
+	if t_exec != nil || t_state.exit_code != 0 {
+		msg, _ := strings.clone(fmt.tprintf("odin test: %s %s", string(t_out), string(t_err)), vmem.arena_allocator(arena))
+		return check_ok, false, msg
+	}
+	return true, true, ""
 }
 
 driver_cleanup_cli_dir :: proc(ptr: rawptr) {

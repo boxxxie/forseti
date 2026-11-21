@@ -11,8 +11,20 @@
 - **Strings:** `"..."` supporting escapes `\"`, `\\`, `\n`, `\t`, `\r`, `\0`
 - **Numbers:** integers (`42`, `1_000`) and floats (`0.85`, `1.5e-3`)
 - **Comments:** `// line comment` and `/* block comment */`
-- **Table Delimiters:** `|` separates input columns or output columns; `||` separates inputs from outputs; `-` denotes a wildcard cell when standalone (`- | ...` or `- || ...`).
+- **Table Delimiters:** `|` separates input columns or output columns; `||` separates inputs from outputs; `-` denotes a wildcard cell in inputs (`- | ...`) or an unset/omitted output in `Merge` / `Reverse_Merge` tables (`|| "Primary" | -`).
 - **Logical vs. Unconditional Assertion:** `assert` creates a logically justified assertion (for downstream JTMS); `assert!` (optionally followed by `unconditional`) creates an unconditional assertion.
+
+### Decision Table Hit Policies
+
+| Policy | Short | Behavior |
+| :--- | :---: | :--- |
+| `First` | `F` | First matching row in declaration order wins; compiled to a cost-ordered lazy decision tree |
+| `Unique` | `U` | At most one row may match; static verifier rejects overlaps (`E3001`) |
+| `Any` | `A` | Multiple overlapping rows allowed only if their outputs agree (`E3001` on conflict) |
+| `Priority` | `P` | Priority ordered by first output `enum(...)` variant declaration order |
+| `Collect` | `C` | Collects all matching rows (`bitset` matrix); `Collect_Sum` (`C+`), `Collect_Min` (`C<`), `Collect_Max` (`C>`), `Collect_Count` (`C#`) |
+| `Merge` | `M` | Merges matching rows top-to-bottom; first non-`-` value per output column wins |
+| `Reverse_Merge` | `R` | Merges matching rows bottom-to-top; later non-`-` values override earlier rows |
 
 ---
 
@@ -127,15 +139,23 @@ Construct the identical `Rulebase_IR` directly from Odin code via `Ir_Builder` (
 | `E2003` | Error | Unbound `?variable` in head, `where`, `effect`, or leaked from `not` | `not Org(name: ?x)` then `assert Out(name: ?x)` | Bind `?x` in a positive pattern |
 | `E2004` | Error | Duplicate schema, field, binding, table, column, row ID, rule, or query | Two `r1:` rows in table | Unique IDs (`r1:`, `r2:`) |
 | `E2005` | Error | Invalid `decide` arity/argument name or missing/unknown `assert` field | `decide gate(bad: 1)` / missing schema field | Supply every declared input/field |
+| `E3001` | Error | Overlapping rules in `Unique` table or conflicting outputs in `Any` table (with witness) | Two `Unique` rows both matching `priority=90` | Tighten predicates or switch to `First` |
+| `E3002` | Error | Unsatisfiable decision table cell | `> 10 and < 5` | Fix contradictory cell bounds |
 | `W2001` | Warning | Unused `?variable` in rule | `RawOrg(name: ?unused)` | `RawOrg(name: ?_unused)` |
 | `W2002` | Warning | Unreferenced `schema`, `source`, or `table` | `table dead { ... }` | Reference in a rule/query or remove |
 | `W2003` | Warning | Potential Cartesian join across adjacent positive patterns | `RawOrg(name: ?a)` then `RawOrg(domain: ?b)` | Join on shared variable `?domain` |
 | `W2004` | Warning | Direct self-triggering rule (`when` & `assert` target same binding without `not`) | `when { Raw(x: ?x) } then { assert Raw(x: ?x) }` | Add `not` guard or assert distinct `derived` |
 | `W2005` | Warning | Shadowed `?variable` name across `:=` bindings | `?o := ...` then `not { ?o := ... }` | Use distinct name `?o_inner` |
+| `W3001` | Warning | Completeness gap in decision table (with concrete witness tuples) | Missing `false` row in bool column | Add missing rules or fallback `-` row |
+| `W3002` | Warning | Unreachable / dead rule shadowed by earlier rows | Row placed after `- \| -` catch-all | Reorder specific rows above catch-all |
+| `W3003` | Warning | Duplicate or adjacent mergeable rows with identical outputs | Two adjacent rows differing in one column | Merge into `in (...)` / `or` cell |
+| `W3004` | Warning | Non-wildcard cell covers entire column domain | `true or false` | Simplify cell to `-` wildcard |
+| `W3005` | Warning | Declared output `enum` variant never produced by any reachable row | `enum("a", "b")` with `"b"` unused | Add row producing `"b"` or prune variant |
+| `W3006` | Warning | Verification budget exceeded (`checks incomplete`) | Huge multi-interval table | Increase `MAX_VERIFY_BUDGET` or simplify |
 
 ---
 
-## 5. `cmd/forseti` CLI (Track 1 Commands)
+## 5. `cmd/forseti` CLI (Track 1 & Track 2 Commands)
 
 ```bash
 # Validate policy (human diagnostics with file:line:col carets)
@@ -143,6 +163,12 @@ forseti check policy.forseti
 
 # Fail CI on warnings and emit structured JSON + Chrome Trace telemetry
 forseti check --warnings-as-errors --format=json --telemetry trace.json policy.forseti
+
+# Verify decision table coverage/overlaps/dead rules explicitly
+forseti verify-tables --warnings-as-errors policy.forseti
+
+# Emit standalone "contextless" Odin procedures for decision tables
+forseti gen --package mdm_tables --out generated_tables.odin policy.forseti
 
 # Inspect S-expression AST or lowered canonical IR
 forseti ast policy.forseti

@@ -33,10 +33,10 @@
 
 ## Phase 3: Tier 3 AOT Odin Codegen (`forseti gen`) & Initial `hugi` Table Benchmarks
 
-- [ ] Task: Implement Tier 3 AOT Odin code generator emitting `"contextless"` Odin procedures (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 ATDD parity specs in `specs/decision_tables_spec_test.odin` generating Odin code for `F`/`U`/`C`/`M` tables, running `odin check -vet -vet-tabs -strict-style -disallow-do -warnings-as-errors` on generated files, and asserting parity with runtime evaluation
-    - [ ] Implement `forseti/codegen_odin.odin` and wire `forseti gen` in `cmd/forseti/main.odin`
-- [ ] Task: Add initial `hugi`/`obench` decision-table scaling benchmarks (10..10,000 rows; lazy vs eager; runtime vs AOT) and update `docs/dsl-reference.md` (TDD)
-    - [ ] Write benchmark targets under `benchmarks/bench_tables.odin` with `@zero_alloc` check and register table diagnostics `E3xxx`/`W3xxx` in `docs/dsl-reference.md`
-    - [ ] Run `hugi run` baseline check and `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` + ASan
+- [x] Task: Implement Tier 3 AOT Odin code generator emitting `"contextless"` Odin procedures (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 ATDD parity specs in `specs/decision_tables_spec_test.odin` generating Odin code for `F`/`U`/`C`/`M` tables, running `odin check -vet -vet-tabs -strict-style -disallow-do -warnings-as-errors` on generated files, and asserting parity with runtime evaluation
+    - [x] Implement `forseti/codegen_odin.odin` and wire `forseti gen` in `cmd/forseti/main.odin`
+- [x] Task: Add initial `hugi`/`obench` decision-table scaling benchmarks (10..10,000 rows; lazy vs eager; runtime vs AOT) and update `docs/dsl-reference.md` (TDD)
+    - [x] Write benchmark targets under `benchmarks/bench_tables.odin` with `@zero_alloc` check and register table diagnostics `E3xxx`/`W3xxx` in `docs/dsl-reference.md`
+    - [x] Run `hugi run` baseline check and `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` + ASan
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Tier 3 AOT Codegen & Benchmarks' (Protocol in workflow.md)

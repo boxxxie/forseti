@@ -44,14 +44,17 @@ Decision_Run :: struct {
 }
 
 World :: struct {
-	t:             ^testing.T,
-	arena:         vmem.Arena,
-	telemetry:     forseti.Telemetry_Sink,
-	policies:      map[string]Policy_Slot,
-	cli_dir:       string,
-	cli_bin:       string,
-	cli_runs:      map[string]Cli_Run,
-	decision_runs: map[string]Decision_Run,
+	t:               ^testing.T,
+	arena:           vmem.Arena,
+	telemetry:       forseti.Telemetry_Sink,
+	policies:        map[string]Policy_Slot,
+	cli_dir:         string,
+	cli_bin:         string,
+	cli_runs:        map[string]Cli_Run,
+	decision_runs:   map[string]Decision_Run,
+	aot_check_ok:    bool,
+	aot_test_ok:     bool,
+	aot_err_msg:     string,
 }
 
 world_init :: proc(w: ^World, t: ^testing.T, loc := #caller_location) {
@@ -369,6 +372,40 @@ then_decision_outputs_are :: proc(
 		actual := forseti.compiled_table_output_string(&run.table, run.result.outputs[i])
 		testing.expect_value(w.t, actual, exp, loc = loc)
 	}
+}
+
+upon_generating_and_verifying_aot_odin :: proc(
+	w: ^World,
+	policy_label: string,
+	pkg_name: string,
+	test_src: string,
+	loc := #caller_location,
+) {
+	slot, ok := &w.policies[policy_label]
+	if !testing.expectf(w.t, ok && slot.compiled, "policy %q must be compiled", policy_label, loc = loc) {
+		return
+	}
+	check_ok, test_ok, err_msg := driver_verify_aot_codegen(w.t, &slot.ir, pkg_name, test_src, &w.arena)
+	w.aot_check_ok = check_ok
+	w.aot_test_ok = test_ok
+	w.aot_err_msg = err_msg
+}
+
+then_aot_odin_checks_and_passes_tests :: proc(w: ^World, loc := #caller_location) {
+	testing.expectf(w.t, w.aot_check_ok, "AOT strict odin check failed: %s", w.aot_err_msg, loc = loc)
+	testing.expectf(w.t, w.aot_test_ok, "AOT odin test failed: %s", w.aot_err_msg, loc = loc)
+}
+
+then_workspace_odin_file_passes_strict_check :: proc(w: ^World, rel_path: string, loc := #caller_location) {
+	if !testing.expect(w.t, len(w.cli_dir) > 0, loc = loc) {
+		return
+	}
+	full, j_err := filepath.join({w.cli_dir, rel_path}, context.temp_allocator)
+	if !testing.expect_value(w.t, j_err, nil, loc = loc) {
+		return
+	}
+	ok, err_msg := driver_strict_check_single_file(full)
+	testing.expectf(w.t, ok, "strict odin check on %q failed: %s", rel_path, err_msg, loc = loc)
 }
 
 given_cli_binary :: proc(w: ^World, loc := #caller_location) {

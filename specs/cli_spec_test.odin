@@ -118,3 +118,48 @@ query q1(name: string) { CanonOrg(name: ?name) }`
 	then_cli_output_contains(&w, "ir_run", "table gate")
 	then_cli_output_contains(&w, "ir_run", "query q1")
 }
+
+@(test)
+spec_cli_verify_tables_and_gen_commands :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_cli_binary(&w)
+
+	clean_tbl := `module tbl_ok version "1.0"
+table route version "1.0" hit Unique {
+  inputs { score: i64 }
+  outputs { tier: string }
+  rows {
+    r1: >= 90 || "gold";
+    r2: < 90  || "std";
+  }
+}
+query q() { ?_r := decide route(score: 95) }`
+
+	overlap_tbl := `module tbl_bad version "1.0"
+table route version "1.0" hit Unique {
+  inputs { score: i64 }
+  outputs { tier: string }
+  rows {
+    r1: >= 80 || "gold";
+    r2: >= 90 || "vip";
+  }
+}
+query q() { ?_r := decide route(score: 95) }`
+
+	given_workspace_file(&w, "ok.forseti", clean_tbl)
+	given_workspace_file(&w, "bad.forseti", overlap_tbl)
+
+	upon_running_cli(&w, "vt_ok", {"verify-tables", "ok.forseti"})
+	then_cli_exits_with(&w, "vt_ok", 0)
+
+	upon_running_cli(&w, "vt_bad", {"verify-tables", "bad.forseti"})
+	then_cli_exits_with(&w, "vt_bad", 1)
+	then_cli_output_contains(&w, "vt_bad", "E3001")
+
+	upon_running_cli(&w, "gen_ok", {"gen", "--package", "route_gen", "--out", "route.odin", "ok.forseti"})
+	then_cli_exits_with(&w, "gen_ok", 0)
+	then_workspace_odin_file_passes_strict_check(&w, "route.odin")
+}
