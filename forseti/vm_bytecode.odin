@@ -516,6 +516,7 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 }
 
 // Initializes a reusable Vm_Compiler backed by `scratch_alloc`.
+@(private)
 vm_compiler_init_scratch :: proc(c: ^Vm_Compiler, scratch_alloc: mem.Allocator) {
 	c^ = Vm_Compiler{
 		code          = make([dynamic]Instruction, 0, 16, scratch_alloc),
@@ -527,6 +528,20 @@ vm_compiler_init_scratch :: proc(c: ^Vm_Compiler, scratch_alloc: mem.Allocator) 
 		tmp_end_jmps  = make([dynamic]int, 0, 8, scratch_alloc),
 		scratch_alloc = scratch_alloc,
 	}
+}
+
+@(private)
+_vm_compiler_free_scratch_subs :: proc(c: ^Vm_Compiler) {
+	sub_alloc := c.scratch_alloc if c.scratch_alloc.procedure != nil else context.temp_allocator
+	for fr in c.field_refs {
+		delete(fr.segments, sub_alloc)
+		delete(fr.seg_hashes, sub_alloc)
+	}
+	for dc in c.decide_calls {
+		delete(dc.args, sub_alloc)
+	}
+	clear(&c.field_refs)
+	clear(&c.decide_calls)
 }
 
 @(private)
@@ -556,13 +571,7 @@ vm_compile_expr_to_scratch :: proc(
 	sub_alloc := c.scratch_alloc if c.scratch_alloc.procedure != nil else context.temp_allocator
 	_vm_compiler_reset_for_compile(c, env, sub_alloc)
 	defer if err != .None {
-		for fr in c.field_refs {
-			delete(fr.segments, sub_alloc)
-			delete(fr.seg_hashes, sub_alloc)
-		}
-		for dc in c.decide_calls {
-			delete(dc.args, sub_alloc)
-		}
+		_vm_compiler_free_scratch_subs(c)
 	}
 
 	res_reg := vmc_compile_expr(c, eid) or_return
@@ -572,6 +581,7 @@ vm_compile_expr_to_scratch :: proc(
 }
 
 // Compiles a single Expr_IR into a standalone register-recycled Bytecode_Program using a reusable scratch compiler.
+@(private)
 vm_compile_expr_reusable :: proc(
 	c: ^Vm_Compiler,
 	env: ^Vm_Compile_Env,
@@ -579,6 +589,7 @@ vm_compile_expr_reusable :: proc(
 	alloc := context.allocator,
 ) -> (prog: Bytecode_Program, err: Vm_Error) {
 	vm_compile_expr_to_scratch(c, env, eid) or_return
+	defer _vm_compiler_free_scratch_subs(c)
 	return _finalize_vm_program(c, alloc), .None
 }
 
@@ -611,13 +622,7 @@ vm_compile_decide_to_scratch :: proc(
 	sub_alloc := c.scratch_alloc if c.scratch_alloc.procedure != nil else context.temp_allocator
 	_vm_compiler_reset_for_compile(c, env, sub_alloc)
 	defer if err != .None {
-		for fr in c.field_refs {
-			delete(fr.segments, sub_alloc)
-			delete(fr.seg_hashes, sub_alloc)
-		}
-		for dc in c.decide_calls {
-			delete(dc.args, sub_alloc)
-		}
+		_vm_compiler_free_scratch_subs(c)
 	}
 
 	tidx, tok := vmc_find_table(c, table_name)
@@ -673,6 +678,7 @@ vm_compile_decide_to_scratch :: proc(
 }
 
 // Compiles a `decide table_name(col: expr, ...)` clause using a reusable scratch compiler.
+@(private)
 vm_compile_decide_reusable :: proc(
 	c: ^Vm_Compiler,
 	env: ^Vm_Compile_Env,
@@ -682,6 +688,7 @@ vm_compile_decide_reusable :: proc(
 	alloc := context.allocator,
 ) -> (prog: Bytecode_Program, err: Vm_Error) {
 	vm_compile_decide_to_scratch(c, env, table_name, args, decide_slot) or_return
+	defer _vm_compiler_free_scratch_subs(c)
 	return _finalize_vm_program(c, alloc), .None
 }
 

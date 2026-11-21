@@ -49,7 +49,6 @@ session_fire_stratum :: proc(
 			s.stratum_changed = false
 			phreak_evaluate_stratum(s, stratum) or_return
 
-			fired_any := false
 			for {
 				act, ok := _agenda_pop_for_stratum(s, stratum)
 				if !ok {
@@ -71,7 +70,6 @@ session_fire_stratum :: proc(
 					continue
 				}
 
-				fired_any = true
 				s.agenda.refracted[ak] = true
 				rule := s.rb.rules[act.rule_id]
 				total_fired^ += 1
@@ -83,9 +81,6 @@ session_fire_stratum :: proc(
 
 			if _session_has_dirty_in_stratum(s, stratum) {
 				continue
-			}
-			if !fired_any {
-				break
 			}
 			break
 		}

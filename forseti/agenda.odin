@@ -200,6 +200,57 @@ agenda_cancel_key :: proc(ag: ^Agenda, ak: Activation_Key) {
 	}
 }
 
+@(private)
+_agenda_has_active_phase :: proc "contextless" (ag: ^Agenda, phase: String_Id) -> bool {
+	if len(ag.phases) == 0 || phase == EMPTY_STRING {
+		return false
+	}
+	for ph in ag.phases {
+		if ph == phase {
+			return true
+		}
+	}
+	return false
+}
+
+@(private)
+_agenda_heap_compact :: proc(ag: ^Agenda, h: ^[dynamic]Agenda_Heap_Entry) {
+	kept := 0
+	for e in h^ {
+		if int(e.slot_idx) < len(ag.slots) {
+			slot := &ag.slots[e.slot_idx]
+			if slot.alive && slot.gen == e.gen {
+				h^[kept] = e
+				kept += 1
+			}
+		}
+	}
+	resize(h, kept)
+	if kept <= 1 {
+		return
+	}
+	for start := kept / 2 - 1; start >= 0; start -= 1 {
+		idx := start
+		for {
+			left := (idx << 1) + 1
+			if left >= kept {
+				break
+			}
+			best := left
+			right := left + 1
+			if right < kept && _heap_entry_better(h^[right], h^[left]) {
+				best = right
+			}
+			if _heap_entry_better(h^[best], h^[idx]) {
+				h^[idx], h^[best] = h^[best], h^[idx]
+				idx = best
+			} else {
+				break
+			}
+		}
+	}
+}
+
 session_set_phases :: proc(s: ^Session, phases: []string) -> Session_Error {
 	if s == nil || s.rb == nil {
 		return .Invalid_Arg
@@ -211,6 +262,30 @@ session_set_phases :: proc(s: ^Session, phases: []string) -> Session_Error {
 			return .Alloc_Failed
 		}
 		append(&s.agenda.phases, sid)
+	}
+	for _, &h in s.agenda.phase_heaps {
+		clear(&h)
+	}
+	if len(s.agenda.phases) > 0 {
+		for &slot, si in s.agenda.slots {
+			if !slot.alive || !_agenda_has_active_phase(&s.agenda, slot.phase) {
+				continue
+			}
+			bk := Agenda_Bucket_Key{stratum = slot.stratum, phase = slot.phase}
+			ph_h, has_ph := &s.agenda.phase_heaps[bk]
+			if !has_ph {
+				s.agenda.phase_heaps[bk] = make([dynamic]Agenda_Heap_Entry, 0, 8, s.agenda.allocator)
+				ph_h = &s.agenda.phase_heaps[bk]
+			}
+			_agenda_heap_push(ph_h, Agenda_Heap_Entry{
+				slot_idx    = u32(si),
+				gen         = slot.gen,
+				salience    = slot.salience,
+				rule_id     = slot.rule_id,
+				max_recency = slot.token.max_recency,
+				tok_hash    = slot.token.fact_sig_hash,
+			})
+		}
 	}
 	return .None
 }
@@ -267,17 +342,25 @@ agenda_stage_activation :: proc(s: ^Session, rule_id: u32, tok: Beta_Token) {
 		ag.stratum_heaps[rule.stratum] = make([dynamic]Agenda_Heap_Entry, 0, 16, ag.allocator)
 		sh = &ag.stratum_heaps[rule.stratum]
 	}
+	if len(sh^) > 2 * len(ag.queued) + 64 {
+		_agenda_heap_compact(ag, sh)
+	}
 	_agenda_heap_push(sh, entry)
 
 	if rule.phase != EMPTY_STRING {
-		bk := Agenda_Bucket_Key{stratum = rule.stratum, phase = rule.phase}
-		ph_h, has_ph := &ag.phase_heaps[bk]
-		if !has_ph {
-			ag.phase_heaps[bk] = make([dynamic]Agenda_Heap_Entry, 0, 8, ag.allocator)
-			ph_h = &ag.phase_heaps[bk]
-		}
-		_agenda_heap_push(ph_h, entry)
 		ag.phase_live_counts[rule.phase] = ag.phase_live_counts[rule.phase] + 1
+		if _agenda_has_active_phase(ag, rule.phase) {
+			bk := Agenda_Bucket_Key{stratum = rule.stratum, phase = rule.phase}
+			ph_h, has_ph := &ag.phase_heaps[bk]
+			if !has_ph {
+				ag.phase_heaps[bk] = make([dynamic]Agenda_Heap_Entry, 0, 8, ag.allocator)
+				ph_h = &ag.phase_heaps[bk]
+			}
+			if len(ph_h^) > 2 * int(ag.phase_live_counts[rule.phase]) + 64 {
+				_agenda_heap_compact(ag, ph_h)
+			}
+			_agenda_heap_push(ph_h, entry)
+		}
 	}
 
 	for i := 0; i < int(tok.fact_count); i += 1 {

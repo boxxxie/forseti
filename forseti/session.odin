@@ -539,6 +539,7 @@ session_modify_fact_by_key :: proc(
 						f.proof_height = 0
 						f.best_derivation = INVALID_DERIVATION
 
+						_record_dirty_derived_fact(s, fid, bidx)
 						alpha_eval_insert_fact(s, fid)
 						return .None
 					}

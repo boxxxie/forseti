@@ -33,6 +33,7 @@ Accum_State :: struct {
 
 Accum_Tracked_Fact :: struct {
 	included:  bool,
+	recency:   u64,
 	group_key: Accum_Group_Key,
 	val:       Value,
 }
@@ -490,7 +491,7 @@ beta_accum_eval_token :: proc(
 			// Retract any facts removed since last sync.
 			to_remove := make([dynamic]Fact_Id, 0, 8, context.temp_allocator)
 			for fid, rec in am_acc.tracked_facts {
-				in_am := has_alpha && (fid in alpha_m.fact_pos) && s.facts[fid].alive
+				in_am := has_alpha && (fid in alpha_m.fact_pos) && s.facts[fid].alive && s.facts[fid].recency == rec.recency
 				if !in_am {
 					if rec.included {
 						if gstate, has_g := &am_acc.groups[rec.group_key]; has_g {
@@ -516,7 +517,7 @@ beta_accum_eval_token :: proc(
 					}
 					gk, gk_ok := _accum_extract_right_group_key(s, rf, step0, sub.group_var_slots)
 					if !gk_ok {
-						am_acc.tracked_facts[fid] = Accum_Tracked_Fact{included = false}
+						am_acc.tracked_facts[fid] = Accum_Tracked_Fact{included = false, recency = rf.recency}
 						continue
 					}
 
@@ -566,13 +567,13 @@ beta_accum_eval_token :: proc(
 						}
 					}
 					if !passed_where {
-						am_acc.tracked_facts[fid] = Accum_Tracked_Fact{included = false}
+						am_acc.tracked_facts[fid] = Accum_Tracked_Fact{included = false, recency = rf.recency}
 						continue
 					}
 
 					item_val, pass_g := _accum_eval_item_value(s, sub, &syn) or_return
 					if !pass_g {
-						am_acc.tracked_facts[fid] = Accum_Tracked_Fact{included = false}
+						am_acc.tracked_facts[fid] = Accum_Tracked_Fact{included = false, recency = rf.recency}
 						continue
 					}
 
@@ -586,6 +587,7 @@ beta_accum_eval_token :: proc(
 					accum_insert(gstate, item_val, &s.rb.interner, &s.interner)
 					am_acc.tracked_facts[fid] = Accum_Tracked_Fact{
 						included  = true,
+						recency   = rf.recency,
 						group_key = gk,
 						val       = item_val,
 					}

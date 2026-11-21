@@ -810,19 +810,20 @@ jtms_retract_cascades_for_fact :: proc(s: ^Session, fid: Fact_Id) {
 	}
 	use_scratch := s.jtms.cascade_depth == 0
 	affected: [dynamic]Fact_Id
-	dead_justs: [dynamic]u32
+	tmp_dead_justs: [dynamic]u32
+	dead_justs: ^[dynamic]u32
 	if use_scratch {
 		clear(&s.jtms.scratch_affected)
 		clear(&s.jtms.scratch_dead_justs)
 		affected = s.jtms.scratch_affected
-		dead_justs = s.jtms.scratch_dead_justs
+		dead_justs = &s.jtms.scratch_dead_justs
 	} else {
 		affected = make([dynamic]Fact_Id, 0, 8, context.temp_allocator)
-		dead_justs = make([dynamic]u32, 0, 8, context.temp_allocator)
+		tmp_dead_justs = make([dynamic]u32, 0, 8, context.temp_allocator)
+		dead_justs = &tmp_dead_justs
 	}
 	defer if use_scratch {
 		s.jtms.scratch_affected = affected
-		s.jtms.scratch_dead_justs = dead_justs
 	}
 
 	fast_mode := s.provenance.mode == .Fast
@@ -833,7 +834,7 @@ jtms_retract_cascades_for_fact :: proc(s: ^Session, fid: Fact_Id) {
 				j.alive = false
 				provenance_mark_retracted(&s.provenance, j.deriv_id)
 				if fast_mode {
-					append(&dead_justs, jid)
+					append(dead_justs, jid)
 				}
 				if af, has_af := &s.jtms.active_firings[j.firing_key]; has_af {
 					af.alive = false
@@ -845,8 +846,8 @@ jtms_retract_cascades_for_fact :: proc(s: ^Session, fid: Fact_Id) {
 			}
 		}
 	}
-	if fast_mode && len(dead_justs) > 0 {
-		_jtms_recycle_dead_justs(s, dead_justs[:])
+	if fast_mode && len(dead_justs^) > 0 {
+		_jtms_recycle_dead_justs(s, dead_justs^[:])
 	}
 	if len(affected) > 0 {
 		jtms_cascade_from_affected_facts(s, affected[:])
@@ -868,19 +869,20 @@ jtms_revoke_firing :: proc(s: ^Session, fkey: Firing_Key) {
 
 	use_scratch := s.jtms.cascade_depth == 0
 	affected: [dynamic]Fact_Id
-	dead_justs: [dynamic]u32
+	tmp_dead_justs: [dynamic]u32
+	dead_justs: ^[dynamic]u32
 	if use_scratch {
 		clear(&s.jtms.scratch_affected)
 		clear(&s.jtms.scratch_dead_justs)
 		affected = s.jtms.scratch_affected
-		dead_justs = s.jtms.scratch_dead_justs
+		dead_justs = &s.jtms.scratch_dead_justs
 	} else {
 		affected = make([dynamic]Fact_Id, 0, len(af.just_ids), context.temp_allocator)
-		dead_justs = make([dynamic]u32, 0, len(af.just_ids), context.temp_allocator)
+		tmp_dead_justs = make([dynamic]u32, 0, len(af.just_ids), context.temp_allocator)
+		dead_justs = &tmp_dead_justs
 	}
 	defer if use_scratch {
 		s.jtms.scratch_affected = affected
-		s.jtms.scratch_dead_justs = dead_justs
 	}
 
 	fast_mode := s.provenance.mode == .Fast
@@ -890,7 +892,7 @@ jtms_revoke_firing :: proc(s: ^Session, fkey: Firing_Key) {
 			j.alive = false
 			provenance_mark_retracted(&s.provenance, j.deriv_id)
 			if fast_mode {
-				append(&dead_justs, jid)
+				append(dead_justs, jid)
 			}
 			df := j.derived_fact
 			if df != INVALID_FACT && int(df) < len(s.facts) && s.facts[df].alive && s.facts[df].origin == .Logical {
@@ -898,8 +900,8 @@ jtms_revoke_firing :: proc(s: ^Session, fkey: Firing_Key) {
 			}
 		}
 	}
-	if fast_mode && len(dead_justs) > 0 {
-		_jtms_recycle_dead_justs(s, dead_justs[:])
+	if fast_mode && len(dead_justs^) > 0 {
+		_jtms_recycle_dead_justs(s, dead_justs^[:])
 	}
 	for did in af.deriv_ids {
 		provenance_mark_retracted(&s.provenance, did)
