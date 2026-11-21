@@ -43,6 +43,24 @@ Decision_Run :: struct {
 	alloc_count: int,
 }
 
+Mdm_Org_Input :: struct {
+	id:            string,
+	name:          string,
+	country:       string,
+	domain:        string,
+	employees:     i64,
+	active:        bool,
+	locked_fields: []string,
+}
+
+Store_Handle :: struct {
+	bridge:       forseti.Store_Bridge,
+	syncer:       forseti.Delta_Syncer,
+	interner:     forseti.String_Interner,
+	sync_inited:  bool,
+	attached_dir: string,
+}
+
 World :: struct {
 	t:               ^testing.T,
 	arena:           vmem.Arena,
@@ -52,6 +70,10 @@ World :: struct {
 	cli_bin:         string,
 	cli_runs:        map[string]Cli_Run,
 	decision_runs:   map[string]Decision_Run,
+	stores:          map[string]^Store_Handle,
+	forks:           map[string]^forseti.Fork_Handle,
+	sync_runs:       map[string]forseti.Sync_Result,
+	last_store_err:  forseti.Store_Error,
 	aot_check_ok:    bool,
 	aot_test_ok:     bool,
 	aot_err_msg:     string,
@@ -69,10 +91,31 @@ world_init :: proc(w: ^World, t: ^testing.T, loc := #caller_location) {
 	w.policies = make(map[string]Policy_Slot, 8)
 	w.cli_runs = make(map[string]Cli_Run, 8)
 	w.decision_runs = make(map[string]Decision_Run, 8)
+	w.stores = make(map[string]^Store_Handle, 8)
+	w.forks = make(map[string]^forseti.Fork_Handle, 8)
+	w.sync_runs = make(map[string]forseti.Sync_Result, 8)
 }
 
 world_destroy :: proc(w: ^World) {
 	vmem.arena_check_temp(&w.arena)
+	for _, &sr in w.sync_runs {
+		forseti.sync_result_destroy(&sr)
+	}
+	delete(w.sync_runs)
+	for _, fh in w.forks {
+		forseti.fork_destroy(fh)
+		free(fh)
+	}
+	delete(w.forks)
+	for _, sh in w.stores {
+		if sh.sync_inited {
+			forseti.delta_syncer_destroy(&sh.syncer)
+		}
+		forseti.store_bridge_destroy(&sh.bridge)
+		forseti.interner_destroy(&sh.interner)
+		free(sh)
+	}
+	delete(w.stores)
 	for _, &dr in w.decision_runs {
 		forseti.compiled_table_destroy(&dr.table)
 	}
@@ -561,6 +604,402 @@ then_workspace_telemetry_trace_has_phases :: proc(
 		}
 		testing.expectf(w.t, found, "expected telemetry trace phase %q in %q", ph, rel_path, loc = loc)
 	}
+}
+
+given_standalone_store :: proc(
+	w: ^World,
+	label: string,
+	cfg := forseti.Xitdb_Config{},
+	loc := #caller_location,
+) {
+	sh, err := driver_create_standalone_store(cfg, &w.telemetry)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		w.last_store_err = err
+		return
+	}
+	if prev, has := w.stores[label]; has {
+		driver_destroy_store_handle(prev)
+	}
+	w.stores[label] = sh
+}
+
+given_attached_file_store :: proc(
+	w: ^World,
+	label: string,
+	rel_filename: string,
+	cfg := forseti.Xitdb_Config{},
+	loc := #caller_location,
+) {
+	sh, err := driver_open_file_store(w.t, rel_filename, cfg, &w.telemetry)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		w.last_store_err = err
+		return
+	}
+	if prev, has := w.stores[label]; has {
+		driver_destroy_store_handle(prev)
+	}
+	w.stores[label] = sh
+}
+
+upon_reopening_attached_file_store :: proc(
+	w: ^World,
+	old_label: string,
+	new_label: string,
+	rel_filename: string,
+	cfg := forseti.Xitdb_Config{},
+	loc := #caller_location,
+) {
+	old_sh, has := w.stores[old_label]
+	if !testing.expectf(w.t, has, "unknown store %q", old_label, loc = loc) {
+		return
+	}
+	dir := old_sh.attached_dir
+	driver_destroy_store_handle(old_sh)
+	delete_key(&w.stores, old_label)
+
+	sh, err := driver_reopen_file_store_in_dir(dir, rel_filename, cfg, &w.telemetry)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		w.last_store_err = err
+		return
+	}
+	w.stores[new_label] = sh
+}
+
+given_watched_collection :: proc(
+	w: ^World,
+	store_label: string,
+	path: string,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	err := forseti.delta_syncer_watch(&sh.syncer, path)
+	testing.expect_value(w.t, err, nil, loc = loc)
+}
+
+upon_committing_mdm_orgs :: proc(
+	w: ^World,
+	store_label: string,
+	orgs: []Mdm_Org_Input,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	err := driver_commit_mdm_orgs(&sh.bridge, orgs)
+	testing.expect_value(w.t, err, nil, loc = loc)
+}
+
+upon_bulk_seeding_records :: proc(
+	w: ^World,
+	store_label: string,
+	collection_path: string,
+	count: int,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	err := driver_bulk_seed_records(&sh.bridge, collection_path, count)
+	testing.expect_value(w.t, err, nil, loc = loc)
+}
+
+upon_mutating_record_batch :: proc(
+	w: ^World,
+	store_label: string,
+	collection_path: string,
+	added: []string,
+	updated: []string,
+	removed: []string,
+	new_val_offset: i64 = 1000,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	err := driver_mutate_record_batch(&sh.bridge, collection_path, added, updated, removed, new_val_offset)
+	testing.expect_value(w.t, err, nil, loc = loc)
+}
+
+upon_syncing_deltas :: proc(
+	w: ^World,
+	store_label: string,
+	run_label: string,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	if prev, had := &w.sync_runs[run_label]; had {
+		forseti.sync_result_destroy(prev)
+	}
+	res: forseti.Sync_Result
+	err := forseti.delta_syncer_sync(&sh.syncer, &sh.bridge, &res)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		forseti.sync_result_destroy(&res)
+		return
+	}
+	w.sync_runs[run_label] = res
+}
+
+upon_compacting_store :: proc(
+	w: ^World,
+	store_label: string,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	err := forseti.store_bridge_compact(&sh.bridge)
+	testing.expect_value(w.t, err, nil, loc = loc)
+}
+
+upon_creating_overlay_fork :: proc(
+	w: ^World,
+	parent_label: string,
+	fork_label: string,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[parent_label]
+	if !testing.expectf(w.t, has, "unknown store %q", parent_label, loc = loc) {
+		return
+	}
+	fh := new(forseti.Fork_Handle)
+	err := forseti.fork_create(fh, &sh.bridge)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		forseti.fork_destroy(fh)
+		free(fh)
+		return
+	}
+	if prev, had := w.forks[fork_label]; had {
+		forseti.fork_destroy(prev)
+		free(prev)
+	}
+	w.forks[fork_label] = fh
+}
+
+upon_mutating_overlay_fork_record :: proc(
+	w: ^World,
+	fork_label: string,
+	collection_path: string,
+	key: string,
+	value: i64,
+	loc := #caller_location,
+) {
+	fh, has := w.forks[fork_label]
+	if !testing.expectf(w.t, has, "unknown fork %q", fork_label, loc = loc) {
+		return
+	}
+	err := driver_mutate_record_batch(&fh.bridge, collection_path, nil, {key}, nil, value)
+	testing.expect_value(w.t, err, nil, loc = loc)
+}
+
+upon_attempting_invalid_file_open :: proc(
+	w: ^World,
+	rel_filename: string,
+	setup_cfg: forseti.Xitdb_Config,
+	reopen_cfg: forseti.Xitdb_Config,
+	reopen_existing: bool,
+	loc := #caller_location,
+) {
+	err := driver_attempt_invalid_file_open(w.t, rel_filename, setup_cfg, reopen_cfg, reopen_existing)
+	w.last_store_err = err
+	if !testing.expect(w.t, err != nil, loc = loc) {
+		return
+	}
+}
+
+upon_attempting_invalid_memory_open :: proc(
+	w: ^World,
+	init_cfg: forseti.Xitdb_Config,
+	reopen_cfg: forseti.Xitdb_Config,
+	reopen_existing: bool,
+	loc := #caller_location,
+) {
+	err := driver_attempt_invalid_memory_open(init_cfg, reopen_cfg, reopen_existing)
+	w.last_store_err = err
+	if !testing.expect(w.t, err != nil, loc = loc) {
+		return
+	}
+}
+
+then_lazy_field_equals :: proc(
+	w: ^World,
+	store_label: string,
+	moment_idx: i64,
+	collection_path: string,
+	record_key: string,
+	fields: []string,
+	expected: Table_Test_Arg,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	val, found, err := driver_read_store_lazy_field(&sh.bridge, moment_idx, collection_path, record_key, fields, &sh.interner)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		return
+	}
+	if !testing.expectf(w.t, found, "expected lazy field at %s[%q] to exist", collection_path, record_key, loc = loc) {
+		return
+	}
+	driver_expect_value_matches_arg(w.t, val, expected, &sh.interner, loc)
+}
+
+then_sorted_prefix_scan_returns :: proc(
+	w: ^World,
+	store_label: string,
+	collection_path: string,
+	prefix: string,
+	expected_keys: []string,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	actual, err := driver_read_sorted_prefix(&sh.bridge, collection_path, prefix, context.temp_allocator)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, len(actual), len(expected_keys), loc = loc)
+	for i := 0; i < min(len(actual), len(expected_keys)); i += 1 {
+		testing.expect_value(w.t, actual[i], expected_keys[i], loc = loc)
+	}
+}
+
+then_eav_entity_attributes_match :: proc(
+	w: ^World,
+	store_label: string,
+	collection_path: string,
+	entity: string,
+	expected_attrs: []string,
+	expected_vals: []string,
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	attrs, vals, err := driver_scan_eav_entity(&sh.bridge, collection_path, entity, &sh.interner, context.temp_allocator)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, len(attrs), len(expected_attrs), loc = loc)
+	for i := 0; i < min(len(attrs), len(expected_attrs)); i += 1 {
+		testing.expect_value(w.t, attrs[i], expected_attrs[i], loc = loc)
+		testing.expect_value(w.t, vals[i], expected_vals[i], loc = loc)
+	}
+}
+
+then_delta_sync_counts :: proc(
+	w: ^World,
+	run_label: string,
+	expected_added: int,
+	expected_removed: int,
+	expected_changed_pairs: int,
+	expect_compacted: bool,
+	loc := #caller_location,
+) {
+	res, has := &w.sync_runs[run_label]
+	if !testing.expectf(w.t, has, "unknown sync run %q", run_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, res.was_compacted, expect_compacted, loc = loc)
+	added, removed, changed_old, changed_new := 0, 0, 0, 0
+	for d in res.deltas {
+		switch d.kind {
+		case .Added:       added += 1
+		case .Removed:     removed += 1
+		case .Changed_Old: changed_old += 1
+		case .Changed_New: changed_new += 1
+		}
+	}
+	testing.expect_value(w.t, added, expected_added, loc = loc)
+	testing.expect_value(w.t, removed, expected_removed, loc = loc)
+	testing.expect_value(w.t, changed_old, expected_changed_pairs, loc = loc)
+	testing.expect_value(w.t, changed_new, expected_changed_pairs, loc = loc)
+}
+
+then_delta_sync_skipped_slots :: proc(
+	w: ^World,
+	run_label: string,
+	min_slots_skipped: u64,
+	max_blocks_compared: u64,
+	max_keys_decoded: u64,
+	loc := #caller_location,
+) {
+	res, has := &w.sync_runs[run_label]
+	if !testing.expectf(w.t, has, "unknown sync run %q", run_label, loc = loc) {
+		return
+	}
+	testing.expectf(w.t, res.slots_skipped >= min_slots_skipped, "expected slots_skipped >= %d, got %d", min_slots_skipped, res.slots_skipped, loc = loc)
+	testing.expectf(w.t, res.blocks_compared <= max_blocks_compared, "expected blocks_compared <= %d, got %d", max_blocks_compared, res.blocks_compared, loc = loc)
+	testing.expectf(w.t, res.keys_decoded <= max_keys_decoded, "expected keys_decoded <= %d, got %d", max_keys_decoded, res.keys_decoded, loc = loc)
+}
+
+then_telemetry_counter_at_least :: proc(
+	w: ^World,
+	counter: forseti.Telemetry_Counter,
+	min_val: u64,
+	loc := #caller_location,
+) {
+	actual := w.telemetry.counters[counter]
+	testing.expectf(w.t, actual >= min_val, "expected counter %v >= %d, got %d", counter, min_val, actual, loc = loc)
+}
+
+then_overlay_fork_is_isolated :: proc(
+	w: ^World,
+	parent_label: string,
+	fork_label: string,
+	collection_path: string,
+	key: string,
+	expected_parent_val: Maybe(i64),
+	expected_fork_val: Maybe(i64),
+	max_owned_bytes: i64,
+	loc := #caller_location,
+) {
+	sh, has_p := w.stores[parent_label]
+	fh, has_f := w.forks[fork_label]
+	if !testing.expectf(w.t, has_p && has_f, "missing store/fork", loc = loc) {
+		return
+	}
+	p_val, p_found, p_err := driver_read_store_lazy_field(&sh.bridge, -1, collection_path, key, nil, &sh.interner)
+	testing.expect_value(w.t, p_err, nil, loc = loc)
+	if exp_p, ok := expected_parent_val.?; ok {
+		testing.expect(w.t, p_found, loc = loc)
+		testing.expect_value(w.t, p_val.(i64) or_else -999999, exp_p, loc = loc)
+	} else {
+		testing.expect_value(w.t, p_found, false, loc = loc)
+	}
+
+	f_val, f_found, f_err := driver_read_store_lazy_field(&fh.bridge, -1, collection_path, key, nil, &sh.interner)
+	testing.expect_value(w.t, f_err, nil, loc = loc)
+	if exp_f, ok := expected_fork_val.?; ok {
+		testing.expect(w.t, f_found, loc = loc)
+		testing.expect_value(w.t, f_val.(i64) or_else -999999, exp_f, loc = loc)
+	} else {
+		testing.expect_value(w.t, f_found, false, loc = loc)
+	}
+
+	owned := forseti.fork_owned_bytes(fh)
+	testing.expectf(w.t, owned <= max_owned_bytes, "expected overlay owned bytes <= %d, got %d", max_owned_bytes, owned, loc = loc)
+}
+
+then_store_error_is :: proc(
+	w: ^World,
+	expected: forseti.Store_Error,
+	loc := #caller_location,
+) {
+	testing.expect_value(w.t, w.last_store_err, expected, loc = loc)
 }
 
 @(test)

@@ -1,12 +1,15 @@
 package forseti_specs
 
+import "base:runtime"
 import "core:fmt"
+import "core:log"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:testing"
+import xitdb "xitdb:."
 import "../forseti"
 
 driver_record_bootstrap_telemetry :: proc(sink: ^forseti.Telemetry_Sink) {
@@ -306,4 +309,448 @@ driver_exec_cli :: proc(working_dir, bin_path: string, args: []string) -> (run: 
 		stdout    = string(stdout),
 		stderr    = string(stderr),
 	}, ""
+}
+
+driver_create_standalone_store :: proc(cfg: forseti.Xitdb_Config, telemetry: ^forseti.Telemetry_Sink) -> (sh: ^Store_Handle, err: forseti.Store_Error) {
+	sh = new(Store_Handle)
+	err = forseti.store_bridge_init_standalone(&sh.bridge, cfg, telemetry)
+	if err != nil {
+		free(sh)
+		return nil, err
+	}
+	if i_err := forseti.interner_init(&sh.interner); i_err != nil {
+		forseti.store_bridge_destroy(&sh.bridge)
+		free(sh)
+		return nil, i_err
+	}
+	if s_err := forseti.delta_syncer_init(&sh.syncer, telemetry); s_err != nil {
+		forseti.interner_destroy(&sh.interner)
+		forseti.store_bridge_destroy(&sh.bridge)
+		free(sh)
+		return nil, s_err
+	}
+	sh.sync_inited = true
+	return sh, nil
+}
+
+driver_open_file_store :: proc(
+	t: ^testing.T,
+	rel_filename: string,
+	cfg: forseti.Xitdb_Config,
+	telemetry: ^forseti.Telemetry_Sink,
+) -> (sh: ^Store_Handle, err: forseti.Store_Error) {
+	dir, dir_err := os.make_directory_temp("", "forseti_xitdb_*", context.allocator)
+	if dir_err != nil {
+		return nil, dir_err
+	}
+	cleanup_ptr := new(string)
+	cleanup_ptr^ = dir
+	testing.cleanup(t, driver_cleanup_cli_dir, rawptr(cleanup_ptr))
+
+	sh, err = driver_reopen_file_store_in_dir(dir, rel_filename, cfg, telemetry)
+	return sh, err
+}
+
+driver_reopen_file_store_in_dir :: proc(
+	dir: string,
+	rel_filename: string,
+	cfg: forseti.Xitdb_Config,
+	telemetry: ^forseti.Telemetry_Sink,
+) -> (sh: ^Store_Handle, err: forseti.Store_Error) {
+	full, j_err := filepath.join({dir, rel_filename}, context.temp_allocator)
+	if j_err != nil {
+		return nil, j_err
+	}
+	sh = new(Store_Handle)
+	sh.attached_dir = dir
+	err = forseti.store_bridge_open_file(&sh.bridge, full, cfg, telemetry)
+	if err != nil {
+		free(sh)
+		return nil, err
+	}
+	if i_err := forseti.interner_init(&sh.interner); i_err != nil {
+		forseti.store_bridge_destroy(&sh.bridge)
+		free(sh)
+		return nil, i_err
+	}
+	if s_err := forseti.delta_syncer_init(&sh.syncer, telemetry); s_err != nil {
+		forseti.interner_destroy(&sh.interner)
+		forseti.store_bridge_destroy(&sh.bridge)
+		free(sh)
+		return nil, s_err
+	}
+	sh.sync_inited = true
+	return sh, nil
+}
+
+driver_destroy_store_handle :: proc(sh: ^Store_Handle) {
+	if sh == nil {
+		return
+	}
+	if sh.sync_inited {
+		forseti.delta_syncer_destroy(&sh.syncer)
+	}
+	forseti.store_bridge_destroy(&sh.bridge)
+	forseti.interner_destroy(&sh.interner)
+	free(sh)
+}
+
+@(private = "file")
+_Mdm_Orgs_Tx :: struct {
+	orgs: []Mdm_Org_Input,
+}
+
+@(private = "file")
+_mdm_orgs_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+	payload := (^_Mdm_Orgs_Tx)(user_data)
+	raw_map, err := forseti.store_write_path_ensure_map(moment_wc, ".orgs.raw")
+	if err != nil {
+		return .Write_Failed
+	}
+	by_domain, sm_err := forseti.store_write_path_ensure_sorted_map(moment_wc, ".orgs.by_domain")
+	if sm_err != nil {
+		return .Write_Failed
+	}
+	eav_map, eav_err := forseti.store_write_path_ensure_sorted_map(moment_wc, ".facts.eav")
+	if eav_err != nil {
+		return .Write_Failed
+	}
+
+	for org in payload.orgs {
+		rec_wc := xitdb.hash_map_put_cursor(&raw_map, org.id) or_return
+		rec_map, rm_err := xitdb.write_hash_map_init(rec_wc)
+		if rm_err != nil {
+			return rm_err
+		}
+		xitdb.hash_map_put(&rec_map, "name", org.name) or_return
+		xitdb.hash_map_put(&rec_map, "domain", org.domain) or_return
+		xitdb.hash_map_put(&rec_map, "employees", org.employees) or_return
+		if b_err := forseti.write_bool_to_hash_map(&rec_map, "active", org.active); b_err != nil {
+			return .Write_Failed
+		}
+
+		addr_wc := xitdb.hash_map_put_cursor(&rec_map, "address") or_return
+		addr_map := xitdb.write_hash_map_init(addr_wc) or_return
+		xitdb.hash_map_put(&addr_map, "country", org.country) or_return
+
+		if len(org.locked_fields) > 0 {
+			lf_wc := xitdb.hash_map_put_cursor(&rec_map, "locked_fields") or_return
+			lf_set := xitdb.write_hash_set_init(lf_wc) or_return
+			for f in org.locked_fields {
+				xitdb.hash_set_put(&lf_set, f) or_return
+			}
+		}
+
+		dom_buf: [256]u8 = ---
+		dom_key := fmt.bprintf(dom_buf[:], "%s:%s", org.domain, org.id)
+		xitdb.sorted_map_put(&by_domain, dom_key, org.id) or_return
+
+		if se := forseti.store_eav_put_string(&eav_map, org.id, "name", org.name); se != nil {
+			return .Write_Failed
+		}
+		if se2 := forseti.store_eav_put_string(&eav_map, org.id, "country", org.country); se2 != nil {
+			return .Write_Failed
+		}
+	}
+	return nil
+}
+
+driver_commit_mdm_orgs :: proc(bridge: ^forseti.Store_Bridge, orgs: []Mdm_Org_Input) -> forseti.Store_Error {
+	payload := _Mdm_Orgs_Tx{orgs = orgs}
+	_, err := forseti.store_bridge_commit_moment(bridge, _mdm_orgs_tx_cb, &payload)
+	return err
+}
+
+@(private = "file")
+_Bulk_Seed_Tx :: struct {
+	path:  string,
+	count: int,
+}
+
+@(private = "file")
+_bulk_seed_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+	p := (^_Bulk_Seed_Tx)(user_data)
+	m, err := forseti.store_write_path_ensure_map(moment_wc, p.path)
+	if err != nil {
+		return .Write_Failed
+	}
+	key_buf: [32]u8 = ---
+	for i := 0; i < p.count; i += 1 {
+		key := fmt.bprintf(key_buf[:], "org:%06d", i)
+		xitdb.hash_map_put(&m, key, i64(i)) or_return
+	}
+	return nil
+}
+
+driver_bulk_seed_records :: proc(bridge: ^forseti.Store_Bridge, path: string, count: int) -> forseti.Store_Error {
+	payload := _Bulk_Seed_Tx{path = path, count = count}
+	_, err := forseti.store_bridge_commit_moment(bridge, _bulk_seed_tx_cb, &payload)
+	return err
+}
+
+@(private = "file")
+_Mutate_Batch_Tx :: struct {
+	path:           string,
+	added:          []string,
+	updated:        []string,
+	removed:        []string,
+	new_val_offset: i64,
+}
+
+@(private = "file")
+_mutate_batch_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+	p := (^_Mutate_Batch_Tx)(user_data)
+	m, err := forseti.store_write_path_ensure_map(moment_wc, p.path)
+	if err != nil {
+		return .Write_Failed
+	}
+	for k, i in p.removed {
+		_ = i
+		_, _ = xitdb.hash_map_remove(&m, k)
+	}
+	for k, i in p.updated {
+		xitdb.hash_map_put(&m, k, p.new_val_offset + i64(i)) or_return
+	}
+	for k, i in p.added {
+		xitdb.hash_map_put(&m, k, p.new_val_offset + 500 + i64(i)) or_return
+	}
+	return nil
+}
+
+driver_mutate_record_batch :: proc(
+	bridge: ^forseti.Store_Bridge,
+	path: string,
+	added: []string,
+	updated: []string,
+	removed: []string,
+	new_val_offset: i64,
+) -> forseti.Store_Error {
+	payload := _Mutate_Batch_Tx{
+		path           = path,
+		added          = added,
+		updated        = updated,
+		removed        = removed,
+		new_val_offset = new_val_offset,
+	}
+	_, err := forseti.store_bridge_commit_moment(bridge, _mutate_batch_tx_cb, &payload)
+	return err
+}
+
+driver_attempt_invalid_file_open :: proc(
+	t: ^testing.T,
+	rel_filename: string,
+	setup_cfg: forseti.Xitdb_Config,
+	reopen_cfg: forseti.Xitdb_Config,
+	reopen_existing: bool,
+) -> forseti.Store_Error {
+	context.logger = log.nil_logger()
+
+	dir, dir_err := os.make_directory_temp("", "forseti_neg_file_*", context.allocator)
+	if dir_err != nil {
+		return dir_err
+	}
+	cleanup_ptr := new(string)
+	cleanup_ptr^ = dir
+	testing.cleanup(t, driver_cleanup_cli_dir, rawptr(cleanup_ptr))
+
+	full, j_err := filepath.join({dir, rel_filename}, context.temp_allocator)
+	if j_err != nil {
+		return j_err
+	}
+	if reopen_existing {
+		sb := new(forseti.Store_Bridge)
+		defer {
+			forseti.store_bridge_destroy(sb)
+			free(sb)
+		}
+		if s_err := forseti.store_bridge_open_file(sb, full, setup_cfg, nil); s_err != nil {
+			return s_err
+		}
+		forseti.store_bridge_destroy(sb)
+		sb^ = {}
+		return forseti.store_bridge_open_file(sb, full, reopen_cfg, nil)
+	}
+	sb := new(forseti.Store_Bridge)
+	defer {
+		forseti.store_bridge_destroy(sb)
+		free(sb)
+	}
+	return forseti.store_bridge_open_file(sb, full, setup_cfg, nil)
+}
+
+driver_attempt_invalid_memory_open :: proc(
+	init_cfg: forseti.Xitdb_Config,
+	reopen_cfg: forseti.Xitdb_Config,
+	reopen_existing: bool,
+) -> forseti.Store_Error {
+	context.logger = log.nil_logger()
+	if !reopen_existing {
+		sb := new(forseti.Store_Bridge)
+		defer {
+			forseti.store_bridge_destroy(sb)
+			free(sb)
+		}
+		return forseti.store_bridge_init_standalone(sb, init_cfg, nil)
+	}
+	mem_core := xitdb.core_memory_init()
+	defer _ = xitdb.core_destroy(&mem_core)
+
+	init_hasher := xitdb.fast_hasher() if init_cfg.mode == .Fast_Memory else xitdb.sha1_hasher()
+	init_opts := xitdb.Database_Options{skip_memory_crc = init_cfg.skip_memory_crc}
+	_, err1 := xitdb.database_init_with_options(&mem_core, init_hasher, init_opts)
+	if err1 != nil {
+		return forseti.xitdb_to_store_err(err1)
+	}
+
+	reopen_hasher := xitdb.fast_hasher() if reopen_cfg.mode == .Fast_Memory else xitdb.sha1_hasher()
+	reopen_opts := xitdb.Database_Options{skip_memory_crc = reopen_cfg.skip_memory_crc}
+	_, err2 := xitdb.database_init_with_options(&mem_core, reopen_hasher, reopen_opts)
+	return forseti.xitdb_to_store_err(err2)
+}
+
+driver_read_store_lazy_field :: proc(
+	bridge: ^forseti.Store_Bridge,
+	moment_idx: i64,
+	collection_path: string,
+	record_key: string,
+	fields: []string,
+	interner: ^forseti.String_Interner,
+) -> (val: forseti.Value, found: bool, err: forseti.Store_Error) {
+	m_cur, m_ok, m_err := forseti.store_bridge_moment_cursor(bridge, moment_idx)
+	if m_err != nil || !m_ok {
+		return {}, false, m_err
+	}
+	col_cur, c_ok, c_err := forseti.store_resolve_path(m_cur, collection_path)
+	if c_err != nil || !c_ok {
+		return {}, false, c_err
+	}
+	rec_cur, r_ok, r_err := forseti.store_lookup_record(col_cur, record_key)
+	if r_err != nil || !r_ok {
+		return {}, false, r_err
+	}
+	if len(fields) == 0 {
+		return forseti.cursor_read_value(rec_cur, interner)
+	}
+	return forseti.cursor_read_field_path(rec_cur, fields, interner)
+}
+
+driver_expect_value_matches_arg :: proc(
+	t: ^testing.T,
+	val: forseti.Value,
+	expected: Table_Test_Arg,
+	interner: ^forseti.String_Interner,
+	loc: runtime.Source_Code_Location,
+) {
+	switch e in expected {
+	case bool:
+		b, ok := val.(bool)
+		testing.expect(t, ok, loc = loc)
+		if ok {
+			testing.expect_value(t, b, e, loc = loc)
+		}
+	case i32:
+		v, ok := val.(i32)
+		testing.expect(t, ok, loc = loc)
+		if ok {
+			testing.expect_value(t, v, e, loc = loc)
+		}
+	case i64:
+		v, ok := val.(i64)
+		testing.expect(t, ok, loc = loc)
+		if ok {
+			testing.expect_value(t, v, e, loc = loc)
+		}
+	case f64:
+		v, ok := val.(f64)
+		testing.expect(t, ok, loc = loc)
+		if ok {
+			testing.expect_value(t, v, e, loc = loc)
+		}
+	case string:
+		sid, ok := val.(forseti.String_Id)
+		testing.expect(t, ok, loc = loc)
+		if ok {
+			testing.expect_value(t, forseti.interner_get(interner, sid), e, loc = loc)
+		}
+	}
+}
+
+@(private = "file")
+_Sorted_Collect_Ctx :: struct {
+	keys: ^[dynamic]string,
+	alloc: mem.Allocator,
+}
+
+@(private = "file")
+_sorted_collect_cb :: proc(key: []u8, _val: xitdb.Read_Cursor, user_data: rawptr) -> bool {
+	c := (^_Sorted_Collect_Ctx)(user_data)
+	append(c.keys, strings.clone(string(key), c.alloc))
+	return true
+}
+
+driver_read_sorted_prefix :: proc(
+	bridge: ^forseti.Store_Bridge,
+	collection_path: string,
+	prefix: string,
+	alloc: mem.Allocator,
+) -> (keys: []string, err: forseti.Store_Error) {
+	m_cur, m_ok, m_err := forseti.store_bridge_moment_cursor(bridge, -1)
+	if m_err != nil || !m_ok {
+		return nil, m_err
+	}
+	col_cur, c_ok, c_err := forseti.store_resolve_path(m_cur, collection_path)
+	if c_err != nil || !c_ok {
+		return nil, c_err
+	}
+	out := make([dynamic]string, 0, 8, alloc)
+	sctx := _Sorted_Collect_Ctx{keys = &out, alloc = alloc}
+	s_err := forseti.store_sorted_prefix_scan(col_cur, transmute([]u8)prefix, _sorted_collect_cb, &sctx)
+	return out[:], s_err
+}
+
+@(private = "file")
+_Eav_Collect_Ctx :: struct {
+	attrs:    ^[dynamic]string,
+	vals:     ^[dynamic]string,
+	interner: ^forseti.String_Interner,
+	alloc:    mem.Allocator,
+}
+
+@(private = "file")
+_eav_collect_cb :: proc(attr: string, val_cur: xitdb.Read_Cursor, user_data: rawptr) -> bool {
+	c := (^_Eav_Collect_Ctx)(user_data)
+	append(c.attrs, strings.clone(attr, c.alloc))
+	v, ok, err := forseti.cursor_read_value(val_cur, c.interner)
+	if err != nil || !ok {
+		append(c.vals, "")
+		return true
+	}
+	if sid, is_s := v.(forseti.String_Id); is_s {
+		append(c.vals, forseti.interner_get(c.interner, sid))
+	} else {
+		append(c.vals, fmt.tprintf("%v", v))
+	}
+	return true
+}
+
+driver_scan_eav_entity :: proc(
+	bridge: ^forseti.Store_Bridge,
+	collection_path: string,
+	entity: string,
+	interner: ^forseti.String_Interner,
+	alloc: mem.Allocator,
+) -> (attrs: []string, vals: []string, err: forseti.Store_Error) {
+	m_cur, m_ok, m_err := forseti.store_bridge_moment_cursor(bridge, -1)
+	if m_err != nil || !m_ok {
+		return nil, nil, m_err
+	}
+	col_cur, c_ok, c_err := forseti.store_resolve_path(m_cur, collection_path)
+	if c_err != nil || !c_ok {
+		return nil, nil, c_err
+	}
+	a_out := make([dynamic]string, 0, 8, alloc)
+	v_out := make([dynamic]string, 0, 8, alloc)
+	ectx := _Eav_Collect_Ctx{attrs = &a_out, vals = &v_out, interner = interner, alloc = alloc}
+	s_err := forseti.store_eav_scan_entity(col_cur, entity, _eav_collect_cb, &ectx)
+	return a_out[:], v_out[:], s_err
 }

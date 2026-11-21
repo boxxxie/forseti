@@ -9,6 +9,7 @@ main :: proc() {
 	defer hugi.suite_destroy(&suite)
 
 	register_table_benchmarks(&suite)
+	register_xitdb_benchmarks(&suite)
 
 	if !hugi.suite_run(&suite) {
 		fmt.eprintln("forseti benchmarks failed")

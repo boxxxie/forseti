@@ -14,7 +14,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 3: `xitdb` Fact/Audit Substrate, `diff_collection` Z-Set Delta Bridge, `Core_Overlay` Forks, and Opt-In Fast-Memory Adaptations** *(Priority: Step 3 — Depends on Track 1)*
+- [~] **Track 3: `xitdb` Fact/Audit Substrate, `diff_collection` Z-Set Delta Bridge, `Core_Overlay` Forks, and Opt-In Fast-Memory Adaptations** *(Priority: Step 3 — Depends on Track 1)*
   *Link: [./tracks/xitdb_substrate_and_optin_fast_memory_20261121/](./tracks/xitdb_substrate_and_optin_fast_memory_20261121/)*
 
 ---
