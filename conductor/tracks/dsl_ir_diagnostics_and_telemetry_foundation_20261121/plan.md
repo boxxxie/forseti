@@ -20,15 +20,15 @@
 
 ## Phase 2: Flat `Ast_Pool`, Bounded-Recovery Pratt Parser & Canonical `Rulebase_IR`
 
-- [ ] Task: Implement compact `Ast_Pool` (`#assert(size_of(Node) <= 32)`) and S-expression AST printer (Pattern E TDD)
-    - [ ] Write failing tests verifying `Node` size invariant, scratch-staged `extra_children` non-interleaving on nested calls, and deterministic S-expression formatting
-    - [ ] Implement `forseti/ast.odin` and `forseti/ast_print.odin`
-- [ ] Task: Implement Pratt expression parser and full `.forseti` module/schema/table/rule/query parser with error recovery (Pattern E + Pattern D `t.seed`)
-    - [ ] Write failing tests for operator precedence, associativity, `MAX_PARSE_DEPTH` protection, error recovery synchronization (never spinning on stray tokens or `.EOF`), and full MDM policy constructs
-    - [ ] Implement `forseti/parser.odin` and `forseti/diagnostics.odin` (caret excerpt + JSON diagnostic renderer)
-- [ ] Task: Implement canonical `Rulebase_IR`, AST->IR lowering, and Tier 2 Internal Odin DSL builders (Red-First 4-Layer ATDD + Unit)
-    - [ ] Write failing Layer 1 behavioral specs (`specs/compiler_diagnostics_spec_test.odin` verifying External `.forseti` vs Tier 2 Internal Odin DSL produce equivalent compiled IR via public APIs) and direct Pattern E lowering checks
-    - [ ] Implement `forseti/ir.odin`, `forseti/lower.odin`, and `forseti/dsl_odin.odin`
+- [x] Task: Implement compact `Ast_Pool` (`#assert(size_of(Node) <= 32)`) and S-expression AST printer (Pattern E TDD)
+    - [x] Write failing tests verifying `Node` size invariant, scratch-staged `extra_children` non-interleaving on nested calls, and deterministic S-expression formatting
+    - [x] Implement `forseti/ast.odin` and `forseti/ast_print.odin`
+- [x] Task: Implement Pratt expression parser and full `.forseti` module/schema/table/rule/query parser with error recovery (Pattern E + Pattern D `t.seed`)
+    - [x] Write failing tests for operator precedence, associativity, `MAX_PARSE_DEPTH` protection, error recovery synchronization (never spinning on stray tokens or `.EOF`), and full MDM policy constructs
+    - [x] Implement `forseti/parser.odin` and `forseti/diagnostics.odin` (caret excerpt + JSON diagnostic renderer)
+- [x] Task: Implement canonical `Rulebase_IR`, AST->IR lowering, and Tier 2 Internal Odin DSL builders (Red-First 4-Layer ATDD + Unit)
+    - [x] Write failing Layer 1 behavioral specs (`specs/compiler_diagnostics_spec_test.odin` verifying External `.forseti` vs Tier 2 Internal Odin DSL produce equivalent compiled IR via public APIs) and direct Pattern E lowering checks
+    - [x] Implement `forseti/ir.odin`, `forseti/lower.odin`, and `forseti/dsl_odin.odin`
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Ast_Pool, Pratt Parser & Rulebase_IR' (Protocol in workflow.md)
 
 ---

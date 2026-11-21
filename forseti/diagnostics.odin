@@ -1,5 +1,6 @@
 package forseti
 
+import "core:fmt"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
@@ -146,4 +147,129 @@ diag_has_errors :: proc "contextless" (list: ^Diagnostic_List) -> bool {
 
 diag_has_warnings :: proc "contextless" (list: ^Diagnostic_List) -> bool {
 	return list != nil && list.warning_count > 0
+}
+
+@(rodata)
+diag_severity_strings := [Diagnostic_Severity]string{
+	.Error   = "error",
+	.Warning = "warning",
+	.Hint    = "hint",
+}
+
+@(require_results)
+format_diagnostic_human :: proc(
+	d: Diagnostic,
+	src: string,
+	filename: string,
+	allocator := context.allocator,
+) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	fmt.sbprintf(
+		&b,
+		"%s:%d:%d: %s[%s]: %s\n",
+		filename,
+		d.line,
+		d.col,
+		diag_severity_strings[d.severity],
+		diag_code_strings[d.code],
+		d.message,
+	)
+
+	if len(src) > 0 && int(d.span.offset) <= len(src) {
+		line_start := int(d.span.offset)
+		for line_start > 0 && src[line_start - 1] != '\n' {
+			line_start -= 1
+		}
+		line_end := line_start
+		for line_end < len(src) && src[line_end] != '\n' && src[line_end] != '\r' {
+			line_end += 1
+		}
+		line_text := src[line_start:line_end]
+		fmt.sbprintf(&b, "  %4d | %s\n", d.line, line_text)
+
+		caret_col := max(int(d.col) - 1, 0)
+		caret_len := max(int(d.span.len), 1)
+		if line_start + caret_col + caret_len > line_end {
+			caret_len = max(line_end - (line_start + caret_col), 1)
+		}
+		strings.write_string(&b, "       | ")
+		for i := 0; i < caret_col; i += 1 {
+			if line_start + i < line_end && src[line_start + i] == '\t' {
+				strings.write_byte(&b, '\t')
+			} else {
+				strings.write_byte(&b, ' ')
+			}
+		}
+		for _ in 0 ..< caret_len {
+			strings.write_byte(&b, '^')
+		}
+		strings.write_byte(&b, '\n')
+	}
+
+	if len(d.hint) > 0 {
+		fmt.sbprintf(&b, "  hint: %s\n", d.hint)
+	}
+
+	return strings.to_string(b), nil
+}
+
+@(require_results)
+format_diagnostics_json :: proc(
+	list: ^Diagnostic_List,
+	filename: string,
+	allocator := context.allocator,
+) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	ok := list == nil || list.error_count == 0
+	err_count := list.error_count if list != nil else 0
+	warn_count := list.warning_count if list != nil else 0
+
+	strings.write_string(&b, `{"file":`)
+	write_json_escaped_string(&b, filename)
+	fmt.sbprintf(
+		&b,
+		`,"ok":%t,"error_count":%d,"warning_count":%d,"diagnostics":[`,
+		ok,
+		err_count,
+		warn_count,
+	)
+
+	if list != nil {
+		for d, idx in list.items {
+			if idx > 0 {
+				strings.write_byte(&b, ',')
+			}
+			strings.write_string(&b, `{"code":`)
+			write_json_escaped_string(&b, diag_code_strings[d.code])
+			strings.write_string(&b, `,"severity":`)
+			write_json_escaped_string(&b, diag_severity_strings[d.severity])
+			fmt.sbprintf(
+				&b,
+				`,"line":%d,"col":%d,"end_line":%d,"end_col":%d,"offset":%d,"len":%d,"message":`,
+				d.line,
+				d.col,
+				d.end_line,
+				d.end_col,
+				d.span.offset,
+				d.span.len,
+			)
+			write_json_escaped_string(&b, d.message)
+			strings.write_string(&b, `,"hint":`)
+			write_json_escaped_string(&b, d.hint)
+			strings.write_byte(&b, '}')
+		}
+	}
+
+	strings.write_string(&b, "]}")
+	return strings.to_string(b), nil
 }
