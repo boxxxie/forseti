@@ -21,9 +21,9 @@
 
 ## Phase 2: Telemetry Flamegraph Audit, Optimization Pass & `docs/benchmarks.md`
 
-- [ ] Task: Profile `100k`/`1M` runs with Forseti Telemetry + hardware perf counters and implement bottleneck optimizations (TDD)
-    - [ ] Write regression/correctness checks covering any optimized matcher/hash/delta paths before refactoring
-    - [ ] Apply targeted data-oriented optimizations driven by telemetry/perf-counter evidence and record post-optimization `hugi run` deltas
-- [ ] Task: Export longitudinal results and author `docs/benchmarks.md`
-    - [ ] Export tables/JSON from `benchmarks/history.hugidb` via `hugi` and document `10`..`1,000,000` rule latency, RAM/rule, telemetry breakdowns, and mode tradeoffs in `docs/benchmarks.md`
+- [x] Task: Profile `100k`/`1M` runs with Forseti Telemetry + hardware perf counters and implement bottleneck optimizations (TDD)
+    - [x] Write regression/correctness checks covering any optimized matcher/hash/delta paths before refactoring
+    - [x] Apply targeted data-oriented optimizations driven by telemetry/perf-counter evidence and record post-optimization `hugi run` deltas
+- [x] Task: Export longitudinal results and author `docs/benchmarks.md`
+    - [x] Export tables/JSON from `benchmarks/history.hugidb` via `hugi` and document `10`..`1,000,000` rule latency, RAM/rule, telemetry breakdowns, and mode tradeoffs in `docs/benchmarks.md`
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Telemetry Optimization & Benchmark Report' (Protocol in workflow.md)
