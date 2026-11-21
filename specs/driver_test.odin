@@ -754,3 +754,167 @@ driver_scan_eav_entity :: proc(
 	s_err := forseti.store_eav_scan_entity(col_cur, entity, _eav_collect_cb, &ectx)
 	return a_out[:], v_out[:], s_err
 }
+
+driver_compile_rulebase :: proc(
+	ir: ^forseti.Rulebase_IR,
+	tel: ^forseti.Telemetry_Sink,
+) -> (rb: ^forseti.Rulebase, err: forseti.Compile_Error) {
+	rb = new(forseti.Rulebase)
+	res, c_err := forseti.rulebase_compile(ir, tel)
+	rb^ = res
+	return rb, c_err
+}
+
+driver_args_to_values :: proc(sess: ^forseti.Session, args: []Table_Test_Arg) -> []forseti.Value {
+	vals := make([]forseti.Value, len(args), context.temp_allocator)
+	for a, i in args {
+		switch x in a {
+		case bool:
+			vals[i] = x
+		case i32:
+			vals[i] = x
+		case i64:
+			vals[i] = x
+		case f64:
+			vals[i] = x
+		case string:
+			sid, _ := forseti.intern_session_string(&sess.rb.interner, &sess.interner, x)
+			vals[i] = sid
+		}
+	}
+	return vals
+}
+
+driver_session_assert :: proc(
+	sess: ^forseti.Session,
+	binding_name: string,
+	key: string,
+	args: []Table_Test_Arg,
+) -> forseti.Session_Error {
+	vals := driver_args_to_values(sess, args)
+	defer free_all(context.temp_allocator)
+	_, err := forseti.session_insert_fact(sess, binding_name, key, vals)
+	return err
+}
+
+driver_session_modify_by_key :: proc(
+	sess: ^forseti.Session,
+	binding_name: string,
+	key: string,
+	args: []Table_Test_Arg,
+) -> forseti.Session_Error {
+	vals := driver_args_to_values(sess, args)
+	defer free_all(context.temp_allocator)
+	return forseti.session_modify_fact_by_key(sess, binding_name, key, vals)
+}
+
+driver_session_retract_by_key :: proc(
+	sess: ^forseti.Session,
+	binding_name: string,
+	key: string,
+) -> forseti.Session_Error {
+	return forseti.session_retract_fact_by_key(sess, binding_name, key)
+}
+
+driver_run_query :: proc(
+	sess: ^forseti.Session,
+	query_name: string,
+	arg_names: []string,
+	arg_vals: []Table_Test_Arg,
+) -> (res: forseti.Query_Result, err: forseti.Session_Error) {
+	vals := driver_args_to_values(sess, arg_vals)
+	qargs := make([]forseti.Query_Arg, len(arg_names), context.temp_allocator)
+	for i := 0; i < len(arg_names); i += 1 {
+		qargs[i] = forseti.Query_Arg{name = arg_names[i], value = vals[i]}
+	}
+	err = forseti.session_query(sess, query_name, qargs, &res)
+	free_all(context.temp_allocator)
+	return res, err
+}
+
+driver_session_find_fact_matching :: proc(
+	sess: ^forseti.Session,
+	binding_name: string,
+	expected_fields: []Table_Test_Arg,
+) -> bool {
+	bid, has_b := forseti.session_find_binding(sess, binding_name)
+	if !has_b {
+		return false
+	}
+	exp_vals := driver_args_to_values(sess, expected_fields)
+	defer free_all(context.temp_allocator)
+
+	for &f in sess.facts {
+		if !f.alive || f.binding_idx != bid || len(f.fields) < len(exp_vals) {
+			continue
+		}
+		match := true
+		for ev, fi in exp_vals {
+			if f.fields[fi] != ev {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+driver_query_has_value :: proc(qr: ^forseti.Query_Result, var_name: string, expected: string) -> bool {
+	for &row in qr.rows {
+		for k, vi in row.var_names {
+			if k == var_name {
+				if row.var_strings[vi] == expected {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+driver_check_store_collection_entry :: proc(
+	bridge: ^forseti.Store_Bridge,
+	collection_path: string,
+	field_name: string,
+	expected_str: string,
+	interner: ^forseti.String_Interner,
+) -> (count: int, matched: bool, err: forseti.Store_Error) {
+	m_cur, m_ok, m_err := forseti.store_bridge_moment_cursor(bridge, -1)
+	if m_err != nil || !m_ok {
+		return 0, false, m_err
+	}
+	col_cur, c_ok, c_err := forseti.store_resolve_path(m_cur, collection_path)
+	if c_err != nil || !c_ok {
+		return 0, false, c_err
+	}
+	it, it_err := xitdb.cursor_iterator(col_cur)
+	if it_err != nil {
+		return 0, false, forseti.xitdb_to_store_err(it_err)
+	}
+	path := [1]string{field_name}
+	for {
+		item, n_err := xitdb.cursor_iterator_next(&it)
+		if n_err != nil {
+			return count, matched, forseti.xitdb_to_store_err(n_err)
+		}
+		entry, ok := item.?
+		if !ok {
+			break
+		}
+		count += 1
+		_, vc, kv_err := xitdb.cursor_read_kv_pair_slots(entry)
+		if kv_err != nil {
+			continue
+		}
+		val, found, _ := forseti.cursor_read_field_path(vc, path[:], interner, .String)
+		if found {
+			if sid, is_s := val.(forseti.String_Id); is_s && forseti.interner_get(interner, sid) == expected_str {
+				matched = true
+			}
+		}
+	}
+	return count, matched, nil
+}

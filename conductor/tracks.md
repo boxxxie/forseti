@@ -19,7 +19,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 4: Lazy PHREAK + Rete/UL Matcher, 32-bit `#must_tail` Guard VM, Deterministic Agenda, and 1M-Rule Sparse Session Memory** *(Priority: Step 4 — Depends on Tracks 1, 2, 3)*
+- [~] **Track 4: Lazy PHREAK + Rete/UL Matcher, 32-bit `#must_tail` Guard VM, Deterministic Agenda, and 1M-Rule Sparse Session Memory** *(Priority: Step 4 — Depends on Tracks 1, 2, 3)*
   *Link: [./tracks/phreak_rete_ul_matcher_and_guard_vm_20261121/](./tracks/phreak_rete_ul_matcher_and_guard_vm_20261121/)*
 
 ---
