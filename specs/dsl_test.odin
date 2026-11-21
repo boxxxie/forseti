@@ -74,13 +74,20 @@ World :: struct {
 	forks:           map[string]^forseti.Fork_Handle,
 	sync_runs:       map[string]forseti.Sync_Result,
 	last_store_err:  forseti.Store_Error,
-	rulebases:       map[string]^forseti.Rulebase,
-	sessions:        map[string]^forseti.Session,
-	query_runs:      map[string]forseti.Query_Result,
-	fire_counts:     map[string]u64,
-	aot_check_ok:    bool,
-	aot_test_ok:     bool,
-	aot_err_msg:     string,
+	rulebases:          map[string]^forseti.Rulebase,
+	sessions:           map[string]^forseti.Session,
+	query_runs:         map[string]forseti.Query_Result,
+	fire_counts:        map[string]u64,
+	explain_texts:      map[string]string,
+	impacts:            map[string]forseti.Impact_Report,
+	semiring_runs:      map[string]forseti.Semiring_Result,
+	diff_reports:       map[string]forseti.Diff_Replay_Report,
+	effect_applied_ids: map[string][]forseti.Fact_Id,
+	last_effect_jobs:   int,
+	last_compile_err:   forseti.Compile_Error,
+	aot_check_ok:       bool,
+	aot_test_ok:        bool,
+	aot_err_msg:        string,
 }
 
 world_init :: proc(w: ^World, t: ^testing.T, loc := #caller_location) {
@@ -102,10 +109,32 @@ world_init :: proc(w: ^World, t: ^testing.T, loc := #caller_location) {
 	w.sessions = make(map[string]^forseti.Session, 8)
 	w.query_runs = make(map[string]forseti.Query_Result, 8)
 	w.fire_counts = make(map[string]u64, 8)
+	w.explain_texts = make(map[string]string, 8)
+	w.impacts = make(map[string]forseti.Impact_Report, 8)
+	w.semiring_runs = make(map[string]forseti.Semiring_Result, 8)
+	w.diff_reports = make(map[string]forseti.Diff_Replay_Report, 8)
+	w.effect_applied_ids = make(map[string][]forseti.Fact_Id, 8)
 }
 
 world_destroy :: proc(w: ^World) {
 	vmem.arena_check_temp(&w.arena)
+	for _, fids in w.effect_applied_ids {
+		delete(fids)
+	}
+	delete(w.effect_applied_ids)
+	for _, &dr in w.diff_reports {
+		forseti.diff_replay_report_destroy(&dr)
+	}
+	delete(w.diff_reports)
+	for _, &sr in w.semiring_runs {
+		forseti.semiring_result_destroy(&sr)
+	}
+	delete(w.semiring_runs)
+	for _, &imp in w.impacts {
+		forseti.impact_report_destroy(&imp)
+	}
+	delete(w.impacts)
+	delete(w.explain_texts)
 	for _, &qr in w.query_runs {
 		forseti.query_result_destroy(&qr)
 	}
@@ -1280,6 +1309,344 @@ then_store_collection_has_record_count_and_field :: proc(
 	testing.expect_value(w.t, err, nil, loc = loc)
 	testing.expect_value(w.t, cnt, expected_count, loc = loc)
 	testing.expectf(w.t, matched, "expected %s[%q == %q] in store %q", collection_path, field_name, expected_str, store_label, loc = loc)
+}
+
+upon_attempting_rulebase_compile :: proc(
+	w: ^World,
+	policy_label: string,
+	loc := #caller_location,
+) {
+	slot, ok := &w.policies[policy_label]
+	if !testing.expectf(w.t, ok && slot.compiled, "policy %q must be compiled", policy_label, loc = loc) {
+		return
+	}
+	rb, err := driver_compile_rulebase(&slot.ir, &w.telemetry)
+	w.last_compile_err = err
+	if err == .None {
+		forseti.rulebase_destroy(rb)
+	}
+	free(rb)
+}
+
+then_rulebase_compile_failed_with :: proc(
+	w: ^World,
+	expected: forseti.Compile_Error,
+	loc := #caller_location,
+) {
+	testing.expect_value(w.t, w.last_compile_err, expected, loc = loc)
+}
+
+then_session_binding_count_is :: proc(
+	w: ^World,
+	sess_label: string,
+	binding_name: string,
+	expected_count: int,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	total, _ := driver_session_count_binding_facts(sess, binding_name)
+	testing.expect_value(w.t, total, expected_count, loc = loc)
+}
+
+then_session_lacks_derived_fact :: proc(
+	w: ^World,
+	sess_label: string,
+	binding_name: string,
+	expected_fields: []Table_Test_Arg,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	found := driver_session_find_fact_matching(sess, binding_name, expected_fields)
+	testing.expectf(w.t, !found, "expected NO live fact in %q matching fields, but found one", binding_name, loc = loc)
+}
+
+then_derived_fact_proof_and_support :: proc(
+	w: ^World,
+	sess_label: string,
+	binding_name: string,
+	expected_fields: []Table_Test_Arg,
+	expected_origin: forseti.Fact_Origin,
+	expected_support: i32,
+	expected_height: u32,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	fid, found := driver_session_find_matching_fact_id(sess, binding_name, expected_fields)
+	if !testing.expectf(w.t, found, "expected fact in %q", binding_name, loc = loc) {
+		return
+	}
+	f := sess.facts[fid]
+	testing.expect_value(w.t, f.origin, expected_origin, loc = loc)
+	testing.expect_value(w.t, f.support_count, expected_support, loc = loc)
+	testing.expect_value(w.t, f.proof_height, expected_height, loc = loc)
+}
+
+upon_committing_session_audit :: proc(
+	w: ^World,
+	sess_label: string,
+	store_label: string,
+	loc := #caller_location,
+) {
+	sess, sok := w.sessions[sess_label]
+	sh, st_ok := w.stores[store_label]
+	if !testing.expectf(w.t, sok && st_ok, "unknown session/store", loc = loc) {
+		return
+	}
+	_, err := forseti.session_commit_derived_and_audit(sess, &sh.bridge)
+	testing.expect_value(w.t, err, nil, loc = loc)
+}
+
+then_store_audit_trail_is_complete :: proc(
+	w: ^World,
+	store_label: string,
+	expected_module: string,
+	min_decisions: int,
+	rule_name: string,
+	entity_key_hint: string = "",
+	loc := #caller_location,
+) {
+	sh, has := w.stores[store_label]
+	if !testing.expectf(w.t, has, "unknown store %q", store_label, loc = loc) {
+		return
+	}
+	ok, msg := driver_check_audit_moment_integrity(&sh.bridge, expected_module, min_decisions, rule_name, entity_key_hint, &sh.interner)
+	testing.expectf(w.t, ok, "audit trail check failed: %s", msg, loc = loc)
+}
+
+upon_explaining_derived_fact :: proc(
+	w: ^World,
+	sess_label: string,
+	binding_name: string,
+	expected_fields: []Table_Test_Arg,
+	explain_label: string,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	fid, found := driver_session_find_matching_fact_id(sess, binding_name, expected_fields)
+	if !testing.expectf(w.t, found, "cannot explain missing fact in %q", binding_name, loc = loc) {
+		return
+	}
+	tree := forseti.explain(sess, fid)
+	defer forseti.explain_tree_destroy(&tree)
+	testing.expect(w.t, tree.found, loc = loc)
+	formatted := forseti.explain_format(&tree, vmem.arena_allocator(&w.arena))
+	w.explain_texts[explain_label] = formatted
+}
+
+then_explanation_contains :: proc(
+	w: ^World,
+	explain_label: string,
+	substrs: []string,
+	loc := #caller_location,
+) {
+	txt, ok := w.explain_texts[explain_label]
+	if !testing.expectf(w.t, ok, "unknown explain %q", explain_label, loc = loc) {
+		return
+	}
+	for s in substrs {
+		testing.expectf(w.t, strings.contains(txt, s), "expected explanation to contain %q, got:\n%s", s, txt, loc = loc)
+	}
+}
+
+upon_computing_rule_impact :: proc(
+	w: ^World,
+	sess_label: string,
+	rule_name: string,
+	impact_label: string,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	rid := max(u32)
+	for r, i in sess.rb.rules {
+		if forseti.interner_get(&sess.rb.interner, r.name) == rule_name {
+			rid = u32(i)
+			break
+		}
+	}
+	if !testing.expectf(w.t, rid != max(u32), "unknown rule %q", rule_name, loc = loc) {
+		return
+	}
+	if prev, had := &w.impacts[impact_label]; had {
+		forseti.impact_report_destroy(prev)
+	}
+	w.impacts[impact_label] = forseti.impact(sess, rid)
+}
+
+then_impact_counts_at_least :: proc(
+	w: ^World,
+	impact_label: string,
+	min_direct: int,
+	min_transitive: int,
+	min_derivs: int,
+	loc := #caller_location,
+) {
+	rep, ok := &w.impacts[impact_label]
+	if !testing.expectf(w.t, ok, "unknown impact %q", impact_label, loc = loc) {
+		return
+	}
+	testing.expectf(w.t, len(rep.direct_facts) >= min_direct, "direct=%d < %d", len(rep.direct_facts), min_direct, loc = loc)
+	testing.expectf(w.t, len(rep.transitive_facts) >= min_transitive, "transitive=%d < %d", len(rep.transitive_facts), min_transitive, loc = loc)
+	testing.expectf(w.t, len(rep.derivations) >= min_derivs, "derivs=%d < %d", len(rep.derivations), min_derivs, loc = loc)
+}
+
+upon_evaluating_semiring :: proc(
+	w: ^World,
+	sess_label: string,
+	binding_name: string,
+	expected_fields: []Table_Test_Arg,
+	kind: forseti.Semiring_Kind,
+	run_label: string,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	fid, found := driver_session_find_matching_fact_id(sess, binding_name, expected_fields)
+	if !testing.expectf(w.t, found, "cannot evaluate semiring on missing fact in %q", binding_name, loc = loc) {
+		return
+	}
+	if prev, had := &w.semiring_runs[run_label]; had {
+		forseti.semiring_result_destroy(prev)
+	}
+	w.semiring_runs[run_label] = forseti.evaluate_semiring(sess, fid, kind)
+}
+
+then_semiring_result_satisfies :: proc(
+	w: ^World,
+	run_label: string,
+	expect_bool: bool = true,
+	min_why_sets: int = 0,
+	how_substr: string = "",
+	min_viterbi_score: f64 = 0.0,
+	loc := #caller_location,
+) {
+	sr, ok := &w.semiring_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown semiring run %q", run_label, loc = loc) {
+		return
+	}
+	switch sr.kind {
+	case .Boolean:
+		testing.expect_value(w.t, sr.boolean_val, expect_bool, loc = loc)
+	case .Why:
+		testing.expectf(w.t, len(sr.why_sets) >= min_why_sets, "why_sets=%d < %d", len(sr.why_sets), min_why_sets, loc = loc)
+	case .How:
+		testing.expectf(w.t, len(sr.how_expr) > 0, "empty How expr", loc = loc)
+		if len(how_substr) > 0 {
+			testing.expectf(w.t, strings.contains(sr.how_expr, how_substr), "expected How %q to contain %q", sr.how_expr, how_substr, loc = loc)
+		}
+	case .Viterbi:
+		testing.expectf(w.t, sr.viterbi_score >= min_viterbi_score && sr.viterbi_score <= 1.0, "viterbi=%v", sr.viterbi_score, loc = loc)
+		testing.expect(w.t, len(sr.viterbi_path) >= 1, loc = loc)
+	}
+}
+
+upon_running_diff_replay :: proc(
+	w: ^World,
+	baseline_sess_label: string,
+	store_label: string,
+	candidate_rb_label: string,
+	watched_paths: []string,
+	report_label: string,
+	loc := #caller_location,
+) {
+	sess, sok := w.sessions[baseline_sess_label]
+	sh, st_ok := w.stores[store_label]
+	rb, r_ok := w.rulebases[candidate_rb_label]
+	if !testing.expectf(w.t, sok && st_ok && r_ok, "unknown session/store/candidate rb", loc = loc) {
+		return
+	}
+	if prev, had := &w.diff_reports[report_label]; had {
+		forseti.diff_replay_report_destroy(prev)
+	}
+	rep, err := forseti.session_diff_replay(sess, &sh.bridge, rb, watched_paths)
+	testing.expect_value(w.t, err, nil, loc = loc)
+	w.diff_reports[report_label] = rep
+}
+
+then_diff_replay_reports :: proc(
+	w: ^World,
+	report_label: string,
+	expected_added: int,
+	expected_removed: int,
+	expected_unchanged: int,
+	loc := #caller_location,
+) {
+	rep, ok := &w.diff_reports[report_label]
+	if !testing.expectf(w.t, ok, "unknown diff report %q", report_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, len(rep.added), expected_added, loc = loc)
+	testing.expect_value(w.t, len(rep.removed), expected_removed, loc = loc)
+	testing.expect_value(w.t, rep.unchanged_count, expected_unchanged, loc = loc)
+	testing.expect_value(w.t, rep.parent_moments_after, rep.parent_moments_before, loc = loc)
+}
+
+then_provenance_has_zero_hot_crypto :: proc(
+	w: ^World,
+	sess_label: string,
+	min_derivs: int,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, sess.provenance.hot_crypto_hashes, u64(0), loc = loc)
+	if min_derivs > 0 {
+		testing.expectf(w.t, len(sess.provenance.derivs) - 1 >= min_derivs, "expected >= %d derivs", min_derivs, loc = loc)
+	} else {
+		testing.expect_value(w.t, len(sess.provenance.derivs), 0, loc = loc)
+	}
+}
+
+upon_executing_effects_in_parallel :: proc(
+	w: ^World,
+	sess_label: string,
+	out_binding: string,
+	batch_label: string,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	applied, cnt, err := driver_run_effects_in_parallel_threads(sess, out_binding)
+	testing.expect_value(w.t, err, forseti.Session_Error.None, loc = loc)
+	w.last_effect_jobs = cnt
+	if prev, had := w.effect_applied_ids[batch_label]; had {
+		delete(prev)
+	}
+	w.effect_applied_ids[batch_label] = applied
+}
+
+then_effect_batch_applied :: proc(
+	w: ^World,
+	batch_label: string,
+	expected_count: int,
+	loc := #caller_location,
+) {
+	applied, ok := w.effect_applied_ids[batch_label]
+	if !testing.expectf(w.t, ok, "unknown effect batch %q", batch_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, w.last_effect_jobs, expected_count, loc = loc)
+	testing.expect_value(w.t, len(applied), expected_count, loc = loc)
 }
 
 @(test)

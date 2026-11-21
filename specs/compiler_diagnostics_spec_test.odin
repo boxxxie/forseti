@@ -325,7 +325,7 @@ spec_compiler_diagnostics_and_lints_matrix :: proc(t: ^testing.T) {
 		),
 		diag_clean_case(
 			"not-guarded self recursion suppresses W2004",
-			"schema Org { name: string }\nsource RawOrg : Org at .orgs[?id]\nrule safe_loop {\n  when {\n    RawOrg(name: ?n)\n    not RawOrg(name: \"stop\")\n  }\n  then {\n    assert RawOrg(name: ?n)\n  }\n}",
+			"schema Org { name: string }\nsource RawOrg : Org at .orgs[?id]\nsource StopFlag : Org at .stop[?id]\nrule safe_loop {\n  when {\n    RawOrg(name: ?n)\n    not StopFlag(name: \"stop\")\n  }\n  then {\n    assert RawOrg(name: ?n)\n  }\n}",
 		),
 		diag_case(
 			"W2005 shadowed variable in nested not scope",

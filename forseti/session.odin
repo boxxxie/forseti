@@ -15,16 +15,19 @@ Fact_Origin :: enum u8 {
 }
 
 Fact :: struct {
-	id:            Fact_Id,
-	binding_idx:   u16,
-	key:           String_Id,
-	fields:        []Value,
-	cursor:        xitdb.Read_Cursor,
-	has_cursor:    bool,
-	recency:       u64,
-	alive:         bool,
-	support_count: i32,
-	origin:        Fact_Origin,
+	id:              Fact_Id,
+	binding_idx:     u16,
+	key:             String_Id,
+	fields:          []Value,
+	cursor:          xitdb.Read_Cursor,
+	has_cursor:      bool,
+	recency:         u64,
+	alive:           bool,
+	support_count:   i32,
+	proof_height:    u32,
+	content_hash:    u64,
+	best_derivation: Derivation_Id,
+	origin:          Fact_Origin,
 }
 
 Fact_Lookup_Key :: struct {
@@ -56,6 +59,7 @@ Beta_Memory :: struct {
 Session_Config :: struct {
 	max_activations: u64,
 	initial_phases:  []string,
+	provenance_mode: Provenance_Mode, // Defaults to .Audit_Full
 }
 
 Session_Error :: enum u8 {
@@ -71,25 +75,37 @@ Session_Error :: enum u8 {
 // Session maintains sparse lazy PHREAK working/beta memories over an immutable shared Rulebase.
 // Pinned handle: initialize in-place or heap-allocate via new(Session) and never copy by value.
 Session :: struct {
-	rb:                  ^Rulebase,
-	arena:               vmem.Arena,
-	interner:            String_Interner,
-	telemetry:           ^Telemetry_Sink,
-	facts:               [dynamic]Fact,
-	facts_by_key:        map[Fact_Lookup_Key]Fact_Id,
-	fact_alpha_mems:     map[Fact_Id][dynamic]u32,
-	alpha_mems:          map[u32]^Alpha_Memory,
-	seg_mems:            map[u32]^Segment_Memory,
-	dirty_segs:          [dynamic]u32,
-	beta_mems:           map[u32]^Beta_Memory,
-	eval_stack:          [dynamic]Eval_Frame,
-	agenda:              Agenda,
-	fired_trace:         [dynamic]String_Id,
-	derived_seq_by_bind: map[u16]u64,
-	max_activations:     u64,
-	next_recency:        u64,
-	live_memories_count: u64,
-	allocator:           mem.Allocator,
+	rb:                    ^Rulebase,
+	arena:                 vmem.Arena,
+	interner:              String_Interner,
+	telemetry:             ^Telemetry_Sink,
+	facts:                 [dynamic]Fact,
+	facts_by_key:          map[Fact_Lookup_Key]Fact_Id,
+	logical_buckets:       map[u64][dynamic]Fact_Id,
+	fact_alpha_mems:       map[Fact_Id][dynamic]u32,
+	alpha_mems:            map[u32]^Alpha_Memory,
+	seg_mems:              map[u32]^Segment_Memory,
+	dirty_segs:            [dynamic]u32,
+	zero_input_seeded:     bool,
+	beta_mems:             map[u32]^Beta_Memory,
+	neg_mems:              map[u32]^Not_Exists_Memory,
+	accum_mems:            map[u32]^Accum_Memory,
+	eval_stack:            [dynamic]Eval_Frame,
+	agenda:                Agenda,
+	fired_trace:           [dynamic]String_Id,
+	derived_seq_by_bind:   map[u16]u64,
+	jtms:                  Jtms_State,
+	provenance:            Provenance_Store,
+	pending_effects:       [dynamic]Effect_Job,
+	inflight_effects:      map[u64]Effect_Inflight,
+	next_effect_job_id:    u64,
+	committed_derived:     map[Fact_Lookup_Key]bool,
+	stratum_changed:       bool,
+	earliest_dirty_strat:  u32,
+	max_activations:       u64,
+	next_recency:          u64,
+	live_memories_count:   u64,
+	allocator:             mem.Allocator,
 }
 
 @(require_results)
@@ -123,15 +139,25 @@ session_init :: proc(
 	// Allocate tiny fixed initial buckets (O(1) regardless of Rulebase size: works for 1M rules!).
 	s.facts = make([dynamic]Fact, 1, 16, allocator) // slot 0 = sentinel
 	s.facts_by_key = make(map[Fact_Lookup_Key]Fact_Id, 16, allocator)
+	s.logical_buckets = make(map[u64][dynamic]Fact_Id, 16, allocator)
 	s.fact_alpha_mems = make(map[Fact_Id][dynamic]u32, 16, allocator)
 	s.alpha_mems = make(map[u32]^Alpha_Memory, 16, allocator)
 	s.seg_mems = make(map[u32]^Segment_Memory, 16, allocator)
 	s.dirty_segs = make([dynamic]u32, 0, 16, allocator)
 	s.beta_mems = make(map[u32]^Beta_Memory, 16, allocator)
+	s.neg_mems = make(map[u32]^Not_Exists_Memory, 8, allocator)
+	s.accum_mems = make(map[u32]^Accum_Memory, 8, allocator)
 	s.eval_stack = make([dynamic]Eval_Frame, 0, 16, allocator)
 	s.fired_trace = make([dynamic]String_Id, 0, 16, allocator)
 	s.derived_seq_by_bind = make(map[u16]u64, 8, allocator)
+	s.pending_effects = make([dynamic]Effect_Job, 0, 8, allocator)
+	s.inflight_effects = make(map[u64]Effect_Inflight, 8, allocator)
+	s.next_effect_job_id = 1
+	s.committed_derived = make(map[Fact_Lookup_Key]bool, 8, allocator)
+	s.earliest_dirty_strat = max(u32)
 	agenda_init(&s.agenda, allocator)
+	jtms_init(&s.jtms, allocator)
+	provenance_init(&s.provenance, cfg.provenance_mode, allocator)
 
 	if len(cfg.initial_phases) > 0 {
 		session_set_phases(s, cfg.initial_phases) or_return
@@ -144,11 +170,41 @@ session_destroy :: proc(s: ^Session) {
 		return
 	}
 	vmem.arena_check_temp(&s.arena)
+	provenance_destroy(&s.provenance)
+	jtms_destroy(&s.jtms)
+	effects_destroy(s)
+	delete(s.committed_derived)
 	agenda_destroy(&s.agenda)
 	delete(s.fired_trace)
 	delete(s.derived_seq_by_bind)
+	for &ef in s.eval_stack {
+		delete(ef.tokens)
+		delete(ef.sub_tokens)
+		delete(ef.pass_tokens)
+	}
 	delete(s.eval_stack)
 	delete(s.dirty_segs)
+
+	for _, nm in s.neg_mems {
+		delete(nm.blocker_counts)
+		free(nm, s.allocator)
+	}
+	delete(s.neg_mems)
+
+	for _, am_acc in s.accum_mems {
+		for _, &st in am_acc.groups {
+			accum_destroy(&st)
+		}
+		delete(am_acc.groups)
+		delete(am_acc.group_tokens)
+		for _, &glist in am_acc.fact_to_groups {
+			delete(glist)
+		}
+		delete(am_acc.fact_to_groups)
+		delete(am_acc.tracked_facts)
+		free(am_acc, s.allocator)
+	}
+	delete(s.accum_mems)
 
 	for _, bm in s.beta_mems {
 		for _, bucket in bm.right_buckets {
@@ -176,6 +232,11 @@ session_destroy :: proc(s: ^Session) {
 		delete(list)
 	}
 	delete(s.fact_alpha_mems)
+
+	for _, list in s.logical_buckets {
+		delete(list)
+	}
+	delete(s.logical_buckets)
 
 	delete(s.facts_by_key)
 	for &f in s.facts {
@@ -381,8 +442,12 @@ session_retract_fact :: proc(s: ^Session, fid: Fact_Id) -> Session_Error {
 	if cur, has := s.facts_by_key[lk]; has && cur == fid {
 		delete_key(&s.facts_by_key, lk)
 	}
+	if f.origin == .Logical {
+		jtms_remove_logical_bucket_entry(s, fid)
+	}
 	alpha_eval_retract_fact(s, fid)
 	agenda_remove_fact(&s.agenda, fid)
+	jtms_retract_cascades_for_fact(s, fid)
 	return .None
 }
 

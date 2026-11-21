@@ -9,6 +9,7 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import "core:testing"
+import "core:thread"
 import xitdb "xitdb:."
 import "../forseti"
 
@@ -917,4 +918,282 @@ driver_check_store_collection_entry :: proc(
 		}
 	}
 	return count, matched, nil
+}
+
+driver_session_count_binding_facts :: proc(
+	sess: ^forseti.Session,
+	binding_name: string,
+	expected_fields: []Table_Test_Arg = nil,
+) -> (total: int, matching: int) {
+	bid, has_b := forseti.session_find_binding(sess, binding_name)
+	if !has_b {
+		return 0, 0
+	}
+	exp_vals := driver_args_to_values(sess, expected_fields) if len(expected_fields) > 0 else nil
+	defer free_all(context.temp_allocator)
+
+	for &f in sess.facts {
+		if !f.alive || f.binding_idx != bid {
+			continue
+		}
+		total += 1
+		if len(exp_vals) > 0 && len(f.fields) >= len(exp_vals) {
+			ok := true
+			for ev, fi in exp_vals {
+				if f.fields[fi] != ev {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				matching += 1
+			}
+		}
+	}
+	return total, matching
+}
+
+driver_session_find_matching_fact_id :: proc(
+	sess: ^forseti.Session,
+	binding_name: string,
+	expected_fields: []Table_Test_Arg,
+) -> (fid: forseti.Fact_Id, ok: bool) {
+	bid, has_b := forseti.session_find_binding(sess, binding_name)
+	if !has_b {
+		return forseti.INVALID_FACT, false
+	}
+	exp_vals := driver_args_to_values(sess, expected_fields)
+	defer free_all(context.temp_allocator)
+
+	for &f in sess.facts {
+		if !f.alive || f.binding_idx != bid || len(f.fields) < len(exp_vals) {
+			continue
+		}
+		match := true
+		for ev, fi in exp_vals {
+			if f.fields[fi] != ev {
+				match = false
+				break
+			}
+		}
+		if match {
+			return f.id, true
+		}
+	}
+	return forseti.INVALID_FACT, false
+}
+
+driver_check_audit_moment_integrity :: proc(
+	bridge: ^forseti.Store_Bridge,
+	expected_module: string,
+	min_decisions: int,
+	rule_name: string,
+	entity_key_hint: string,
+	interner: ^forseti.String_Interner,
+) -> (ok: bool, msg: string) {
+	m_cur, m_ok, m_err := forseti.store_bridge_moment_cursor(bridge, -1)
+	if m_err != nil || !m_ok {
+		return false, fmt.tprintf("missing moment: %v", m_err)
+	}
+
+	dec_cur, dec_ok, dec_err := forseti.store_resolve_path(m_cur, ".decisions")
+	if dec_err != nil || !dec_ok {
+		return false, "missing .decisions collection"
+	}
+	dec_sp, _ := xitdb.cursor_resolved(dec_cur)
+	if dec_sp.slot.tag != .Hash_Map && dec_sp.slot.tag != .Counted_Hash_Map {
+		return false, ".decisions is not a map"
+	}
+	it, _ := xitdb.cursor_iterator(dec_cur)
+	dec_cnt := 0
+	for {
+		item, _ := xitdb.cursor_iterator_next(&it)
+		if _, has := item.?; !has {
+			break
+		}
+		dec_cnt += 1
+	}
+	if dec_cnt < min_decisions {
+		return false, fmt.tprintf("expected >= %d decisions, got %d", min_decisions, dec_cnt)
+	}
+
+	by_rule_cur, br_ok, _ := forseti.store_resolve_path(m_cur, ".idx.decisions_by_rule")
+	if !br_ok {
+		return false, "missing .idx.decisions_by_rule"
+	}
+	rset_cur, r_found, _ := forseti.store_lookup_record(by_rule_cur, rule_name)
+	if !r_found {
+		return false, fmt.tprintf("missing idx.decisions_by_rule[%q]", rule_name)
+	}
+	rit, _ := xitdb.cursor_iterator(rset_cur)
+	rcnt := 0
+	for {
+		item, _ := xitdb.cursor_iterator_next(&rit)
+		if _, has := item.?; !has {
+			break
+		}
+		rcnt += 1
+	}
+	if rcnt == 0 {
+		return false, fmt.tprintf("empty decision index for rule %q", rule_name)
+	}
+
+	if len(entity_key_hint) > 0 {
+		by_ent_cur, be_ok, _ := forseti.store_resolve_path(m_cur, ".idx.decisions_by_entity")
+		if !be_ok {
+			return false, "missing .idx.decisions_by_entity"
+		}
+		eset_cur, e_found, _ := forseti.store_lookup_record(by_ent_cur, entity_key_hint)
+		if !e_found {
+			return false, fmt.tprintf("missing idx.decisions_by_entity[%q]", entity_key_hint)
+		}
+		eit, _ := xitdb.cursor_iterator(eset_cur)
+		ecnt := 0
+		for {
+			item, _ := xitdb.cursor_iterator_next(&eit)
+			if _, has := item.?; !has {
+				break
+			}
+			ecnt += 1
+		}
+		if ecnt == 0 {
+			return false, fmt.tprintf("empty entity index for %q", entity_key_hint)
+		}
+	}
+
+	tx_cur, tx_ok, _ := forseti.store_resolve_path(m_cur, ".__tx")
+	if !tx_ok {
+		return false, "missing .__tx metadata"
+	}
+	mod_val, mod_found, _ := forseti.cursor_read_field_path(tx_cur, {"module"}, interner, .String)
+	if !mod_found {
+		return false, "missing __tx.module"
+	}
+	mod_sid, is_s := mod_val.(forseti.String_Id)
+	if !is_s || forseti.interner_get(interner, mod_sid) != expected_module {
+		return false, fmt.tprintf("unexpected __tx.module %v", mod_val)
+	}
+
+	tx_ids_cur, ids_ok, _ := forseti.store_resolve_path(tx_cur, ".decision_ids")
+	if !ids_ok {
+		return false, "missing __tx.decision_ids"
+	}
+	tx_it, _ := xitdb.cursor_iterator(tx_ids_cur)
+	tx_cnt := 0
+	for {
+		item, _ := xitdb.cursor_iterator_next(&tx_it)
+		if _, has := item.?; !has {
+			break
+		}
+		tx_cnt += 1
+	}
+	if tx_cnt < min_decisions {
+		return false, fmt.tprintf("expected >= %d __tx.decision_ids, got %d", min_decisions, tx_cnt)
+	}
+
+	rver_cur, rv_ok, _ := forseti.store_resolve_path(tx_cur, ".rule_versions")
+	if !rv_ok {
+		return false, "missing __tx.rule_versions"
+	}
+	_, rv_has, _ := forseti.store_lookup_record(rver_cur, rule_name)
+	if !rv_has {
+		return false, fmt.tprintf("missing __tx.rule_versions[%q]", rule_name)
+	}
+	return true, ""
+}
+
+@(private = "file")
+_Parallel_Effect_Task :: struct {
+	job:          ^forseti.Effect_Job,
+	sess:         ^forseti.Session,
+	out_binding:  string,
+	out_score:    i64,
+	out_country:  string,
+	res_key:      string,
+	res_org_id:   string,
+	res_fields:   []forseti.Value,
+}
+
+@(private = "file")
+_parallel_effect_worker :: proc(data: rawptr) {
+	task := (^_Parallel_Effect_Task)(data)
+	org_id := ""
+	for f in task.job.fields {
+		if f.name == "org_id" {
+			org_id = f.str
+			break
+		}
+	}
+	task.res_org_id = org_id
+	task.out_score = 90 if org_id == "org:1" else 95
+}
+
+driver_run_effects_in_parallel_threads :: proc(
+	sess: ^forseti.Session,
+	out_binding: string,
+) -> (applied: []forseti.Fact_Id, job_count: int, err: forseti.Session_Error) {
+	jobs := forseti.session_prepare_effects(sess)
+	defer forseti.effects_jobs_destroy(jobs)
+	job_count = len(jobs)
+	if job_count == 0 {
+		return nil, 0, .None
+	}
+
+	tasks := make([]_Parallel_Effect_Task, job_count)
+	threads := make([]^thread.Thread, job_count)
+	defer {
+		for &tk in tasks {
+			delete(tk.res_key)
+			delete(tk.res_fields)
+		}
+		delete(tasks)
+		delete(threads)
+	}
+
+	for &j, i in jobs {
+		tasks[i] = _Parallel_Effect_Task{
+			job         = &j,
+			sess        = sess,
+			out_binding = out_binding,
+			out_country = "DE" if i % 2 == 0 else "US",
+		}
+		threads[i] = thread.create_and_start_with_data(&tasks[i], _parallel_effect_worker)
+	}
+
+	for th in threads {
+		if th != nil {
+			thread.join(th)
+			thread.destroy(th)
+		}
+	}
+
+	// Build Effect_Results back on engine thread using session interner safely.
+	results := make([]forseti.Effect_Result, job_count)
+	fact_vecs := make([][1]forseti.Effect_Result_Fact, job_count)
+	defer {
+		delete(results)
+		delete(fact_vecs)
+	}
+
+	for &tk, i in tasks {
+		tk.res_key = fmt.aprintf("enrich:%s:%d", tk.res_org_id, tk.job.job_id)
+		oid_sid, _ := forseti.intern_session_string(&sess.rb.interner, &sess.interner, tk.res_org_id)
+		ctry_sid, _ := forseti.intern_session_string(&sess.rb.interner, &sess.interner, tk.out_country)
+		tk.res_fields = make([]forseti.Value, 3)
+		tk.res_fields[0] = oid_sid
+		tk.res_fields[1] = tk.out_score
+		tk.res_fields[2] = ctry_sid
+		fact_vecs[i][0] = forseti.Effect_Result_Fact{
+			binding_name = out_binding,
+			key          = tk.res_key,
+			fields       = tk.res_fields,
+		}
+		results[i] = forseti.Effect_Result{
+			job_id = tk.job.job_id,
+			facts  = fact_vecs[i][:],
+		}
+	}
+
+	applied, err = forseti.session_apply_effects(sess, results)
+	return applied, job_count, err
 }

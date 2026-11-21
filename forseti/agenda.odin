@@ -1,8 +1,6 @@
 package forseti
 
-import "core:fmt"
 import "core:mem"
-import xitdb "xitdb:."
 
 Activation_Key :: struct {
 	rule_id:  u32,
@@ -131,28 +129,59 @@ _activation_better :: proc(a, b: Activation) -> bool {
 }
 
 @(private)
-_pick_next_activation :: proc(s: ^Session) -> (idx: int, found: bool) {
+_pick_next_activation_for_stratum :: proc(s: ^Session, stratum: u32, check_stratum := true) -> (idx: int, found: bool) {
 	ag := &s.agenda
-	for len(ag.phases) > 0 {
-		cur_phase := ag.phases[0]
-		best_idx := -1
-		for act, i in ag.items {
-			if !act.alive || act.phase != cur_phase {
+	rule_matches := proc(s: ^Session, rule_id: u32, stratum: u32, check_stratum: bool) -> bool {
+		if !check_stratum {
+			return true
+		}
+		return int(rule_id) < len(s.rb.rules) && s.rb.rules[rule_id].stratum == stratum
+	}
+
+	// Only consume phase focus entries once all rules or current phase finishes across strata,
+	// or pick highest matching activation in current phase first without dropping phase prematurely
+	// if rules in that phase exist in higher strata.
+	if len(ag.phases) > 0 {
+		for pi := 0; pi < len(ag.phases); {
+			cur_phase := ag.phases[pi]
+			best_idx := -1
+			any_in_phase := false
+			for act, i in ag.items {
+				if !act.alive || act.phase != cur_phase {
+					continue
+				}
+				any_in_phase = true
+				if !rule_matches(s, act.rule_id, stratum, check_stratum) {
+					continue
+				}
+				if best_idx < 0 || _activation_better(act, ag.items[best_idx]) {
+					best_idx = i
+				}
+			}
+			if best_idx >= 0 {
+				return best_idx, true
+			}
+			// Do not remove phase if activations in another stratum remain for it, or check if higher stratum needs it:
+			has_pending_in_rb_later := false
+			if check_stratum {
+				for r in s.rb.rules {
+					if r.phase == cur_phase && r.stratum > stratum {
+						has_pending_in_rb_later = true
+						break
+					}
+				}
+			}
+			if any_in_phase || has_pending_in_rb_later {
+				pi += 1
 				continue
 			}
-			if best_idx < 0 || _activation_better(act, ag.items[best_idx]) {
-				best_idx = i
-			}
+			ordered_remove(&ag.phases, pi)
 		}
-		if best_idx >= 0 {
-			return best_idx, true
-		}
-		ordered_remove(&ag.phases, 0)
 	}
 
 	best_idx := -1
 	for act, i in ag.items {
-		if !act.alive {
+		if !act.alive || !rule_matches(s, act.rule_id, stratum, check_stratum) {
 			continue
 		}
 		if best_idx < 0 || _activation_better(act, ag.items[best_idx]) {
@@ -163,10 +192,26 @@ _pick_next_activation :: proc(s: ^Session) -> (idx: int, found: bool) {
 }
 
 @(private)
+_pick_next_activation :: proc(s: ^Session) -> (idx: int, found: bool) {
+	return _pick_next_activation_for_stratum(s, 0, check_stratum = false)
+}
+
+@(private)
 _execute_rule_actions :: proc(s: ^Session, rule: Rule_Compiled, tok: ^Beta_Token) -> Session_Error {
 	fact_slots_buf: [MAX_TOKEN_FACTS]Vm_Fact_Binding
 	fslots := _fill_vm_fact_slots(s, tok, fact_slots_buf[:])
 
+	fkey := Firing_Key{rule_id = rule.id, tok_hash = tok.fact_sig_hash}
+	parents := tok.fact_ids[:tok.fact_count]
+	primary_deriv := INVALID_DERIVATION
+
+	tidx := rule.decide_table_idx
+	trow := INVALID_ROW_ID
+	if rule.decide_slots > 0 && tok.decide_results[0].matched && tok.decide_results[0].trace.winning_row_idx >= 0 {
+		trow = u16(tok.decide_results[0].trace.winning_row_idx)
+	}
+
+	had_logical := false
 	for act in rule.actions {
 		#partial switch act.kind {
 		case .Assert:
@@ -189,62 +234,102 @@ _execute_rule_actions :: proc(s: ^Session, rule: Rule_Compiled, tok: ^Beta_Token
 					vals[fb.field_idx] = v
 				}
 			}
-			key := _next_derived_key(s, act.target_bind)
-			origin := Fact_Origin.Unconditional if act.unconditional else Fact_Origin.Logical
-			_ = session_insert_fact_by_idx(s, act.target_bind, key, vals, origin) or_return
+			if !act.unconditional {
+				_, _, _, did, j_err := jtms_assert_logical(
+					s,
+					rule.id,
+					fkey,
+					act.target_bind,
+					vals,
+					parents,
+					tidx,
+					trow,
+				)
+				if j_err != .None {
+					return j_err
+				}
+				had_logical = true
+				if primary_deriv == INVALID_DERIVATION {
+					primary_deriv = did
+				}
+			} else {
+				key := _next_derived_key(s, act.target_bind)
+				fid := session_insert_fact_by_idx(s, act.target_bind, key, vals, .Unconditional) or_return
+				max_ph := u32(0)
+				for pf in parents {
+					if pf != INVALID_FACT && int(pf) < len(s.facts) && s.facts[pf].alive && s.facts[pf].proof_height > max_ph {
+						max_ph = s.facts[pf].proof_height
+					}
+				}
+				s.facts[fid].proof_height = max_ph + 1
+				did := provenance_record(
+					&s.provenance,
+					s.telemetry,
+					fid,
+					rule.id,
+					_rule_ver_u16(s, rule.id),
+					parents,
+					max_ph + 1,
+					.Unconditional,
+					tidx,
+					trow,
+				)
+				if did != INVALID_DERIVATION {
+					s.facts[fid].best_derivation = did
+					if primary_deriv == INVALID_DERIVATION {
+						primary_deriv = did
+					}
+				}
+				jtms_track_firing_only(s, fkey, did)
+			}
 
 		case .Retract:
+			jtms_track_firing_only(s, fkey)
 			if act.retract_slot >= 0 && int(act.retract_slot) < int(tok.fact_count) {
 				target_fid := tok.fact_ids[act.retract_slot]
 				session_retract_fact(s, target_fid) or_return
 			}
+
+		case .Effect:
+			if primary_deriv == INVALID_DERIVATION && !had_logical {
+				primary_deriv = provenance_record(
+					&s.provenance,
+					s.telemetry,
+					INVALID_FACT,
+					rule.id,
+					_rule_ver_u16(s, rule.id),
+					parents,
+					1,
+					.Logical,
+					tidx,
+					trow,
+				)
+			}
+			jtms_track_firing_only(s, fkey, primary_deriv if !had_logical else INVALID_DERIVATION)
+			effects_stage_job(s, rule, act, tok, fslots, primary_deriv) or_return
 		}
 	}
 	return .None
 }
 
-// Evaluates all dirty linked segments and fires queued Agenda activations deterministically.
+// Evaluates stratified dirty segments and fires queued Agenda activations to fixed point.
 session_fire :: proc(s: ^Session) -> (fired_count: u64, err: Session_Error) {
 	if s == nil || s.rb == nil {
 		return 0, .Invalid_Arg
 	}
 	clear(&s.fired_trace)
+	provenance_begin_tx(&s.provenance)
 
-	for {
-		phreak_evaluate_linked_rules(s) or_return
-
-		idx, ok := _pick_next_activation(s)
-		if !ok {
-			break
-		}
-		if fired_count >= s.max_activations {
-			return fired_count, .Max_Activations_Exceeded
-		}
-
-		act := s.agenda.items[idx]
-		ordered_remove(&s.agenda.items, idx)
-		ak := Activation_Key{rule_id = act.rule_id, tok_hash = act.token.fact_sig_hash}
-		delete_key(&s.agenda.queued, ak)
-
-		// Verify all participating facts are still alive right before firing.
-		all_alive := true
-		for i := 0; i < int(act.token.fact_count); i += 1 {
-			if !s.facts[act.token.fact_ids[i]].alive {
-				all_alive = false
-				break
-			}
-		}
-		if !all_alive {
+	strata := max(s.rb.strata_count, u32(1))
+	st := u32(0)
+	for st < strata {
+		s.earliest_dirty_strat = max(u32)
+		session_fire_stratum(s, st, &fired_count) or_return
+		if s.earliest_dirty_strat < st {
+			st = s.earliest_dirty_strat
 			continue
 		}
-
-		s.agenda.refracted[ak] = true
-		rule := s.rb.rules[act.rule_id]
-		fired_count += 1
-		append(&s.fired_trace, rule.name)
-		telemetry_count_add(s.telemetry, .Rules_Fired, 1)
-
-		_execute_rule_actions(s, rule, &act.token) or_return
+		st += 1
 	}
 
 	return fired_count, .None
@@ -269,71 +354,8 @@ _binding_dot_path :: proc(rb: ^Rulebase, bdef: Binding_Def, buf: []u8) -> string
 	return string(buf[:n])
 }
 
-@(private)
-_Commit_Derived_Ctx :: struct {
-	sess: ^Session,
-}
-
-@(private)
-_commit_derived_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
-	ctx := (^_Commit_Derived_Ctx)(user_data)
-	s := ctx.sess
-	path_buf: [256]u8 = ---
-
-	for bdef, bi in s.rb.bindings {
-		if bdef.kind != .Derived {
-			continue
-		}
-		path := _binding_dot_path(s.rb, bdef, path_buf[:])
-		if len(path) == 0 {
-			continue
-		}
-		col_map, err := store_write_path_ensure_map(moment_wc, path)
-		if err != nil {
-			return .Write_Failed
-		}
-		schema := s.rb.schemas[bdef.schema_id]
-		for &f in s.facts {
-			if !f.alive || f.binding_idx != u16(bi) {
-				continue
-			}
-			kstr := session_string(s, f.key)
-			rec_wc := xitdb.hash_map_put_cursor(&col_map, kstr) or_return
-			rec_m := xitdb.write_hash_map_init(rec_wc) or_return
-			for sf, sfi in schema.fields {
-				if sfi >= len(f.fields) || f.fields[sfi] == nil {
-					continue
-				}
-				fname := interner_get(&s.rb.interner, sf.name)
-				val := f.fields[sfi]
-				switch v in val {
-				case bool:
-					if b_err := write_bool_to_hash_map(&rec_m, fname, v); b_err != nil {
-						return .Write_Failed
-					}
-				case i32:
-					xitdb.hash_map_put(&rec_m, fname, i64(v)) or_return
-				case i64:
-					xitdb.hash_map_put(&rec_m, fname, v) or_return
-				case f64:
-					xitdb.hash_map_put(&rec_m, fname, v) or_return
-				case String_Id:
-					xitdb.hash_map_put(&rec_m, fname, session_string(s, v)) or_return
-				case Entity_Id:
-					xitdb.hash_map_put(&rec_m, fname, u64(v)) or_return
-				case Time_Ns:
-					xitdb.hash_map_put(&rec_m, fname, i64(v)) or_return
-				case Enum_Val:
-					xitdb.hash_map_put(&rec_m, fname, i64(v.variant)) or_return
-				}
-			}
-		}
-	}
-	return nil
-}
-
 // Syncs incremental Z-set deltas from `bridge` into `s`, fires PHREAK + Agenda,
-// and optionally commits derived facts back to `bridge` in an atomic xitdb moment.
+// and optionally commits derived facts and Audit_Full provenance back to `bridge` in an atomic xitdb moment.
 session_sync_and_fire :: proc(
 	s: ^Session,
 	bridge: ^Store_Bridge,
@@ -376,13 +398,11 @@ session_sync_and_fire :: proc(
 	}
 
 	if commit_derived {
-		cctx := _Commit_Derived_Ctx{sess = s}
-		_, c_err := store_bridge_commit_moment(bridge, _commit_derived_tx_cb, &cctx)
+		_, c_err := session_commit_derived_and_audit(s, bridge)
 		if c_err != nil {
 			return cnt, c_err
 		}
 	}
 
-	_ = fmt.sbprintf
 	return cnt, nil
 }

@@ -68,6 +68,13 @@ _mark_segment_dirty :: proc(s: ^Session, sm: ^Segment_Memory) {
 	if !sm.dirty {
 		sm.dirty = true
 		append(&s.dirty_segs, sm.seg_id)
+		sdef := s.rb.segments[sm.seg_id]
+		if int(sdef.rule_id) < len(s.rb.rules) {
+			st := s.rb.rules[sdef.rule_id].stratum
+			if st < s.earliest_dirty_strat {
+				s.earliest_dirty_strat = st
+			}
+		}
 	}
 }
 
@@ -96,6 +103,12 @@ _activate_alpha_terminal :: proc(s: ^Session, fid: Fact_Id, tid: u32) {
 	for sub in term.subscribers {
 		sm := _seg_get_or_create_mem(s, sub.seg_id)
 		sdef := s.rb.segments[sub.seg_id]
+		if sub.notify_only {
+			if sm.was_linked {
+				_mark_segment_dirty(s, sm)
+			}
+			continue
+		}
 		if became_nonempty {
 			sm.linked_mask |= sub.input_bit
 		}
@@ -203,9 +216,20 @@ alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
 			if !sm_ok {
 				continue
 			}
+			if sub.notify_only {
+				if sm.was_linked {
+					_mark_segment_dirty(s, sm)
+				}
+				continue
+			}
 			if became_empty {
+				was := sm.was_linked
 				sm.linked_mask &= ~sub.input_bit
 				sm.was_linked = false
+				if was {
+					sdef := s.rb.segments[sub.seg_id]
+					jtms_revoke_all_rule_firings(s, sdef.rule_id)
+				}
 			}
 			if sm.was_linked {
 				_mark_segment_dirty(s, sm)

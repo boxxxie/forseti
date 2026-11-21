@@ -24,7 +24,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 5: Z-Set JTMS, Retractable Accumulators, Tarjan SCC Stratified Datalog, Semiring Causal Provenance, and 3-Phase Async Effects** *(Priority: Step 5 — Depends on Tracks 2, 3, 4)*
+- [~] **Track 5: Z-Set JTMS, Retractable Accumulators, Tarjan SCC Stratified Datalog, Semiring Causal Provenance, and 3-Phase Async Effects** *(Priority: Step 5 — Depends on Tracks 2, 3, 4)*
   *Link: [./tracks/jtms_accumulators_stratified_datalog_and_provenance_20261121/](./tracks/jtms_accumulators_stratified_datalog_and_provenance_20261121/)*
 
 ---

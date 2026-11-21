@@ -47,8 +47,9 @@ Alpha_Root :: struct {
 }
 
 Alpha_Segment_Target :: struct {
-	seg_id:    u32,
-	input_bit: u64,
+	seg_id:      u32,
+	input_bit:   u64,
+	notify_only: bool,
 }
 
 Alpha_Terminal :: struct {
@@ -63,31 +64,64 @@ Alpha_Field_Bind :: struct {
 	var_slot:  u16,
 }
 
+Subnetwork_Step_Kind :: enum u8 {
+	Pattern,
+	Where,
+}
+
+Subnetwork_Step :: struct {
+	kind:         Subnetwork_Step_Kind,
+	alpha_mem_id: u32,
+	binding_idx:  u16,
+	fact_slot:    u8,
+	join_keys:    []Join_Key_Pair,
+	field_binds:  []Alpha_Field_Bind,
+	guard_prog:   i32, // -1 if none
+}
+
+Subnetwork_Def :: struct {
+	id:                   u32,
+	steps:                []Subnetwork_Step,
+	accum_op:             Accum_Op,
+	accum_expr_prog:      i32, // -1 if none or direct fact slot
+	accum_expr_fact_slot: i16, // -1 if expression
+	accum_guard_prog:     i32, // -1 if none
+	out_var_slot:         u16,
+	group_var_slots:      []u16,
+	uses_outer_fact:      bool,
+}
+
 Compiled_Action_Field :: struct {
-	field_idx: i16,
-	expr_prog: i32, // -1 if unused
+	field_idx:  i16,
+	field_name: String_Id,
+	expr_prog:  i32, // -1 if unused
 }
 
 Compiled_Action :: struct {
 	kind:          Action_Kind_IR,
 	target_bind:   u16,
+	effect_kind:   String_Id,
 	unconditional: bool,
 	retract_slot:  i16,
 	fields:        []Compiled_Action_Field,
 }
 
 Rule_Compiled :: struct {
-	id:              u32,
-	name:            String_Id,
-	phase:           String_Id,
-	salience:        i32,
-	input_count:     u8,
-	all_inputs_mask: u64,
-	segment_ids:     []u32,
-	actions:         []Compiled_Action,
-	var_count:       u16,
-	fact_slot_count: u8,
-	decide_slots:    u8,
+	id:               u32,
+	name:             String_Id,
+	phase:            String_Id,
+	version:          String_Id,
+	salience:         i32,
+	stratum:          u32,
+	is_recursive:     bool,
+	decide_table_idx: u16, // INVALID_TABLE_IDX if none
+	input_count:      u8,
+	all_inputs_mask:  u64,
+	segment_ids:      []u32,
+	actions:          []Compiled_Action,
+	var_count:        u16,
+	fact_slot_count:  u8,
+	decide_slots:     u8,
 }
 
 Query_Compiled :: struct {
@@ -111,23 +145,31 @@ Query_Step :: struct {
 
 // Rulebase holds compiled immutable rules, alpha DAG, segments, decision tables, and VM programs.
 Rulebase :: struct {
-	arena:           vmem.Arena,
-	interner:        String_Interner,
-	schemas:         []Schema_Def,
-	bindings:        []Binding_Def,
-	tables:          []Compiled_Table,
-	binding_by_name: map[String_Id]u16,
-	schema_by_name:  map[String_Id]u16,
-	table_by_name:   map[String_Id]u32,
-	alpha_roots:     []Alpha_Root,
-	alpha_nodes:     []Alpha_Node,
-	alpha_terminals: []Alpha_Terminal,
-	segments:        []Segment_Def,
-	beta_nodes:      []Beta_Node_Def,
-	rules:           []Rule_Compiled,
-	queries:         []Query_Compiled,
-	programs:        []Bytecode_Program,
-	telemetry:       ^Telemetry_Sink,
+	arena:             vmem.Arena,
+	interner:          String_Interner,
+	module_name:       String_Id,
+	module_version:    String_Id,
+	schemas:           []Schema_Def,
+	bindings:          []Binding_Def,
+	tables:            []Compiled_Table,
+	binding_by_name:   map[String_Id]u16,
+	schema_by_name:    map[String_Id]u16,
+	table_by_name:     map[String_Id]u32,
+	alpha_roots:       []Alpha_Root,
+	alpha_nodes:       []Alpha_Node,
+	alpha_terminals:   []Alpha_Terminal,
+	segments:          []Segment_Def,
+	beta_nodes:        []Beta_Node_Def,
+	subnetworks:       []Subnetwork_Def,
+	rules:             []Rule_Compiled,
+	queries:           []Query_Compiled,
+	programs:          []Bytecode_Program,
+	strata_count:      u32,
+	stratum_recursive: []bool,
+	stratum_rules:     [][]u32,
+	zero_input_segs:   []u32,
+	sccs:              []Scc_Info,
+	telemetry:         ^Telemetry_Sink,
 }
 
 value_to_key :: proc "contextless" (v: Value) -> (k: Value_Key, ok: bool) {
@@ -184,9 +226,13 @@ Rb_Build_Ctx :: struct {
 	alpha_nodes:     [dynamic]Alpha_Node,
 	alpha_terminals: [dynamic]Alpha_Terminal,
 	beta_nodes:      [dynamic]Beta_Node_Def,
+	subnetworks:     [dynamic]Subnetwork_Def,
 	segments:        [dynamic]Segment_Def,
+	zero_input_segs: [dynamic]u32,
 	programs:        [dynamic]Bytecode_Program,
 	sub_lists:       map[u32][dynamic]Alpha_Segment_Target,
+	rule_stratum:    []u32,
+	rule_recursive:  []bool,
 	shared_count:    u64,
 }
 
@@ -333,22 +379,10 @@ insert_alpha_chain :: proc(
 
 	leaf := &ctx.alpha_nodes[cur_id]
 	if leaf.terminal_id >= 0 {
-		// Reuse existing Alpha_Terminal if field bindings are compatible; append missing binds if needed.
-		tid := u32(leaf.terminal_id)
-		term := &ctx.alpha_terminals[tid]
-		if len(term.field_binds) == len(binds) {
-			same := true
-			for i := 0; i < len(binds); i += 1 {
-				if term.field_binds[i] != binds[i] {
-					same = false
-					break
-				}
-			}
-			if same {
-				ctx.shared_count += 1
-				return tid
-			}
-		}
+		// All rules, joins, subnetworks, and queries share the canonical Alpha_Terminal/Memory
+		// at this alpha path (each consumer keeps its own `field_binds` mapping).
+		ctx.shared_count += 1
+		return u32(leaf.terminal_id)
 	}
 
 	tid := u32(len(ctx.alpha_terminals))
@@ -359,9 +393,7 @@ insert_alpha_chain :: proc(
 		binding_idx = binding_idx,
 		field_binds = stored_binds,
 	})
-	if leaf.terminal_id < 0 {
-		leaf.terminal_id = i32(tid)
-	}
+	leaf.terminal_id = i32(tid)
 	return tid
 }
 
@@ -524,17 +556,19 @@ rulebase_compile :: proc(
 	ir: ^Rulebase_IR,
 	telemetry: ^Telemetry_Sink = nil,
 	allocator := context.allocator,
-) -> (rb: Rulebase, err: Compile_Error) {
+) -> (out_rb: Rulebase, err: Compile_Error) {
 	if ir == nil {
 		return {}, .Alloc_Failed
 	}
 	scope := telemetry_span_begin(telemetry, .Compile, "rulebase_compile")
 	defer telemetry_span_end(telemetry, scope)
 
+	rb: Rulebase
 	if vmem.arena_init_growing(&rb.arena) != nil {
 		return {}, .Alloc_Failed
 	}
-	defer if err != .None {
+	ok_done := false
+	defer if !ok_done {
 		rulebase_destroy(&rb)
 	}
 	if interner_init(&rb.interner, allocator) != nil {
@@ -548,6 +582,18 @@ rulebase_compile :: proc(
 
 	a := vmem.arena_allocator(&rb.arena)
 	rb.telemetry = telemetry
+	rb.module_name = ir.module_name
+	rb.module_version = ir.module_version
+
+	strat_plan, st_err := stratify_ir(ir, nil, telemetry, allocator)
+	if st_err != nil {
+		return {}, .Alloc_Failed
+	}
+	defer stratification_plan_destroy(&strat_plan)
+	if strat_plan.has_unstratified_cycle {
+		return {}, .Unstratified_Negation
+	}
+
 	rb.schemas = make([]Schema_Def, len(ir.schemas), a)
 	copy(rb.schemas, ir.schemas)
 	rb.bindings = make([]Binding_Def, len(ir.bindings), a)
@@ -579,9 +625,13 @@ rulebase_compile :: proc(
 		alpha_nodes     = make([dynamic]Alpha_Node, 0, max(len(ir.rules), 16), context.temp_allocator),
 		alpha_terminals = make([dynamic]Alpha_Terminal, 0, max(len(ir.rules), 16), context.temp_allocator),
 		beta_nodes      = make([dynamic]Beta_Node_Def, 0, max(len(ir.rules) * 2, 16), context.temp_allocator),
+		subnetworks     = make([dynamic]Subnetwork_Def, 0, 8, context.temp_allocator),
 		segments        = make([dynamic]Segment_Def, 0, max(len(ir.rules), 16), context.temp_allocator),
+		zero_input_segs = make([dynamic]u32, 0, 4, context.temp_allocator),
 		programs        = make([dynamic]Bytecode_Program, 0, max(len(ir.rules), 16), context.temp_allocator),
 		sub_lists       = make(map[u32][dynamic]Alpha_Segment_Target, 32, context.temp_allocator),
+		rule_stratum    = strat_plan.rule_stratum,
+		rule_recursive  = strat_plan.rule_recursive,
 	}
 
 	rb.alpha_roots = make([]Alpha_Root, len(ir.bindings), a)
@@ -617,13 +667,53 @@ rulebase_compile :: proc(
 	rb.beta_nodes = make([]Beta_Node_Def, len(ctx.beta_nodes), a)
 	copy(rb.beta_nodes, ctx.beta_nodes[:])
 
+	rb.subnetworks = make([]Subnetwork_Def, len(ctx.subnetworks), a)
+	copy(rb.subnetworks, ctx.subnetworks[:])
+
 	rb.segments = make([]Segment_Def, len(ctx.segments), a)
 	copy(rb.segments, ctx.segments[:])
+
+	rb.zero_input_segs = make([]u32, len(ctx.zero_input_segs), a)
+	copy(rb.zero_input_segs, ctx.zero_input_segs[:])
 
 	rb.programs = make([]Bytecode_Program, len(ctx.programs), a)
 	copy(rb.programs, ctx.programs[:])
 
+	// Materialize stratification topology on Rulebase arena.
+	rb.strata_count = strat_plan.strata_count
+	rb.stratum_recursive = make([]bool, strat_plan.strata_count, a)
+	copy(rb.stratum_recursive, strat_plan.stratum_recursive)
+
+	stratum_counts := make([]int, strat_plan.strata_count, context.temp_allocator)
+	for rc in rb.rules {
+		stratum_counts[rc.stratum] += 1
+	}
+	rb.stratum_rules = make([][]u32, strat_plan.strata_count, a)
+	stratum_cursors := make([]int, strat_plan.strata_count, context.temp_allocator)
+	for si in 0 ..< int(strat_plan.strata_count) {
+		rb.stratum_rules[si] = make([]u32, stratum_counts[si], a)
+	}
+	for rc, ri in rb.rules {
+		st := rc.stratum
+		pos := stratum_cursors[st]
+		rb.stratum_rules[st][pos] = u32(ri)
+		stratum_cursors[st] = pos + 1
+	}
+
+	rb.sccs = make([]Scc_Info, len(strat_plan.sccs), a)
+	for sc, si in strat_plan.sccs {
+		pnames := make([]String_Id, len(sc.pred_names), a)
+		copy(pnames, sc.pred_names)
+		rb.sccs[si] = Scc_Info{
+			id               = sc.id,
+			pred_names       = pnames,
+			is_recursive     = sc.is_recursive,
+			has_neg_or_accum = sc.has_neg_or_accum,
+		}
+	}
+
 	telemetry_count_add(telemetry, .Alpha_Nodes_Shared, ctx.shared_count)
 	telemetry_count_add(telemetry, .Segments_Created, u64(len(rb.segments)))
+	ok_done = true
 	return rb, .None
 }

@@ -141,6 +141,7 @@ Construct the identical `Rulebase_IR` directly from Odin code via `Ir_Builder` (
 | `E2005` | Error | Invalid `decide` arity/argument name or missing/unknown `assert` field | `decide gate(bad: 1)` / missing schema field | Supply every declared input/field |
 | `E3001` | Error | Overlapping rules in `Unique` table or conflicting outputs in `Any` table (with witness) | Two `Unique` rows both matching `priority=90` | Tighten predicates or switch to `First` |
 | `E3002` | Error | Unsatisfiable decision table cell | `> 10 and < 5` | Fix contradictory cell bounds |
+| `E4001` | Error | Unstratified `not` or aggregation cycle across rule dependency SCC | `rule a { when { not B() } then { assert A() } }`, `rule b { when { A() } then { assert B() } }` | Break the cycle with a distinct base/derived layer |
 | `W2001` | Warning | Unused `?variable` in rule | `RawOrg(name: ?unused)` | `RawOrg(name: ?_unused)` |
 | `W2002` | Warning | Unreferenced `schema`, `source`, or `table` | `table dead { ... }` | Reference in a rule/query or remove |
 | `W2003` | Warning | Potential Cartesian join across adjacent positive patterns | `RawOrg(name: ?a)` then `RawOrg(domain: ?b)` | Join on shared variable `?domain` |

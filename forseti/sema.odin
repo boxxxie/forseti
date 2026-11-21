@@ -739,16 +739,24 @@ sema_analyze_actions :: proc(
 			}
 
 			if !has_not && !warned_self {
-				for mt in matched_targets {
-					if mt == act.target {
-						sema_warn(
-							ctx,
-							.W2004,
-							rule_span,
-							fmt.tprintf("rule directly asserts %q which also appears in 'when' without a 'not' guard (risk of self-triggering loop)", ir_string(ctx.ir, act.target)),
-						) or_return
-						warned_self = true
-						break
+				is_source_target := false
+				if bid, bok := ctx.binding_map[act.target]; bok {
+					is_source_target = ctx.ir.bindings[bid].kind == .Source
+				}
+				if is_source_target || len(matched_targets) <= 1 {
+					// Emit W2004 on self-asserting source mutations or trivial single-pattern loops;
+					// derived join recursion (e.g. parent-child transitive closure) stratifies cleanly.
+					for mt in matched_targets {
+						if mt == act.target {
+							sema_warn(
+								ctx,
+								.W2004,
+								rule_span,
+								fmt.tprintf("rule directly asserts %q which also appears in 'when' without a 'not' guard (risk of self-triggering loop)", ir_string(ctx.ir, act.target)),
+							) or_return
+							warned_self = true
+							break
+						}
 					}
 				}
 			}
@@ -999,5 +1007,7 @@ analyze_ir :: proc(
 	}
 
 	verify_all_tables(ir, diags, telemetry) or_return
+	strat_plan := stratify_ir(ir, diags, telemetry) or_return
+	stratification_plan_destroy(&strat_plan)
 	return nil
 }

@@ -22,16 +22,18 @@ Join_Key_Pair :: struct {
 }
 
 Beta_Node_Def :: struct {
-	id:           u32,
-	kind:         Beta_Node_Kind,
-	alpha_mem_id: u32,
-	fact_slot:    u8,
-	decide_slot:  u8,
-	prog_idx:     u32,
-	rule_id:      u32,
-	join_keys:    []Join_Key_Pair,
-	field_binds:  []Alpha_Field_Bind,
-	var_slot:     u16, // for Bind
+	id:            u32,
+	kind:          Beta_Node_Kind,
+	alpha_mem_id:  u32,
+	subnetwork_id: u32,
+	fact_slot:     u8,
+	decide_slot:   u8,
+	accum_op:      Accum_Op,
+	prog_idx:      u32,
+	rule_id:       u32,
+	join_keys:     []Join_Key_Pair,
+	field_binds:   []Alpha_Field_Bind,
+	var_slot:      u16, // for Bind / Accum
 }
 
 Segment_Input_Link :: struct {
@@ -49,13 +51,241 @@ Segment_Def :: struct {
 }
 
 @(private)
-_append_alpha_sub :: proc(ctx: ^Rb_Build_Ctx, alpha_mem_id: u32, seg_id: u32, bit_mask: u64) {
+_append_alpha_sub :: proc(ctx: ^Rb_Build_Ctx, alpha_mem_id: u32, seg_id: u32, bit_mask: u64, notify_only := false) {
 	list, has := &ctx.sub_lists[alpha_mem_id]
 	if !has {
 		ctx.sub_lists[alpha_mem_id] = make([dynamic]Alpha_Segment_Target, 0, 2, context.temp_allocator)
 		list = &ctx.sub_lists[alpha_mem_id]
 	}
-	append(list, Alpha_Segment_Target{seg_id = seg_id, input_bit = bit_mask})
+	for existing in list {
+		if existing.seg_id == seg_id && existing.input_bit == bit_mask && existing.notify_only == notify_only {
+			return
+		}
+	}
+	append(list, Alpha_Segment_Target{seg_id = seg_id, input_bit = bit_mask, notify_only = notify_only})
+}
+
+@(private)
+_collect_expr_outer_vars :: proc(
+	ir: ^Rulebase_IR,
+	eid: Expr_Id,
+	outer_vars: map[String_Id]u16,
+	outer_fact_descs: []Vm_Fact_Slot_Desc,
+	out_slots: ^[dynamic]u16,
+	uses_outer_fact: ^bool,
+) {
+	if eid == INVALID_EXPR || int(eid) >= len(ir.exprs) {
+		return
+	}
+	e := ir.exprs[eid]
+	switch e.kind {
+	case .Var:
+		if slot, ok := outer_vars[e.str_id]; ok {
+			for prev in out_slots^ {
+				if prev == slot {
+					return
+				}
+			}
+			append(out_slots, slot)
+			return
+		}
+		if uses_outer_fact != nil {
+			for ofd in outer_fact_descs {
+				if ofd.var_name != EMPTY_STRING && ofd.var_name == e.str_id {
+					uses_outer_fact^ = true
+					return
+				}
+			}
+		}
+	case .Unary, .Field_Access:
+		_collect_expr_outer_vars(ir, e.lhs, outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+	case .Binary, .Range:
+		_collect_expr_outer_vars(ir, e.lhs, outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+		_collect_expr_outer_vars(ir, e.rhs, outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+	case .Cell_Cmp:
+		_collect_expr_outer_vars(ir, e.rhs, outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+	case .In_List, .Call:
+		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
+			_collect_expr_outer_vars(ir, ir.extra_exprs[i], outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+		}
+	case .Invalid, .Lit_Bool, .Lit_Int, .Lit_Float, .Lit_String, .Ident, .Wildcard:
+	}
+}
+
+@(private)
+_compile_subnetwork :: proc(
+	ctx: ^Rb_Build_Ctx,
+	outer_seg_id: u32,
+	sub_clauses: []Clause_IR,
+	outer_vars: map[String_Id]u16,
+	outer_next_var: u16,
+	outer_fact_descs: []Vm_Fact_Slot_Desc,
+	outer_decide_descs: []Vm_Decide_Slot_Desc,
+	is_accum := false,
+	accum_op := Accum_Op.Count,
+	accum_expr := INVALID_EXPR,
+	accum_guard := INVALID_EXPR,
+	out_var_slot := u16(0),
+) -> (sub_id: u32, err: Compile_Error) {
+	sub_vars := make(map[String_Id]u16, len(outer_vars) + 8, context.temp_allocator)
+	for k, v in outer_vars {
+		sub_vars[k] = v
+	}
+	sub_next_var := outer_next_var
+	sub_fact_descs := make([dynamic]Vm_Fact_Slot_Desc, len(outer_fact_descs), len(outer_fact_descs) + 4, context.temp_allocator)
+	copy(sub_fact_descs[:], outer_fact_descs)
+
+	steps := make([dynamic]Subnetwork_Step, 0, len(sub_clauses) + 1, context.temp_allocator)
+	group_slots := make([dynamic]u16, 0, 4, context.temp_allocator)
+	uses_outer_fact := false
+
+	add_group_slot := proc(slots: ^[dynamic]u16, s: u16) {
+		for prev in slots^ {
+			if prev == s {
+				return
+			}
+		}
+		append(slots, s)
+	}
+
+	for cl in sub_clauses {
+		#partial switch cl.kind {
+		case .Pattern:
+			fslot := u8(len(sub_fact_descs))
+			alpha_id, bidx, binds, joins, _, c_err := compile_pattern_clause(
+				ctx,
+				cl,
+				fslot,
+				&sub_vars,
+				&sub_next_var,
+				&sub_fact_descs,
+			)
+			if c_err != .None {
+				return 0, c_err
+			}
+			_append_alpha_sub(ctx, alpha_id, outer_seg_id, 0, notify_only = true)
+			for jk in joins {
+				if jk.left_var_slot < outer_next_var {
+					add_group_slot(&group_slots, jk.left_var_slot)
+				}
+			}
+			append(&steps, Subnetwork_Step{
+				kind         = .Pattern,
+				alpha_mem_id = alpha_id,
+				binding_idx  = bidx,
+				fact_slot    = fslot,
+				join_keys    = joins,
+				field_binds  = binds,
+				guard_prog   = -1,
+			})
+
+		case .Where:
+			_collect_expr_outer_vars(ctx.ir, cl.expr, outer_vars, outer_fact_descs, &group_slots, &uses_outer_fact)
+			var_map := make(map[String_Id]u8, len(sub_vars), context.temp_allocator)
+			for k, v in sub_vars {
+				var_map[k] = u8(v)
+			}
+			env := Vm_Compile_Env{
+				ir           = ctx.ir,
+				tables       = ctx.rb.tables,
+				var_names    = var_map,
+				fact_descs   = sub_fact_descs[:],
+				decide_descs = outer_decide_descs,
+			}
+			prog, verr := vm_compile_expr(&env, cl.expr, ctx.alloc)
+			if verr != .None {
+				return 0, .Vm_Compile_Failed
+			}
+			pidx := i32(len(ctx.programs))
+			append(&ctx.programs, prog)
+			append(&steps, Subnetwork_Step{
+				kind       = .Where,
+				guard_prog = pidx,
+			})
+
+		case:
+			return 0, .Unsupported_Clause
+		}
+	}
+
+	acc_expr_prog := i32(-1)
+	acc_expr_fslot := i16(-1)
+	acc_guard_prog := i32(-1)
+
+	if is_accum {
+		if accum_expr != INVALID_EXPR && int(accum_expr) < len(ctx.ir.exprs) {
+			_collect_expr_outer_vars(ctx.ir, accum_expr, outer_vars, outer_fact_descs, &group_slots, &uses_outer_fact)
+			ae := ctx.ir.exprs[accum_expr]
+			if ae.kind == .Var {
+				for fd, fi in sub_fact_descs {
+					if fd.var_name == ae.str_id {
+						acc_expr_fslot = i16(fi)
+						break
+					}
+				}
+			}
+			if acc_expr_fslot < 0 {
+				var_map := make(map[String_Id]u8, len(sub_vars), context.temp_allocator)
+				for k, v in sub_vars {
+					var_map[k] = u8(v)
+				}
+				env := Vm_Compile_Env{
+					ir           = ctx.ir,
+					tables       = ctx.rb.tables,
+					var_names    = var_map,
+					fact_descs   = sub_fact_descs[:],
+					decide_descs = outer_decide_descs,
+				}
+				prog, verr := vm_compile_expr(&env, accum_expr, ctx.alloc)
+				if verr != .None {
+					return 0, .Vm_Compile_Failed
+				}
+				acc_expr_prog = i32(len(ctx.programs))
+				append(&ctx.programs, prog)
+			}
+		}
+
+		if accum_guard != INVALID_EXPR {
+			_collect_expr_outer_vars(ctx.ir, accum_guard, outer_vars, outer_fact_descs, &group_slots, &uses_outer_fact)
+			var_map := make(map[String_Id]u8, len(sub_vars), context.temp_allocator)
+			for k, v in sub_vars {
+				var_map[k] = u8(v)
+			}
+			env := Vm_Compile_Env{
+				ir           = ctx.ir,
+				tables       = ctx.rb.tables,
+				var_names    = var_map,
+				fact_descs   = sub_fact_descs[:],
+				decide_descs = outer_decide_descs,
+			}
+			prog, verr := vm_compile_expr(&env, accum_guard, ctx.alloc)
+			if verr != .None {
+				return 0, .Vm_Compile_Failed
+			}
+			acc_guard_prog = i32(len(ctx.programs))
+			append(&ctx.programs, prog)
+		}
+	}
+
+	slice.sort(group_slots[:])
+	out_steps := make([]Subnetwork_Step, len(steps), ctx.alloc)
+	copy(out_steps, steps[:])
+	out_groups := make([]u16, len(group_slots), ctx.alloc)
+	copy(out_groups, group_slots[:])
+
+	sub_id = u32(len(ctx.subnetworks))
+	append(&ctx.subnetworks, Subnetwork_Def{
+		id                   = sub_id,
+		steps                = out_steps,
+		accum_op             = accum_op,
+		accum_expr_prog      = acc_expr_prog,
+		accum_expr_fact_slot = acc_expr_fslot,
+		accum_guard_prog     = acc_guard_prog,
+		out_var_slot         = out_var_slot,
+		group_var_slots      = out_groups,
+		uses_outer_fact      = uses_outer_fact,
+	})
+	return sub_id, .None
 }
 
 @(private)
@@ -72,6 +302,7 @@ build_compiled_rule :: proc(
 	seg_id := u32(len(ctx.segments))
 	node_start := u32(len(ctx.beta_nodes))
 	input_links := make([dynamic]Segment_Input_Link, 0, 4, context.temp_allocator)
+	first_decide_table := INVALID_TABLE_IDX
 
 	pat_idx := u8(0)
 	for cl in rdef.when_clauses {
@@ -111,11 +342,59 @@ build_compiled_rule :: proc(
 			})
 			pat_idx += 1
 
+		case .Not, .Exists:
+			sub_id := _compile_subnetwork(
+				ctx,
+				seg_id,
+				cl.children,
+				bound_vars,
+				next_var,
+				fact_descs[:],
+				decide_descs[:],
+			) or_return
+			bn_kind := Beta_Node_Kind.Not if cl.kind == .Not else Beta_Node_Kind.Exists
+			append(&ctx.beta_nodes, Beta_Node_Def{
+				id            = u32(len(ctx.beta_nodes)),
+				kind          = bn_kind,
+				subnetwork_id = sub_id,
+			})
+
+		case .Accum:
+			vslot := next_var
+			next_var += 1
+			sub_id := _compile_subnetwork(
+				ctx,
+				seg_id,
+				cl.inner_pat,
+				bound_vars,
+				next_var,
+				fact_descs[:],
+				decide_descs[:],
+				is_accum = true,
+				accum_op = cl.accum_op,
+				accum_expr = cl.expr,
+				accum_guard = cl.guard_expr,
+				out_var_slot = vslot,
+			) or_return
+			if cl.bind_var != EMPTY_STRING {
+				bound_vars[cl.bind_var] = vslot
+			}
+			append(&ctx.beta_nodes, Beta_Node_Def{
+				id            = u32(len(ctx.beta_nodes)),
+				kind          = .Accum,
+				subnetwork_id = sub_id,
+				accum_op      = cl.accum_op,
+				var_slot      = vslot,
+			})
+
 		case .Decide:
 			dslot := u8(len(decide_descs))
 			tidx, tok := ctx.rb.table_by_name[cl.target]
 			if !tok {
 				return {}, .Unknown_Binding
+			}
+			if first_decide_table == INVALID_TABLE_IDX {
+				first_decide_table = u16(tidx)
 			}
 			var_map := make(map[String_Id]u8, len(bound_vars), context.temp_allocator)
 			for k, v in bound_vars {
@@ -209,6 +488,10 @@ build_compiled_rule :: proc(
 	})
 
 	all_mask: u64 = (u64(1) << pat_idx) - 1 if pat_idx < 64 else ~u64(0)
+	if pat_idx == 0 {
+		all_mask = 0
+		append(&ctx.zero_input_segs, seg_id)
+	}
 	links := make([]Segment_Input_Link, len(input_links), ctx.alloc)
 	copy(links, input_links[:])
 	append(&ctx.segments, Segment_Def{
@@ -270,8 +553,9 @@ build_compiled_rule :: proc(
 				pidx := i32(len(ctx.programs))
 				append(&ctx.programs, prog)
 				ca.fields[fi] = Compiled_Action_Field{
-					field_idx = fidx,
-					expr_prog = pidx,
+					field_idx  = fidx,
+					field_name = fb.name,
+					expr_prog  = pidx,
 				}
 			}
 		case .Retract:
@@ -286,22 +570,58 @@ build_compiled_rule :: proc(
 					}
 				}
 			}
+		case .Effect:
+			ca.effect_kind = act.target
+			ca.fields = make([]Compiled_Action_Field, len(act.fields), ctx.alloc)
+			for fb, fi in act.fields {
+				env := Vm_Compile_Env{
+					ir           = ctx.ir,
+					tables       = ctx.rb.tables,
+					var_names    = var_map,
+					fact_descs   = fact_descs[:],
+					decide_descs = decide_descs[:],
+				}
+				prog, verr := vm_compile_expr(&env, fb.expr, ctx.alloc)
+				if verr != .None {
+					return {}, .Vm_Compile_Failed
+				}
+				pidx := i32(len(ctx.programs))
+				append(&ctx.programs, prog)
+				ca.fields[fi] = Compiled_Action_Field{
+					field_idx  = i16(fi),
+					field_name = fb.name,
+					expr_prog  = pidx,
+				}
+			}
 		}
 		actions[ai] = ca
 	}
 
+	stratum := u32(0)
+	is_rec := false
+	if int(rule_id) < len(ctx.rule_stratum) {
+		stratum = ctx.rule_stratum[rule_id]
+	}
+	if int(rule_id) < len(ctx.rule_recursive) {
+		is_rec = ctx.rule_recursive[rule_id]
+	}
+
 	return Rule_Compiled{
-		id              = rule_id,
-		name            = rdef.name,
-		phase           = rdef.phase,
-		salience        = rdef.salience,
-		input_count     = pat_idx,
-		all_inputs_mask = all_mask,
-		segment_ids     = seg_ids,
-		actions         = actions,
-		var_count       = next_var,
-		fact_slot_count = u8(len(fact_descs)),
-		decide_slots    = u8(len(decide_descs)),
+		id               = rule_id,
+		name             = rdef.name,
+		phase            = rdef.phase,
+		version          = ctx.ir.module_version,
+		salience         = rdef.salience,
+		stratum          = stratum,
+		is_recursive     = is_rec,
+		decide_table_idx = first_decide_table,
+		input_count      = pat_idx,
+		all_inputs_mask  = all_mask,
+		segment_ids      = seg_ids,
+		actions          = actions,
+		var_count        = next_var,
+		fact_slot_count  = u8(len(fact_descs)),
+		decide_slots     = u8(len(decide_descs)),
 	}, .None
 }
 
