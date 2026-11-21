@@ -23,3 +23,9 @@
 ## 5. Honest Telemetry & Longitudinal Benchmarking
 - Bake telemetry counters and phase timers directly into the architecture (compile-time switchable via `#config(FORSETI_TELEMETRY, true)` + zero-cost disabled path).
 - Measure performance honestly using `hugi` + `obench`: exclude setup/teardown, unwrap allocators during timed hot loops, verify `@zero_alloc` invariants in dedicated passes, and report memory footprint + hardware perf counters alongside latency across `10` to `1,000,000` rules.
+
+## 6. Red-First 4-Layer ATDD & Anti-DSL-Theater
+- **Strict 4-Layer Separation (`specs/`):** Behavioral features live in a black-box sibling `specs/` package (`package forseti_specs` importing `../forseti`): Layer 1 (`*_spec_test.odin`, pure domain vocabulary), Layer 2 (`dsl_test.odin`, `&World` verbs with `loc := #caller_location` and `proc{...}` overloads), Layer 3 (`driver_test.odin`, composable technical drivers), Layer 4 (`forseti/` SUT with internals marked `@(private)` / `#+private`).
+- **Right Pattern for the Behavior (A–E):** Use Patterns A/B/C (Given/Upon/Then, `viewing_*` scoped blocks, context pipelines) and `#caller_location` row-constructor decision matrices in `specs/` for behavioral capabilities; use Pattern D (`t.seed` property invariants) and Pattern E direct unit tests for low-level infrastructure (lexers, AST pools, bytecode VMs, bitset/slot codecs).
+- **Zero DSL Theater & Parallel Safety:** Ban zero-argument mega-steps that hide fixture parameters inside `driver_test.odin`, ban vacuous/shape-only assertions, allocate SUT state on `context.allocator` (not `w.arena`) so leaks fail `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`, keep all state inside per-test `World` for safe concurrent execution, optimize specs for a 5-second PR diff, and never weaken Layer 1 specs to chase green builds.
+

@@ -4,7 +4,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 1: Core `.forseti` External & Internal DSL, Canonical `Rulebase_IR`, Compile-Time Diagnostics, and Telemetry Foundation** *(Priority: Step 1 — Foundation)*
+- [ ] **Track 1: Core `.forseti` External & Internal DSL, Canonical `Rulebase_IR`, Compile-Time Diagnostics, Telemetry Foundation, and 4-Layer `specs/` Harness** *(Priority: Step 1 — Foundation)*
   *Link: [./tracks/dsl_ir_diagnostics_and_telemetry_foundation_20261121/](./tracks/dsl_ir_diagnostics_and_telemetry_foundation_20261121/)*
 
 ---
@@ -34,5 +34,5 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 7: Agent-Proof DSL Reference (`docs/` & `usage-rules.md`), CI-Verified Examples, Full CLI (`cmd/forseti`), and 4-Layer ATDD Specs** *(Priority: Step 7 — Depends on Tracks 1–6; docs kept fresh incrementally)*
+- [ ] **Track 7: Agent-Proof DSL Reference (`docs/` & `usage-rules.md`), CI-Verified Examples, Full CLI (`cmd/forseti`), and E2E ATDD Audit** *(Priority: Step 7 — Depends on Tracks 1–6; docs & specs kept fresh incrementally)*
   *Link: [./tracks/agent_dsl_docs_examples_and_cli_tooling_20261121/](./tracks/agent_dsl_docs_examples_and_cli_tooling_20261121/)*

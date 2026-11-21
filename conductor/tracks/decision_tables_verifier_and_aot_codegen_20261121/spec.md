@@ -58,9 +58,10 @@ Studying `Tablex` (`reference/tablex`) in CAASA Connect and `ZEN` (`reference/ze
 
 ## 4. Non-Functional & Verification Requirements
 
+- **4-Layer ATDD & Pattern D/E Split:** Author behavioral table specifications in `specs/decision_tables_spec_test.odin` using `#caller_location` row-constructor decision matrices (covering MDM tables like `survivorship_gate`, `identity_routing`, `career_consolidation`, lazy-cost skipping, static gap/overlap witnesses, and AOT parity). Keep interval-partition math and bitset matrix internals in Pattern E unit tests + Pattern D `t.seed` property invariants (`prop_*` with `testing.set_fail_timeout`).
 - Zero allocations during `decide(&compiled_table, inputs)` hot-path evaluation.
 - AOT generated Odin files must pass `odin check -vet -vet-tabs -strict-style -disallow-do -warnings-as-errors` automatically in tests.
-- All tests pass with `-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.
+- All `specs/` and `tests/` pass with `-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.
 
 ---
 
@@ -73,8 +74,8 @@ Studying `Tablex` (`reference/tablex`) in CAASA Connect and `ZEN` (`reference/ze
 
 ## 6. Acceptance Criteria
 
-- [ ] All DMN hit policies (`F`, `U`, `A`, `P`, `C*`, `M`, `R`) execute deterministically and match a brute-force table oracle across randomized inputs.
+- [ ] All DMN hit policies (`F`, `U`, `A`, `P`, `C*`, `M`, `R`) execute deterministically and match a brute-force table oracle across Pattern D `t.seed` randomized inputs.
 - [ ] Static verifier detects overlaps, gaps, shadowed rows, and unused output variants with exact concrete counterexample witnesses.
 - [ ] Cost-ordered decision tree skips unreached expensive columns (verified via thunk invocation counters and telemetry).
 - [ ] `forseti gen` emits valid `"contextless"` Odin code passing strict `odin check` and matching runtime evaluator output identically.
-- [ ] Zero heap allocations on runtime `decide` hot path verified via `obench` / `Tracking_Allocator`.
+- [ ] Row-attributed 4-layer ATDD specs (`specs/decision_tables_spec_test.odin`) and zero-alloc `decide` checks pass under `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.

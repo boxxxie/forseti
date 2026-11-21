@@ -6,10 +6,13 @@ Guidelines and architecture invariants for coding agents developing **Forseti** 
 
 ## Planned Repository Structure
 
-- **`forseti/`** — Core rules engine library (`package forseti`): `.forseti` lexer/parser/IR, compile-time diagnostics, compiled DMN decision tables, `xitdb` delta substrate, lazy PHREAK / Rete-UL matcher, 32-bit `#must_tail` guard VM, Z-set JTMS, accumulators, Tarjan SCC semi-naive Datalog, compact `#soa` provenance/semirings, 3-phase async effects, and built-in telemetry.
-- **`cmd/forseti/`** — CLI (`check`, `verify-tables`, `ast`, `ir`, `gen`, `explain`, `impact`, `diff-replay`, `telemetry`).
-- **`tests/`** — Direct `@(test)` unit, parser fuzz-recovery, and differential oracle suites.
-- **`specs/`** — 4-layer ATDD executable specifications (`World` DSL + Protocol Drivers).
+- **`forseti/`** — Core rules engine library (`package forseti`): `.forseti` lexer/parser/IR, compile-time diagnostics, compiled DMN decision tables, `xitdb` delta substrate, lazy PHREAK / Rete-UL matcher, 32-bit `#must_tail` guard VM, Z-set JTMS, accumulators, Tarjan SCC semi-naive Datalog, compact `#soa` provenance/semirings, 3-phase async effects, and built-in telemetry. Internal structs/helpers are marked `@(private)` or `#+private`.
+- **`specs/`** — Black-box 4-Layer ATDD executable specifications (`package forseti_specs`, importing `../forseti`):
+  - **Layer 1 (`*_spec_test.odin`):** Behavioral specifications in pure problem-domain vocabulary (Patterns A/B/C + `#caller_location` row-constructor decision tables). Zero allocator, cursor, or internal struct details.
+  - **Layer 2 (`dsl_test.odin`):** Domain verbs (`given_*`, `upon_*`, `then_*`, `viewing_*`, `proc{...}` overloads) operating on `&World` (initialized in-place with `world_init(&w, t)` + `defer world_destroy(&w)`), forwarding `loc := #caller_location` to every `testing.expect*` call.
+  - **Layer 3 (`driver_test.odin`):** Composable protocol drivers bridging Layer 2 to `forseti` / `xitdb` / CLI APIs. SUT allocations stay on `context.allocator` (never hidden in `w.arena`) so `ODIN_TEST_FAIL_ON_BAD_MEMORY=true` catches real production leaks; expected negative paths scope `context.logger = log.nil_logger()`, and OS resources register `testing.cleanup`.
+- **`tests/`** — Direct Pattern E unit tests and Pattern D `prop_*` (`t.seed` + `testing.set_fail_timeout`) property / differential oracle tests for low-level infrastructure (lexer, AST pool, VM opcodes, bitmask/hash codecs, fuzz regressions).
+- **`cmd/forseti/`** — CLI (`check`, `verify-tables`, `ast`, `ir`, `gen`, `run`, `explain`, `impact`, `diff-replay`, `telemetry`, `export-dot` / `export-mermaid`).
 - **`benchmarks/`** — `hugi` + `obench` benchmark suite scaling `10` to `1,000,000` rules (`benchmarks/history.hugidb`).
 - **`examples/`** — CI-verified standalone runnable examples demonstrating the `.forseti` DSL, internal Odin DSL, AOT codegen, `xitdb` integration, and telemetry.
 - **`docs/`** — Deep technical architecture, DSL reference (`docs/dsl-reference.md`), `xitdb` fast-mode tradeoffs (`docs/xitdb-fast-mode.md`), and scaling benchmarks (`docs/benchmarks.md`).
@@ -30,16 +33,27 @@ VET="-vet -vet-tabs -strict-style -disallow-do -warnings-as-errors"
 odin check forseti -no-entry-point $COLS $VET
 odin check cmd/forseti $COLS $VET
 
-# 2. Leak-checked tests (always enable ODIN_TEST_FAIL_ON_BAD_MEMORY=true)
-odin test tests -all-packages $COLS $VET -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+# 2. Full leak-checked ATDD specs + transitive unit/property tests (always enable ODIN_TEST_FAIL_ON_BAD_MEMORY=true)
 odin test specs -all-packages $COLS $VET -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+odin test tests -all-packages $COLS $VET -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
-# 3. ASan differential / fuzz checks
+# 3. Single Red-First ATDD scenario execution
+odin test specs $COLS $VET -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_TEST_NAMES=forseti_specs.<spec_name> -define:ODIN_TEST_FANCY=false
+
+# 4. ASan differential / fuzz checks
 odin test tests -sanitize:address $COLS -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
-# 4. Longitudinal scaling benchmarks via hugi
+# 5. Longitudinal scaling benchmarks via hugi
 hugi run
 ```
+
+---
+
+## 4-Layer ATDD & Pattern A–E Testing Rules
+
+- **Patterns A/B/C in `specs/` for Behavioral Capabilities:** Multi-step MDM workflows, policy/diagnostic behavior, incremental `xitdb` sync, JTMS cascades, and CLI/audit contracts must be driven Red-First from `specs/*_spec_test.odin`.
+- **Pattern D (`prop_*`) & Pattern E Direct Tests for Low-Level Infrastructure:** Never wrap lexers, AST pools, bytecode opcodes, or binary slot/hasher codecs in ceremonial Given/Upon/Then steps—keep them as direct Pattern E unit tests + Pattern D stack-local `rand.create(t.seed)` property tests.
+- **No DSL Theater or Vacuous Assertions:** Every `given_*` / `upon_*` / `then_*` step must accept the domain parameters determining the outcome (never zero-argument mega-steps hiding inputs/assertions in `driver_test.odin`), never use shape-only assertions (`len >= 0`), and keep per-test `World` label maps isolated so specs run concurrently without shared globals.
 
 ---
 

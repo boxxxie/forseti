@@ -63,6 +63,7 @@ Forseti uses `xitdb` (`Core_Memory` default at ~3M ops/sec, attachable `Core_Buf
 
 ## 4. Non-Functional & Verification Requirements
 
+- **4-Layer ATDD & Pattern E Split:** Author behavioral storage & delta contracts in `specs/xitdb_substrate_spec_test.odin` (standalone `Core_Memory` vs attached `Core_Buffered_File` sync, `diff_collection` incremental change detection, compaction-safe resync, `Core_Overlay` counterfactual isolation, and safe `Safe_V2` vs opt-in `Fast_Memory` guardrails) via Layer 2/3 `&World` drivers. Keep low-level slot unpacking and `Hasher` wire tests in Pattern E direct unit tests.
 - Zero regressions in `../xitdb/tests` under `-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` (both safe default and fast-memory configs tested).
 - `diff_collection` delta sync scales sub-linearly (`O(changes * depth)`) when 1 key changes in a 100k-record `xitdb` collection.
 
@@ -81,4 +82,4 @@ Forseti uses `xitdb` (`Core_Memory` default at ~3M ops/sec, attachable `Core_Buf
 - [ ] Changing 10 records inside a 100,000-record `xitdb` map syncs only those 10 deltas via `diff_collection` (`slots_skipped` verified by telemetry).
 - [ ] Lazy `Read_Cursor` field reads decode `Short_Bytes`, `Bytes`, `Int`, `Uint`, `Float`, `Bool`, and nested sub-maps cleanly into `Value`.
 - [ ] `Core_Overlay` forks isolate writes completely from the parent DB and destroy with zero leaks.
-- [ ] Safe default `xitdb` v2 wire tests pass 100%; opt-in `Fast_Memory` benchmarks & `docs/xitdb-fast-mode.md` document measured speedups and exact limitations.
+- [ ] Black-box 4-layer ATDD specs (`specs/xitdb_substrate_spec_test.odin`), safe default `xitdb` v2 wire tests, and opt-in `Fast_Memory` benchmarks/`docs/xitdb-fast-mode.md` pass under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.

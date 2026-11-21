@@ -9,8 +9,8 @@
 
 ## Phase 1: Parameterized `hugi`/`obench` Scaling Harness (`10`..`1,000,000` Rules)
 
-- [ ] Task: Build deterministic workload generator and `10`..`1,000,000`-rule fan-out & Beta-join benchmarks (TDD)
-    - [ ] Write benchmark smoke tests (`-test-mode` / small scale verification) ensuring zero leaks and valid rule outputs before timed runs
+- [ ] Task: Build deterministic workload generator, `specs/` behavioral sanity verification, and `10`..`1,000,000`-rule fan-out & Beta-join benchmarks (TDD + ATDD sanity)
+    - [ ] Write smoke tests and `specs/` behavioral sanity checks (`10`..`10k` scale smoke mode) confirming zero leaks and expected MDM rule derivations before timed runs
     - [ ] Implement `benchmarks/gen_workload.odin`, `benchmarks/bench_scale_rules.odin`, and `benchmarks/bench_joins.odin`
 - [ ] Task: Build JTMS churn, recursive strata, and E2E MDM mode comparison (`Audit_Full` vs `Fast`, `Safe_V2` vs `Fast_Memory`) benchmarks (TDD)
     - [ ] Write smoke verification tests covering all 6 workloads and `@zero_alloc` hot-path checks

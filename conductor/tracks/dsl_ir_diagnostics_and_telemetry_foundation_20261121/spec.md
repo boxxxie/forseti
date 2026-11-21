@@ -75,7 +75,8 @@ All three authoring tiers of Forseti—the priority #1 **External `.forseti` DSL
 
 ## 4. Non-Functional & Verification Requirements
 
-- Zero memory leaks and bad frees across valid and intentionally malformed inputs under `odin test tests -all-packages -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` and `-sanitize:address`.
+- **Black-Box 4-Layer ATDD (`specs/`):** Bootstrap sibling `specs/` (`package forseti_specs` importing `../forseti`, internal SUT helpers marked `@(private)` / `#+private`) with in-place `world_init(&w, t)` + `defer world_destroy(&w)`, `loc := #caller_location` forwarding, and Pattern A/C behavioral specs (`specs/compiler_diagnostics_spec_test.odin`) covering `.forseti` vs Internal Odin DSL IR parity and compile-time `E`/`W` diagnostics. Keep lexer, `String_Interner`, `Ast_Pool`, and `Telemetry_Sink` internals in direct Pattern E unit tests + Pattern D `t.seed` recovery tests.
+- Zero memory leaks and bad frees across valid and intentionally malformed inputs under `odin test specs -all-packages` and `tests` with `-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` and `-sanitize:address`.
 - Zero warnings under `odin check -vet -vet-tabs -strict-style -disallow-do -warnings-as-errors`.
 - Update `docs/dsl-reference.md` (draft grammar & `E1xxx`/`E2xxx`/`W2xxx` catalog) alongside implementation.
 
@@ -95,4 +96,4 @@ All three authoring tiers of Forseti—the priority #1 **External `.forseti` DSL
 - [ ] Both External `.forseti` DSL and Internal Odin DSL lower to the exact same `Rulebase_IR` and pass identical semantic checks.
 - [ ] All specified `E1xxx`/`E2xxx` errors and `W2xxx` warnings emit exact `file:line:col` spans and pass `--format=json` and `--warnings-as-errors` CLI tests.
 - [ ] `Telemetry_Sink` records compile phases + memory watermarks with zero leaks and exports valid Chrome Trace JSON.
-- [ ] `cmd/forseti check`, `ast`, and `ir` work end-to-end; all tests pass under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true` and ASan.
+- [ ] Black-box 4-layer `specs/` harness (`dsl_test.odin`, `driver_test.odin`, `compiler_diagnostics_spec_test.odin`) + `cmd/forseti check/ast/ir` pass under `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` and ASan.

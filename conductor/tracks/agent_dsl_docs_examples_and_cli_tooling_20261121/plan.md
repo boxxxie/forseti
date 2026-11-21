@@ -7,15 +7,15 @@
 
 ---
 
-## Phase 1: Full `cmd/forseti` CLI, Visual Exporters & 4-Layer ATDD Suite (`specs/`)
+## Phase 1: Full `cmd/forseti` CLI, Visual Exporters & E2E 4-Layer ATDD Expansion / Audit
 
-- [ ] Task: Complete `cmd/forseti` operational subcommands (`run`, `explain`, `impact`, `diff-replay`, `telemetry`, Mermaid/DOT export) (TDD)
-    - [ ] Write failing CLI integration tests covering JSON/human `explain`, `impact`, `diff-replay`, `telemetry`, and graph exports
+- [ ] Task: Complete `cmd/forseti` operational subcommands (`run`, `explain`, `impact`, `diff-replay`, `telemetry`, Mermaid/DOT export) (Red-First 4-Layer ATDD)
+    - [ ] Write failing Layer 1 CLI behavioral scenarios in `specs/cli_spec_test.odin` covering JSON/human `explain`, `impact`, `diff-replay`, `telemetry`, and graph exports
     - [ ] Implement remaining subcommands in `cmd/forseti/` and `forseti/viz_export.odin`
-- [ ] Task: Build 4-layer ATDD executable specification suite under `specs/` (TDD)
-    - [ ] Create `specs/dsl_mdm.odin` (`World` + `#caller_location`) and `specs/driver_mdm.odin`
-    - [ ] Implement end-to-end MDM feature specs (`specs/spec_mdm_rules.odin`) passing under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Full CLI & 4-Layer ATDD Suite' (Protocol in workflow.md)
+- [ ] Task: Expand cross-track E2E MDM specs and run full 4-layer ATDD hygiene audit across `specs/` (Red-First ATDD)
+    - [ ] Implement cross-track E2E behavioral scenarios (`specs/mdm_e2e_spec_test.odin` with Pattern B `viewing_*` scoped entity audit blocks) integrating Tracks 1–6
+    - [ ] Audit all `specs/*_spec_test.odin`, `specs/dsl_test.odin`, and `specs/driver_test.odin` for zero DSL theater, complete `#caller_location` forwarding, SUT `@(private)` encapsulation, parallel safety, and `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
+- [ ] Task: Conductor - User Manual Verification 'Phase 1: Full CLI & E2E 4-Layer ATDD Audit' (Protocol in workflow.md)
 
 ---
 

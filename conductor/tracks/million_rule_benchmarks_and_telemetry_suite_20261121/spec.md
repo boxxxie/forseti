@@ -9,7 +9,7 @@
 
 ## 1. Problem Statement & Motivation
 
-Claiming PHREAK/Rete-UL scales to `1,000,000` rules or that `xitdb` + provenance stays fast in MDM pipelines is meaningless without reproducible, longitudinal measurements across scale orders of magnitude. Using [`hugi`](../../../../hugi/README.md) (`hugi.json`) and [`obench`](../../../../hugi/deps/obench/obench/README.md), we need an automated scaling benchmark suite across **`10`, `100`, `1,000`, `10,000`, `100,000`, and `1,000,000` rules** paired with deep Forseti telemetry breakdowns so every hotspot is quantified and eliminated.
+Claiming PHREAK/Rete-UL scales to `1,000,000` rules or that `xitdb` + provenance stays fast in MDM pipelines is meaningless without reproducible, longitudinal measurements across scale orders of magnitude. Using [`hugi`](../../../../hugi/README.md) (`hugi.json`) and [`obench`](../../../../hugi/deps/obench/README.md), we need an automated scaling benchmark suite across **`10`, `100`, `1,000`, `10,000`, `100,000`, and `1,000,000` rules** paired with deep Forseti telemetry breakdowns so every hotspot is quantified and eliminated.
 
 ---
 
@@ -44,6 +44,7 @@ Claiming PHREAK/Rete-UL scales to `1,000,000` rules or that `xitdb` + provenance
 
 ## 4. Non-Functional & Verification Requirements
 
+- Generated benchmark workloads (`10`..`10,000` smoke scale) must pass `specs/` behavioral sanity assertions (confirming expected derived MDM outcomes and zero memory leaks under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`) before executing longitudinal `hugi run` sweeps.
 - `1,000,000`-rule compile + `session_init` + incremental `fire` benchmark must complete cleanly on the local machine without OOM or pathological quadratic scaling.
 - `hugi run` executes end-to-end and persists clean snapshots into `benchmarks/history.hugidb`.
 

@@ -54,8 +54,9 @@ Drawing on Soar's Rete/UL (`reference/soar/.../rete.cpp`) and Drools PHREAK (`re
 
 ## 4. Non-Functional & Verification Requirements
 
+- **4-Layer ATDD & Pattern E Split:** Author behavioral rule-matching scenarios in `specs/matcher_rules_spec_test.odin` (multi-fact MDM joins, salience & phase focus sequencing, refraction, and parameterized `query` lookups) via `&World` verbs. Keep 32-bit `#must_tail` bytecode VM traps (`div 0`, `min(i64) / -1`), Alpha node sharing tables, and segment bitmask operations in Pattern E direct unit tests.
 - `session_init` on a `1,000,000`-rule `Rulebase` must remain sub-millisecond and avoid preallocating per-rule Beta containers.
-- Zero leaks/bad frees under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true` and `-sanitize:address`.
+- Zero leaks/bad frees under `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` and `-sanitize:address`.
 
 ---
 
@@ -71,4 +72,4 @@ Drawing on Soar's Rete/UL (`reference/soar/.../rete.cpp`) and Drools PHREAK (`re
 - [ ] Lazy `Session` allocates segment/beta memory only for activated segments, verified via memory watermark telemetry on `100,000` and `1,000,000` rule fixtures.
 - [ ] Unlinked rules perform `0` Beta joins when partner inputs are empty (verified via `segments_skipped_unlinked` telemetry).
 - [ ] `#must_tail` Guard VM evaluates arithmetic, comparisons, strings, `decide`, and `xitdb` cursor field reads cleanly with zero stack overflow or leaks.
-- [ ] Multi-way Beta joins, Salience/Phase Focus Agenda, and parameterized `query` lookups match a brute-force oracle on randomized workloads.
+- [ ] Multi-way Beta joins, Salience/Phase Focus Agenda, and parameterized `query` lookups match a brute-force oracle and pass black-box `specs/matcher_rules_spec_test.odin` under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.

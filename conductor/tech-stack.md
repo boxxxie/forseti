@@ -13,6 +13,6 @@
 - **Telemetry:** Built-in Forseti profiler (`time.tick_now`, arena/heap watermark counters, JSONL & Chrome Trace Event Format export, compile-time `#config(FORSETI_TELEMETRY, true)` toggle).
 - **Testing & Verification:**
   - `odin test` with `-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
-  - 4-layer ATDD executable specifications (`specs/` + `&World` DSL + Protocol Drivers)
-  - Differential oracle fuzz/property suites and `-sanitize:address` checks
+  - Sibling black-box 4-layer ATDD executable specifications (`specs/`, `package forseti_specs` importing `../forseti`, `&World` DSL + `#caller_location` attribution + Protocol Drivers)
+  - Pattern D `t.seed` property invariants, Pattern E direct unit tests (`tests/` / `forseti/`), and differential oracle fuzz suites with `-sanitize:address`
 - **Reference Architectures (`reference/`):** 16 shallow/sparse reference repos ([`../reference/README.md`](../reference/README.md)) including `tablex`, `zen`, `runic`, `clara-rules`, `odoyle-rules`, `pararules`, `soar`, `clips`, `drools`, `ascent`, `souffle`, `egglog`, `feldera-dbsp`, `propaganda`, `propagators-chirho`, and `provsql`.

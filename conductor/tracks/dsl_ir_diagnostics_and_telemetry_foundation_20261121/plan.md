@@ -8,26 +8,26 @@
 
 ## Phase 1: Project Package Bootstrap, `String_Interner`, Lexer & Telemetry Core
 
-- [ ] Task: Scaffold `forseti/`, `tests/`, and `Telemetry_Sink` core (TDD)
-    - [ ] Write failing unit tests covering `String_Interner` deduplication, `EMPTY_STRING` sentinel, `resolve_line_col` UTF-8 boundary resolution, and `Telemetry_Sink` hierarchical span recording + JSONL/Chrome Trace export + disabled zero-cost `#config(FORSETI_TELEMETRY, false)` build
-    - [ ] Implement `forseti/types.odin` (`Span`, `String_Id`, `Value`, distinct IDs), `forseti/interner.odin`, `forseti/telemetry.odin`, and verify strict `odin check` + leak-checked `odin test`
-- [ ] Task: Implement zero-copy `.forseti` lexer with sticky `.EOF` and malformed UTF-8 progress safety (TDD)
-    - [ ] Write failing unit + fuzz-input tests covering all `.forseti` keywords, table pipe/separator tokens (`|`, `||`, `-`), comparisons, `?var` sigils, string escapes, comments, line map offsets, and malformed byte sequences
-    - [ ] Implement `forseti/lexer.odin` with ASCII fast path and `utf8.decode_rune_in_string` fallback
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Lexer, String Interner & Telemetry Core' (Protocol in workflow.md)
+- [ ] Task: Scaffold `forseti/`, `tests/`, sibling `specs/` (`dsl_test.odin`, `driver_test.odin`), and `Telemetry_Sink` core (Pattern E TDD)
+    - [ ] Write failing Pattern E unit tests covering `String_Interner` deduplication, `EMPTY_STRING` sentinel, `resolve_line_col` UTF-8 boundary resolution, and `Telemetry_Sink` hierarchical span recording + JSONL/Chrome Trace export + disabled zero-cost `#config(FORSETI_TELEMETRY, false)` build
+    - [ ] Implement `forseti/types.odin` (`Span`, `String_Id`, `Value`, distinct IDs), `forseti/interner.odin`, `forseti/telemetry.odin`, and bootstrap `specs/dsl_test.odin` (`world_init(&w, t)`, `defer world_destroy(&w)`, `#caller_location`) + `specs/driver_test.odin`; verify strict `odin check` + leak-checked `odin test`
+- [ ] Task: Implement zero-copy `.forseti` lexer with sticky `.EOF` and malformed UTF-8 progress safety (Pattern E + Pattern D `t.seed`)
+    - [ ] Write failing unit + Pattern D `t.seed` malformed-UTF-8 recovery tests covering all `.forseti` keywords, table pipe/separator tokens (`|`, `||`, `-`), comparisons, `?var` sigils, string escapes, comments, and line map offsets
+    - [ ] Implement `forseti/lexer.odin` (`@(private)` internals) with ASCII fast path and `utf8.decode_rune_in_string` fallback
+- [ ] Task: Conductor - User Manual Verification 'Phase 1: Lexer, String Interner, Telemetry & Specs Bootstrap' (Protocol in workflow.md)
 
 ---
 
 ## Phase 2: Flat `Ast_Pool`, Bounded-Recovery Pratt Parser & Canonical `Rulebase_IR`
 
-- [ ] Task: Implement compact `Ast_Pool` (`#assert(size_of(Node) <= 32)`) and S-expression AST printer (TDD)
+- [ ] Task: Implement compact `Ast_Pool` (`#assert(size_of(Node) <= 32)`) and S-expression AST printer (Pattern E TDD)
     - [ ] Write failing tests verifying `Node` size invariant, scratch-staged `extra_children` non-interleaving on nested calls, and deterministic S-expression formatting
     - [ ] Implement `forseti/ast.odin` and `forseti/ast_print.odin`
-- [ ] Task: Implement Pratt expression parser and full `.forseti` module/schema/table/rule/query parser with error recovery (TDD)
+- [ ] Task: Implement Pratt expression parser and full `.forseti` module/schema/table/rule/query parser with error recovery (Pattern E + Pattern D `t.seed`)
     - [ ] Write failing tests for operator precedence, associativity, `MAX_PARSE_DEPTH` protection, error recovery synchronization (never spinning on stray tokens or `.EOF`), and full MDM policy constructs
     - [ ] Implement `forseti/parser.odin` and `forseti/diagnostics.odin` (caret excerpt + JSON diagnostic renderer)
-- [ ] Task: Implement canonical `Rulebase_IR`, AST->IR lowering, and Tier 2 Internal Odin DSL builders (TDD)
-    - [ ] Write failing tests proving identical `Rulebase_IR` structure whether authored via `.forseti` text or Tier 2 Odin `ir_builder` combinators
+- [ ] Task: Implement canonical `Rulebase_IR`, AST->IR lowering, and Tier 2 Internal Odin DSL builders (Red-First 4-Layer ATDD + Unit)
+    - [ ] Write failing Layer 1 behavioral specs (`specs/compiler_diagnostics_spec_test.odin` verifying External `.forseti` vs Tier 2 Internal Odin DSL produce equivalent compiled IR via public APIs) and direct Pattern E lowering checks
     - [ ] Implement `forseti/ir.odin`, `forseti/lower.odin`, and `forseti/dsl_odin.odin`
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Ast_Pool, Pratt Parser & Rulebase_IR' (Protocol in workflow.md)
 
@@ -35,10 +35,10 @@
 
 ## Phase 3: Compile-Time Semantic Validator, Lints, `cmd/forseti` CLI & Initial DSL Reference
 
-- [ ] Task: Implement semantic validation and static lint passes (`E2001–E2005`, `W2001–W2005`) (TDD)
-    - [ ] Write failing tests for every error and warning code (unbound `?var` in `assert`/`where`/`not`, type mismatches, Cartesian join warning, self-loop warning, unused vars/tables, shadowed vars) asserting exact `Span` and diagnostic code
+- [ ] Task: Implement semantic validation and static lint passes (`E2001–E2005`, `W2001–W2005`) (Red-First 4-Layer ATDD)
+    - [ ] Write failing Layer 1 ATDD behavioral scenarios & `#caller_location` matrix cases in `specs/compiler_diagnostics_spec_test.odin` (unbound `?var` in `assert`/`where`/`not`, type mismatches, Cartesian join warning, self-loop warning, unused vars/tables, shadowed vars) asserting exact diagnostic codes and `file:line:col` spans
     - [ ] Implement `forseti/sema.odin` with telemetry spans around each pass
-- [ ] Task: Implement `cmd/forseti` CLI (`check`, `ast`, `ir`) and author initial `docs/dsl-reference.md` (TDD)
-    - [ ] Write failing CLI integration tests verifying exit codes (`0` clean, non-zero on error or `--warnings-as-errors`), `--format=json`, and `--telemetry` output
-    - [ ] Implement `cmd/forseti/main.odin`, document initial grammar + `E1xxx`/`E2xxx`/`W2xxx` codes in `docs/dsl-reference.md`, and run full ASan + `ODIN_TEST_FAIL_ON_BAD_MEMORY=true` verification
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Semantic Diagnostics, CLI & DSL Reference' (Protocol in workflow.md)
+- [ ] Task: Implement `cmd/forseti` CLI (`check`, `ast`, `ir`) and author initial `docs/dsl-reference.md` (Red-First ATDD + CLI)
+    - [ ] Write failing Layer 1 CLI behavioral specs (via `specs/` CLI driver) verifying exit codes (`0` clean, non-zero on error or `--warnings-as-errors`), `--format=json`, and `--telemetry` output
+    - [ ] Implement `cmd/forseti/main.odin`, document initial grammar + `E1xxx`/`E2xxx`/`W2xxx` codes in `docs/dsl-reference.md`, and run `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` + ASan
+- [ ] Task: Conductor - User Manual Verification 'Phase 3: Semantic Diagnostics, ATDD Specs, CLI & DSL Reference' (Protocol in workflow.md)

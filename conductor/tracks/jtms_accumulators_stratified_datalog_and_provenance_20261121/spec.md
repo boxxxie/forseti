@@ -56,6 +56,7 @@ This track brings Forseti to full MDM & expert-system sophistication, resolving 
 
 ## 4. Non-Functional & Verification Requirements
 
+- **4-Layer ATDD + Pattern D Differential Oracle Split:** Author behavioral MDM governance & audit contracts in `specs/mdm_reasoning_and_audit_spec_test.odin` (JTMS steward-override retraction cascades, cyclic org/event freeze propagation, retractable accumulators, `explain`/`impact`/`diff_replay` audit contracts, and 3-phase async effects). Implement the `>= 10,000`-op randomized differential oracle suite as Pattern D `prop_*` tests using stack-local `rand.create(t.seed)` and `testing.set_fail_timeout` under `-sanitize:address`.
 - Differential oracle must achieve `0` state mismatches across `>= 10,000` randomized mutation/retraction steps (including cycles, diamond supports, `min`/`max` retractions, and `not` toggles).
 - Provenance mode `.Audit_Full` performs zero per-fact SHA-1/SHA-256 computations during hot matching.
 
@@ -73,4 +74,4 @@ This track brings Forseti to full MDM & expert-system sophistication, resolving 
 - [ ] Unstratified negation/aggregation cycles fail compile with `E4001` pointing to exact cycle lines; cyclic positive recursion always terminates with finite minimal proof height.
 - [ ] `decisions`, `idx.decisions_by_entity`, `idx.decisions_by_rule`, and `__tx` commit atomically into `xitdb`; `explain`, `impact`, `evaluate_semiring`, and `diff_replay` match ground truth.
 - [ ] 3-phase `Prepare -> Execute -> Apply` effects run concurrently off-engine and preserve causal lineage back to originating facts.
-- [ ] Differential oracle fuzz suite passes under ASan and `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.
+- [ ] Black-box 4-layer ATDD specs (`specs/mdm_reasoning_and_audit_spec_test.odin`) and Pattern D `t.seed` differential oracle fuzz suite pass under ASan and `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.
