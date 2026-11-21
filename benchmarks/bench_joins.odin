@@ -81,7 +81,16 @@ _bench_phreak_hot_match :: proc(b: ^hugi.Bencher) {
 	_, _ = forseti.session_insert_fact(s, "Org", "hot:0", hot_vals[:])
 	_, _ = forseti.session_fire(s)
 
+	// Warm up both alternating toggle states so all steady-state buckets/slots are populated.
+	for w_emp in ([2]i64{600, 500}) {
+		w_vals := [3]forseti.Value{hot_id_sid, hot_dom_sid, w_emp}
+		_ = forseti.session_modify_fact_by_key(s, "Org", "hot:0", w_vals[:])
+		_, _ = forseti.session_fire(s)
+	}
+	free_all(context.temp_allocator)
+
 	hugi.set_items(b, 1)
+	hugi.expect_zero_allocs(b)
 	toggle: i64 = 500
 	for hugi.step(b) {
 		toggle = 600 if toggle == 500 else 500
@@ -138,6 +147,6 @@ register_join_benchmarks :: proc(suite: ^hugi.Suite) {
 	g := hugi.group_add(suite, "beta_joins")
 	hugi.group_params(g, []int{10, 100, 1_000, 10_000})
 	hugi.group_bench(g, "two_way_mdm_join", _bench_two_way_mdm_join)
-	hugi.group_bench(g, "phreak_hot_match_zero_alloc", _bench_phreak_hot_match)
+	hugi.group_bench(g, "phreak_hot_match_zero_alloc", _bench_phreak_hot_match, zero_alloc = true)
 	hugi.group_bench(g, "parameterized_query", _bench_parameterized_query)
 }

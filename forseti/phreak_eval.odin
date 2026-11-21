@@ -9,6 +9,7 @@ Eval_Frame_Kind :: enum u8 {
 
 Eval_Frame :: struct {
 	kind:        Eval_Frame_Kind,
+	is_delta:    bool,
 	seg_id:      u32,
 	node_idx:    u32, // Relative to seg.node_start when Segment
 	sub_id:      u32,
@@ -23,34 +24,51 @@ Eval_Frame :: struct {
 }
 
 @(private)
+_acquire_token_buf :: proc(s: ^Session) -> [dynamic]Beta_Token {
+	if len(s.eval_buf_pool) > 0 {
+		buf := pop(&s.eval_buf_pool)
+		clear(&buf)
+		return buf
+	}
+	return make([dynamic]Beta_Token, 0, 16, s.allocator)
+}
+
+@(private)
+_release_token_buf :: proc(s: ^Session, buf: ^[dynamic]Beta_Token) {
+	if buf == nil || buf^ == nil {
+		return
+	}
+	clear(buf)
+	append(&s.eval_buf_pool, buf^)
+	buf^ = nil
+}
+
+@(private)
 _reconcile_rule_terminal :: proc(s: ^Session, rule_id: u32, tokens: []Beta_Token) {
-	live_hashes := make(map[u64]bool, len(tokens) + 1, context.temp_allocator)
+	live_hashes := &s.reconcile_live_hashes
+	clear(live_hashes)
 	for tok in tokens {
-		live_hashes[tok.fact_sig_hash] = true
+		live_hashes^[tok.fact_sig_hash] = true
 	}
 
 	// Revoke previously active firings that are no longer satisfied (e.g. blocked by NOT or Accum value changed).
 	if flist, has := s.jtms.rule_firings[rule_id]; has {
-		to_revoke := make([dynamic]Firing_Key, 0, 4, context.temp_allocator)
+		to_revoke := &s.reconcile_to_revoke
+		clear(to_revoke)
 		for fk in flist {
 			if af, ok := s.jtms.active_firings[fk]; ok && af.alive {
-				if !(fk.tok_hash in live_hashes) {
-					append(&to_revoke, fk)
+				if !(fk.tok_hash in live_hashes^) {
+					append(to_revoke, fk)
 				}
 			}
 		}
-		for fk in to_revoke {
+		for fk in to_revoke^ {
 			jtms_revoke_firing(s, fk)
 		}
 	}
 
 	// Cancel any queued (unfired) agenda activations for this rule that fell out of live_hashes.
-	for &act in s.agenda.items {
-		if act.alive && act.rule_id == rule_id && !(act.token.fact_sig_hash in live_hashes) {
-			act.alive = false
-			delete_key(&s.agenda.queued, Activation_Key{rule_id = rule_id, tok_hash = act.token.fact_sig_hash})
-		}
-	}
+	agenda_cancel_rule_not_in_set(&s.agenda, rule_id, live_hashes^)
 
 	for &tok in tokens {
 		agenda_stage_activation(s, rule_id, tok)
@@ -60,7 +78,7 @@ _reconcile_rule_terminal :: proc(s: ^Session, rule_id: u32, tokens: []Beta_Token
 @(private)
 _push_segment_frame :: proc(s: ^Session, seg_id: u32) {
 	sdef := s.rb.segments[seg_id]
-	tokens := make([dynamic]Beta_Token, 0, 16, s.allocator)
+	tokens := _acquire_token_buf(s)
 	if len(sdef.inputs) == 0 {
 		// 0-positive-input rule (e.g. standalone Not or standalone Accum) starts with a unit token.
 		append(&tokens, Beta_Token{fact_sig_hash = 0x5a45524f})
@@ -74,10 +92,10 @@ _push_segment_frame :: proc(s: ^Session, seg_id: u32) {
 }
 
 @(private)
-_destroy_eval_frame_bufs :: proc(f: ^Eval_Frame) {
-	delete(f.tokens)
-	delete(f.sub_tokens)
-	delete(f.pass_tokens)
+_release_eval_frame_bufs :: proc(s: ^Session, f: ^Eval_Frame) {
+	_release_token_buf(s, &f.tokens)
+	_release_token_buf(s, &f.sub_tokens)
+	_release_token_buf(s, &f.pass_tokens)
 	f^ = {}
 }
 
@@ -94,11 +112,12 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 	defer telemetry_span_end(s.telemetry, scope)
 
 	for &ef in s.eval_stack {
-		_destroy_eval_frame_bufs(&ef)
+		_release_eval_frame_bufs(s, &ef)
 	}
 	clear(&s.eval_stack)
 
-	remaining := make([dynamic]u32, 0, len(s.dirty_segs), context.temp_allocator)
+	remaining := &s.dirty_segs_rem
+	clear(remaining)
 	for seg_id in s.dirty_segs {
 		sm, ok := s.seg_mems[seg_id]
 		if !ok || !sm.dirty {
@@ -107,7 +126,7 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 		sdef := s.rb.segments[seg_id]
 		st := s.rb.rules[sdef.rule_id].stratum if int(sdef.rule_id) < len(s.rb.rules) else u32(0)
 		if !evaluate_all_strata && st != target_stratum {
-			append(&remaining, seg_id)
+			append(remaining, seg_id)
 			continue
 		}
 		sm.dirty = false
@@ -118,9 +137,7 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 		_push_segment_frame(s, seg_id)
 	}
 	clear(&s.dirty_segs)
-	for seg_id in remaining {
-		append(&s.dirty_segs, seg_id)
-	}
+	s.dirty_segs, s.dirty_segs_rem = s.dirty_segs_rem, s.dirty_segs
 
 	fact_slots_buf: [MAX_TOKEN_FACTS]Vm_Fact_Binding
 
@@ -140,8 +157,18 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 				case .Left_Input_Adapter:
 					clear(&frame.tokens)
 					am, am_ok := s.alpha_mems[bn.alpha_mem_id]
-					if am_ok && len(am.fact_ids) > 0 {
-						for fid in am.fact_ids {
+					sm, sm_ok := s.seg_mems[frame.seg_id]
+					start_idx := 0
+					if am_ok && sm_ok && seg.pure_single_lia &&
+					   sm.last_lia_epoch == am.retract_epoch && sm.last_lia_len <= len(am.fact_ids) {
+						start_idx = sm.last_lia_len
+						frame.is_delta = true
+					} else {
+						frame.is_delta = false
+					}
+					if am_ok && start_idx < len(am.fact_ids) {
+						for idx := start_idx; idx < len(am.fact_ids); idx += 1 {
+							fid := am.fact_ids[idx]
 							f := &s.facts[fid]
 							if !f.alive {
 								continue
@@ -151,17 +178,22 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 							}
 						}
 					}
+					if am_ok && sm_ok {
+						sm.last_lia_epoch = am.retract_epoch
+						sm.last_lia_len = len(am.fact_ids)
+					} else if sm_ok {
+						sm.last_lia_epoch = max(u64)
+						sm.last_lia_len = 0
+					}
 					telemetry_count_add(s.telemetry, .Beta_Tuples_Staged, u64(len(frame.tokens)))
 					frame.node_idx += 1
 
 				case .Join:
 					if len(frame.tokens) > 0 {
-						nxt := make([dynamic]Beta_Token, 0, len(frame.tokens), context.temp_allocator)
+						nxt := _acquire_token_buf(s)
 						beta_join_expand(s, bn, frame.tokens[:], &nxt)
-						clear(&frame.tokens)
-						for tok in nxt {
-							append(&frame.tokens, tok)
-						}
+						_release_token_buf(s, &frame.tokens)
+						frame.tokens = nxt
 						telemetry_count_add(s.telemetry, .Beta_Tuples_Staged, u64(len(frame.tokens)))
 					}
 					frame.node_idx += 1
@@ -242,13 +274,19 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 						tokens      = outer_tokens,
 						outer_idx   = 0,
 						sub_step    = 0,
-						sub_tokens  = make([dynamic]Beta_Token, 0, 8, s.allocator),
-						pass_tokens = make([dynamic]Beta_Token, 0, len(outer_tokens), s.allocator),
+						sub_tokens  = _acquire_token_buf(s),
+						pass_tokens = _acquire_token_buf(s),
 					})
 					paused = true
 
 				case .Rule_Terminal:
-					_reconcile_rule_terminal(s, bn.rule_id, frame.tokens[:])
+					if frame.is_delta {
+						for &tok in frame.tokens {
+							agenda_stage_activation(s, bn.rule_id, tok)
+						}
+					} else {
+						_reconcile_rule_terminal(s, bn.rule_id, frame.tokens[:])
+					}
 					frame.node_idx = seg.node_count
 				}
 
@@ -259,7 +297,7 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 
 			if !paused {
 				finished := pop(&s.eval_stack)
-				_destroy_eval_frame_bufs(&finished)
+				_release_eval_frame_bufs(s, &finished)
 			}
 
 		case .Subnetwork_Not, .Subnetwork_Exists:
@@ -274,12 +312,10 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 
 				if frame.sub_step < len(sub.steps) {
 					step := sub.steps[frame.sub_step]
-					nxt := make([dynamic]Beta_Token, 0, 8, context.temp_allocator)
+					nxt := _acquire_token_buf(s)
 					_subnetwork_eval_step(s, step, frame.sub_tokens[:], &nxt) or_return
-					clear(&frame.sub_tokens)
-					for t in nxt {
-						append(&frame.sub_tokens, t)
-					}
+					_release_token_buf(s, &frame.sub_tokens)
+					frame.sub_tokens = nxt
 					frame.sub_step += 1
 					if len(frame.sub_tokens) > 0 && frame.sub_step < len(sub.steps) {
 						continue // Step iteratively through next subnetwork step
@@ -308,11 +344,11 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 			done := pop(&s.eval_stack)
 			if len(s.eval_stack) > 0 {
 				parent := &s.eval_stack[len(s.eval_stack) - 1]
-				delete(parent.tokens)
+				_release_token_buf(s, &parent.tokens)
 				parent.tokens = done.pass_tokens
 				done.pass_tokens = nil
 			}
-			_destroy_eval_frame_bufs(&done)
+			_release_eval_frame_bufs(s, &done)
 
 		case .Subnetwork_Accum:
 			sub := s.rb.subnetworks[frame.sub_id]
@@ -328,11 +364,11 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 			done := pop(&s.eval_stack)
 			if len(s.eval_stack) > 0 {
 				parent := &s.eval_stack[len(s.eval_stack) - 1]
-				delete(parent.tokens)
+				_release_token_buf(s, &parent.tokens)
 				parent.tokens = done.pass_tokens
 				done.pass_tokens = nil
 			}
-			_destroy_eval_frame_bufs(&done)
+			_release_eval_frame_bufs(s, &done)
 		}
 	}
 	return .None

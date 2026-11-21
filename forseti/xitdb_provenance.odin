@@ -5,7 +5,50 @@ import xitdb "xitdb:."
 
 @(private)
 _Commit_Audit_Ctx :: struct {
-	sess: ^Session,
+	sess:           ^Session,
+	is_incremental: bool,
+	sync_committed: bool,
+}
+
+@(private)
+_write_derived_fact_record :: proc(
+	s: ^Session,
+	col_map: ^xitdb.Write_Hash_Map,
+	f: ^Fact,
+	schema: Schema_Def,
+	fhashes: []Prehashed_Key,
+) -> xitdb.Error {
+	kstr := session_string(s, f.key)
+	rec_wc := xitdb.hash_map_put_cursor(col_map, kstr) or_return
+	rec_m := xitdb.write_hash_map_init(rec_wc) or_return
+	for _, sfi in schema.fields {
+		if sfi >= len(f.fields) || f.fields[sfi] == nil {
+			continue
+		}
+		pk := &fhashes[sfi]
+		val := f.fields[sfi]
+		switch v in val {
+		case bool:
+			if b_err := write_bool_to_hash_map_prehashed(&rec_m, pk, v); b_err != nil {
+				return .Write_Failed
+			}
+		case i32:
+			hash_map_put_prehashed(&rec_m, pk, i64(v)) or_return
+		case i64:
+			hash_map_put_prehashed(&rec_m, pk, v) or_return
+		case f64:
+			hash_map_put_prehashed(&rec_m, pk, v) or_return
+		case String_Id:
+			hash_map_put_prehashed(&rec_m, pk, session_string(s, v)) or_return
+		case Entity_Id:
+			hash_map_put_prehashed(&rec_m, pk, u64(v)) or_return
+		case Time_Ns:
+			hash_map_put_prehashed(&rec_m, pk, i64(v)) or_return
+		case Enum_Val:
+			hash_map_put_prehashed(&rec_m, pk, i64(v.variant)) or_return
+		}
+	}
+	return nil
 }
 
 @(private)
@@ -14,74 +57,103 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 	s := ctx.sess
 	id_buf: [64]u8 = ---
 
-	// 1. Sync derived.* collections: remove retracted keys previously committed, put current alive derived facts.
-	for bdef, bi in s.rb.bindings {
-		if bdef.kind != .Derived {
-			continue
-		}
-		path_keys := s.rb.binding_path_hashes[bi]
-		if len(path_keys) == 0 {
-			continue
-		}
-		col_map, err := store_write_path_ensure_map_prehashed(moment_wc, path_keys)
-		if err != nil {
-			return .Write_Failed
+	// 1. Sync derived.* collections (O(delta) when committing incrementally to the primary bridge).
+	if ctx.is_incremental {
+		col_maps := make(map[u16]xitdb.Write_Hash_Map, 4, context.temp_allocator)
+		get_derived_col :: proc(
+			s: ^Session,
+			moment_wc: ^xitdb.Write_Cursor,
+			col_maps: ^map[u16]xitdb.Write_Hash_Map,
+			bi: u16,
+		) -> (xitdb.Write_Hash_Map, xitdb.Error) {
+			if existing, has := col_maps^[bi]; has {
+				return existing, nil
+			}
+			path_keys := s.rb.binding_path_hashes[bi]
+			if len(path_keys) == 0 {
+				return {}, .Write_Failed
+			}
+			cm, err := store_write_path_ensure_map_prehashed(moment_wc, path_keys)
+			if err != nil {
+				return {}, .Write_Failed
+			}
+			col_maps^[bi] = cm
+			return cm, nil
 		}
 
-		// Remove stale committed derived keys that were retracted via JTMS.
-		stale_keys := make([dynamic]Fact_Lookup_Key, 0, 4, context.temp_allocator)
-		for lk in s.committed_derived {
-			if lk.binding_idx != u16(bi) {
-				continue
-			}
+		for lk in s.retracted_derived_keys {
 			cur_fid, has_cur := s.facts_by_key[lk]
-			if !has_cur || !s.facts[cur_fid].alive {
-				kstr := session_string(s, lk.key)
-				_, _ = xitdb.hash_map_remove(&col_map, kstr)
-				append(&stale_keys, lk)
-			}
-		}
-		for slk in stale_keys {
-			delete_key(&s.committed_derived, slk)
-		}
-
-		schema := s.rb.schemas[bdef.schema_id]
-		fhashes := s.rb.schema_field_hashes[bdef.schema_id]
-		for &f in s.facts {
-			if !f.alive || f.binding_idx != u16(bi) {
+			if has_cur && s.facts[cur_fid].alive {
 				continue
 			}
-			kstr := session_string(s, f.key)
-			rec_wc := xitdb.hash_map_put_cursor(&col_map, kstr) or_return
-			rec_m := xitdb.write_hash_map_init(rec_wc) or_return
-			for _, sfi in schema.fields {
-				if sfi >= len(f.fields) || f.fields[sfi] == nil {
+			cm := get_derived_col(s, moment_wc, &col_maps, lk.binding_idx) or_return
+			kstr := session_string(s, lk.key)
+			_, _ = xitdb.hash_map_remove(&cm, kstr)
+			delete_key(&s.committed_derived, lk)
+		}
+
+		for fid in s.dirty_derived_fids {
+			if fid == INVALID_FACT || int(fid) >= len(s.facts) {
+				continue
+			}
+			f := &s.facts[fid]
+			if !f.alive {
+				continue
+			}
+			bi := f.binding_idx
+			bdef := s.rb.bindings[bi]
+			if bdef.kind != .Derived {
+				continue
+			}
+			cm := get_derived_col(s, moment_wc, &col_maps, bi) or_return
+			schema := s.rb.schemas[bdef.schema_id]
+			fhashes := s.rb.schema_field_hashes[bdef.schema_id]
+			_write_derived_fact_record(s, &cm, f, schema, fhashes) or_return
+			s.committed_derived[Fact_Lookup_Key{binding_idx = bi, key = f.key}] = true
+		}
+	} else {
+		for bdef, bi in s.rb.bindings {
+			if bdef.kind != .Derived {
+				continue
+			}
+			path_keys := s.rb.binding_path_hashes[bi]
+			if len(path_keys) == 0 {
+				continue
+			}
+			col_map, err := store_write_path_ensure_map_prehashed(moment_wc, path_keys)
+			if err != nil {
+				return .Write_Failed
+			}
+
+			if ctx.sync_committed {
+				stale_keys := make([dynamic]Fact_Lookup_Key, 0, 4, context.temp_allocator)
+				for lk in s.committed_derived {
+					if lk.binding_idx != u16(bi) {
+						continue
+					}
+					cur_fid, has_cur := s.facts_by_key[lk]
+					if !has_cur || !s.facts[cur_fid].alive {
+						kstr := session_string(s, lk.key)
+						_, _ = xitdb.hash_map_remove(&col_map, kstr)
+						append(&stale_keys, lk)
+					}
+				}
+				for slk in stale_keys {
+					delete_key(&s.committed_derived, slk)
+				}
+			}
+
+			schema := s.rb.schemas[bdef.schema_id]
+			fhashes := s.rb.schema_field_hashes[bdef.schema_id]
+			for &f in s.facts {
+				if !f.alive || f.binding_idx != u16(bi) {
 					continue
 				}
-				pk := &fhashes[sfi]
-				val := f.fields[sfi]
-				switch v in val {
-				case bool:
-					if b_err := write_bool_to_hash_map_prehashed(&rec_m, pk, v); b_err != nil {
-						return .Write_Failed
-					}
-				case i32:
-					hash_map_put_prehashed(&rec_m, pk, i64(v)) or_return
-				case i64:
-					hash_map_put_prehashed(&rec_m, pk, v) or_return
-				case f64:
-					hash_map_put_prehashed(&rec_m, pk, v) or_return
-				case String_Id:
-					hash_map_put_prehashed(&rec_m, pk, session_string(s, v)) or_return
-				case Entity_Id:
-					hash_map_put_prehashed(&rec_m, pk, u64(v)) or_return
-				case Time_Ns:
-					hash_map_put_prehashed(&rec_m, pk, i64(v)) or_return
-				case Enum_Val:
-					hash_map_put_prehashed(&rec_m, pk, i64(v.variant)) or_return
+				_write_derived_fact_record(s, &col_map, &f, schema, fhashes) or_return
+				if ctx.sync_committed {
+					s.committed_derived[Fact_Lookup_Key{binding_idx = u16(bi), key = f.key}] = true
 				}
 			}
-			s.committed_derived[Fact_Lookup_Key{binding_idx = u16(bi), key = f.key}] = true
 		}
 	}
 
@@ -118,13 +190,17 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 	rver_wc := hash_map_put_cursor_prehashed(&tx_m, &ak.rule_versions) or_return
 	rver_m := xitdb.write_hash_map_init(rver_wc) or_return
 
-	used_rules := make(map[u32]bool, 8, context.temp_allocator)
 	rule_pks := make(map[u32]Prehashed_Key, 8, context.temp_allocator)
 	unknown_rule_pk := prehashed_key_make("unknown")
 
-	// Commit every derivation generated in the session (including retractions weighted -1 or active +1).
 	n_deriv := len(s.provenance.derivs)
-	for di := 1; di < n_deriv; di += 1 {
+	di_start := s.provenance.committed_deriv_len if ctx.is_incremental else 1
+	if di_start < 1 {
+		di_start = 1
+	}
+
+	// Commit newly created derivations since the last committed watermark (or all if full snapshot).
+	for di := di_start; di < n_deriv; di += 1 {
 		d := s.provenance.derivs[di]
 		did_str := fmt.bprintf(id_buf[:], "dec:%d", di)
 		did_pk := prehashed_key_make(did_str)
@@ -147,7 +223,6 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			if rc.version != EMPTY_STRING {
 				rver = interner_get(&s.rb.interner, rc.version)
 			}
-			used_rules[d.rule_id] = true
 		}
 
 		hash_map_put_prehashed(&drec_m, &ak.rule, rname) or_return
@@ -205,13 +280,38 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 		hash_set_put_prehashed(&rset, &did_pk) or_return
 	}
 
+	// Patch alive/weight for previously committed derivations retracted in this transaction.
+	if ctx.is_incremental {
+		for did in s.provenance.dirty_retracted_derivs {
+			if did == INVALID_DERIVATION || int(did) >= s.provenance.committed_deriv_len {
+				continue
+			}
+			d := s.provenance.derivs[did]
+			did_str := fmt.bprintf(id_buf[:], "dec:%d", u32(did))
+			did_pk := prehashed_key_make(did_str)
+			drec_wc := hash_map_put_cursor_prehashed(&dec_m, &did_pk) or_return
+			drec_m := xitdb.write_hash_map_init(drec_wc) or_return
+			if err_b := write_bool_to_hash_map_prehashed(&drec_m, &ak.alive, d.alive); err_b != nil {
+				return .Write_Failed
+			}
+			hash_map_put_prehashed(&drec_m, &ak.weight, i64(d.weight)) or_return
+		}
+	}
+
 	for did in s.provenance.last_tx_derivs {
 		did_str := fmt.bprintf(id_buf[:], "dec:%d", u32(did))
 		xitdb.array_list_append(&tx_dec_ids_arr, did_str) or_return
 	}
-	for rid in used_rules {
+	for rid in s.provenance.rule_derivs {
+		if int(rid) >= len(s.rb.rules) {
+			continue
+		}
 		rc := s.rb.rules[rid]
 		rname_pk := &rule_pks[rid]
+		if _, has_pk := rule_pks[rid]; !has_pk {
+			rule_pks[rid] = prehashed_key_make(interner_get(&s.rb.interner, rc.name))
+			rname_pk = &rule_pks[rid]
+		}
 		rver := interner_get(&s.rb.interner, rc.version) if rc.version != EMPTY_STRING else "1.0"
 		hash_map_put_prehashed(&rver_m, rname_pk, rver) or_return
 	}
@@ -223,6 +323,20 @@ session_commit_derived_and_audit :: proc(s: ^Session, bridge: ^Store_Bridge) -> 
 	if s == nil || s.rb == nil || bridge == nil {
 		return -1, .Invalid_Config
 	}
-	cctx := _Commit_Audit_Ctx{sess = s}
-	return store_bridge_commit_moment(bridge, _commit_derived_and_audit_tx_cb, &cctx)
+	is_primary := s.committed_bridge_db == nil || s.committed_bridge_db == bridge.db
+	is_incremental := s.committed_bridge_db != nil && s.committed_bridge_db == bridge.db
+	cctx := _Commit_Audit_Ctx{
+		sess           = s,
+		is_incremental = is_incremental,
+		sync_committed = is_primary,
+	}
+	moment_idx, err = store_bridge_commit_moment(bridge, _commit_derived_and_audit_tx_cb, &cctx)
+	if err == nil && is_primary {
+		s.committed_bridge_db = bridge.db
+		s.provenance.committed_deriv_len = len(s.provenance.derivs)
+		clear(&s.provenance.dirty_retracted_derivs)
+		clear(&s.dirty_derived_fids)
+		clear(&s.retracted_derived_keys)
+	}
+	return moment_idx, err
 }

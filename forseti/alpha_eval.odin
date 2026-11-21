@@ -57,6 +57,8 @@ _seg_get_or_create_mem :: proc(s: ^Session, seg_id: u32) -> ^Segment_Memory {
 	}
 	sm := new(Segment_Memory, s.allocator)
 	sm.seg_id = seg_id
+	sm.last_lia_epoch = max(u64)
+	sm.last_lia_len = 0
 	s.seg_mems[seg_id] = sm
 	s.live_memories_count += 1
 	_record_live_memory_watermark(s)
@@ -141,10 +143,10 @@ _eval_alpha_node :: proc(s: ^Session, f: ^Fact, node_id: u32) {
 		_activate_alpha_terminal(s, f.id, u32(node.terminal_id))
 	}
 
-	if node.eq_field >= 0 && len(node.eq_buckets) > 0 {
+	if node.eq_field >= 0 && node.eq_buckets != nil && len(node.eq_buckets^) > 0 {
 		if val, ok := fact_get_field(s, f, node.eq_field); ok {
 			if vk, k_ok := value_key_from_runtime_value(val, &s.rb.interner, &s.interner); k_ok {
-				if child_id, hit := node.eq_buckets[vk]; hit {
+				if child_id, hit := node.eq_buckets^[vk]; hit {
 					_eval_alpha_node(s, f, child_id)
 				}
 			}
@@ -208,6 +210,7 @@ alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
 		pop(&am.fact_ids)
 		delete_key(&am.fact_pos, fid)
 		am.version += 1
+		am.retract_epoch += 1
 
 		became_empty := len(am.fact_ids) == 0
 		term := s.rb.alpha_terminals[tid]
@@ -226,6 +229,8 @@ alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
 				was := sm.was_linked
 				sm.linked_mask &= ~sub.input_bit
 				sm.was_linked = false
+				sm.last_lia_epoch = max(u64)
+				sm.last_lia_len = 0
 				if was {
 					sdef := s.rb.segments[sub.seg_id]
 					jtms_revoke_all_rule_firings(s, sdef.rule_id)
@@ -236,8 +241,9 @@ alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
 			}
 		}
 	}
-	delete(tids)
-	delete_key(&s.fact_alpha_mems, fid)
+	if list_ptr, ok_p := &s.fact_alpha_mems[fid]; ok_p {
+		clear(list_ptr)
+	}
 }
 
 @(private)

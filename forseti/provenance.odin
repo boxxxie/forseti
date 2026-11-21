@@ -33,15 +33,17 @@ INVALID_TABLE_IDX :: max(u16)
 INVALID_ROW_ID    :: max(u16)
 
 Provenance_Store :: struct {
-	mode:              Provenance_Mode,
-	derivs:            #soa[dynamic]Derivation,
-	parent_facts:      [dynamic]Fact_Id,
-	fact_derivs:       map[Fact_Id][dynamic]Derivation_Id,
-	rule_derivs:       map[u32][dynamic]Derivation_Id,
-	last_tx_derivs:    [dynamic]Derivation_Id,
-	tx_seq:            u32,
-	hot_crypto_hashes: u64, // Always 0: invariant check against hot-path SHA-1/SHA-256
-	allocator:         mem.Allocator,
+	mode:                   Provenance_Mode,
+	derivs:                 #soa[dynamic]Derivation,
+	parent_facts:           [dynamic]Fact_Id,
+	fact_derivs:            map[Fact_Id][dynamic]Derivation_Id,
+	rule_derivs:            map[u32][dynamic]Derivation_Id,
+	last_tx_derivs:         [dynamic]Derivation_Id,
+	dirty_retracted_derivs: [dynamic]Derivation_Id,
+	committed_deriv_len:    int,
+	tx_seq:                 u32,
+	hot_crypto_hashes:      u64, // Always 0: invariant check against hot-path SHA-1/SHA-256
+	allocator:              mem.Allocator,
 }
 
 @(private)
@@ -57,6 +59,8 @@ provenance_init :: proc(p: ^Provenance_Store, mode: Provenance_Mode, allocator: 
 	p.fact_derivs = make(map[Fact_Id][dynamic]Derivation_Id, 16, allocator)
 	p.rule_derivs = make(map[u32][dynamic]Derivation_Id, 16, allocator)
 	p.last_tx_derivs = make([dynamic]Derivation_Id, 0, 16, allocator)
+	p.dirty_retracted_derivs = make([dynamic]Derivation_Id, 0, 8, allocator)
+	p.committed_deriv_len = 1
 	p.tx_seq = 1
 }
 
@@ -73,6 +77,7 @@ provenance_destroy :: proc(p: ^Provenance_Store) {
 		delete(list)
 	}
 	delete(p.rule_derivs)
+	delete(p.dirty_retracted_derivs)
 	delete(p.last_tx_derivs)
 	delete(p.parent_facts)
 	delete(p.derivs)
@@ -149,6 +154,9 @@ provenance_record :: proc(
 provenance_mark_retracted :: proc(p: ^Provenance_Store, did: Derivation_Id) {
 	if p == nil || p.mode != .Audit_Full || did == INVALID_DERIVATION || int(did) >= len(p.derivs) {
 		return
+	}
+	if p.derivs[did].alive && int(did) < p.committed_deriv_len {
+		append(&p.dirty_retracted_derivs, did)
 	}
 	p.derivs[did].alive = false
 	p.derivs[did].weight = -1

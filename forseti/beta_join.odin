@@ -60,6 +60,8 @@ _beta_get_or_create_mem :: proc(s: ^Session, node_id: u32) -> ^Beta_Memory {
 	bm := new(Beta_Memory, s.allocator)
 	bm.node_id = node_id
 	bm.right_alpha_version = max(u64) // Force initial index build on first join
+	bm.right_retract_epoch = max(u64)
+	bm.indexed_count = 0
 	bm.right_facts = make([dynamic]Fact_Id, 0, 8, s.allocator)
 	bm.right_buckets = make(map[u64][dynamic]Fact_Id, 8, s.allocator)
 	s.beta_mems[node_id] = bm
@@ -69,12 +71,16 @@ _beta_get_or_create_mem :: proc(s: ^Session, node_id: u32) -> ^Beta_Memory {
 }
 
 @(private)
-_rebuild_join_right_index :: proc(s: ^Session, bm: ^Beta_Memory, bn: Beta_Node_Def, am: ^Alpha_Memory) {
-	clear(&bm.right_facts)
-	for _, &bucket in bm.right_buckets {
-		clear(&bucket)
-	}
-	for fid in am.fact_ids {
+_index_join_right_range :: proc(
+	s: ^Session,
+	bm: ^Beta_Memory,
+	bn: Beta_Node_Def,
+	am: ^Alpha_Memory,
+	start_idx: int,
+	end_idx: int,
+) {
+	for i := start_idx; i < end_idx; i += 1 {
+		fid := am.fact_ids[i]
 		f := &s.facts[fid]
 		if !f.alive {
 			continue
@@ -92,7 +98,18 @@ _rebuild_join_right_index :: proc(s: ^Session, bm: ^Beta_Memory, bn: Beta_Node_D
 		}
 		append(bucket, fid)
 	}
+	bm.indexed_count = end_idx
+	bm.right_retract_epoch = am.retract_epoch
 	bm.right_alpha_version = am.version
+}
+
+@(private)
+_rebuild_join_right_index :: proc(s: ^Session, bm: ^Beta_Memory, bn: Beta_Node_Def, am: ^Alpha_Memory) {
+	clear(&bm.right_facts)
+	for _, &bucket in bm.right_buckets {
+		clear(&bucket)
+	}
+	_index_join_right_range(s, bm, bn, am, 0, len(am.fact_ids))
 }
 
 @(private)
@@ -147,7 +164,11 @@ beta_join_expand :: proc(
 	}
 	bm := _beta_get_or_create_mem(s, bn.id)
 	if bm.right_alpha_version != am.version {
-		_rebuild_join_right_index(s, bm, bn, am)
+		if bm.right_retract_epoch == am.retract_epoch && bm.indexed_count <= len(am.fact_ids) {
+			_index_join_right_range(s, bm, bn, am, bm.indexed_count, len(am.fact_ids))
+		} else {
+			_rebuild_join_right_index(s, bm, bn, am)
+		}
 	}
 
 	if len(bn.join_keys) == 0 {

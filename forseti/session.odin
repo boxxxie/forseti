@@ -36,22 +36,27 @@ Fact_Lookup_Key :: struct {
 }
 
 Alpha_Memory :: struct {
-	id:       u32,
-	fact_ids: [dynamic]Fact_Id,
-	fact_pos: map[Fact_Id]int,
-	version:  u64,
+	id:            u32,
+	fact_ids:      [dynamic]Fact_Id,
+	fact_pos:      map[Fact_Id]int,
+	version:       u64,
+	retract_epoch: u64,
 }
 
 Segment_Memory :: struct {
-	seg_id:      u32,
-	linked_mask: u64,
-	was_linked:  bool,
-	dirty:       bool,
+	seg_id:         u32,
+	linked_mask:    u64,
+	was_linked:     bool,
+	dirty:          bool,
+	last_lia_epoch: u64,
+	last_lia_len:   int,
 }
 
 Beta_Memory :: struct {
 	node_id:             u32,
 	right_alpha_version: u64,
+	right_retract_epoch: u64,
+	indexed_count:       int,
 	right_facts:         [dynamic]Fact_Id,
 	right_buckets:       map[u64][dynamic]Fact_Id,
 }
@@ -75,37 +80,45 @@ Session_Error :: enum u8 {
 // Session maintains sparse lazy PHREAK working/beta memories over an immutable shared Rulebase.
 // Pinned handle: initialize in-place or heap-allocate via new(Session) and never copy by value.
 Session :: struct {
-	rb:                    ^Rulebase,
-	arena:                 vmem.Arena,
-	interner:              String_Interner,
-	telemetry:             ^Telemetry_Sink,
-	facts:                 [dynamic]Fact,
-	facts_by_key:          map[Fact_Lookup_Key]Fact_Id,
-	logical_buckets:       map[u64][dynamic]Fact_Id,
-	fact_alpha_mems:       map[Fact_Id][dynamic]u32,
-	alpha_mems:            map[u32]^Alpha_Memory,
-	seg_mems:              map[u32]^Segment_Memory,
-	dirty_segs:            [dynamic]u32,
-	zero_input_seeded:     bool,
-	beta_mems:             map[u32]^Beta_Memory,
-	neg_mems:              map[u32]^Not_Exists_Memory,
-	accum_mems:            map[u32]^Accum_Memory,
-	eval_stack:            [dynamic]Eval_Frame,
-	agenda:                Agenda,
-	fired_trace:           [dynamic]String_Id,
-	derived_seq_by_bind:   map[u16]u64,
-	jtms:                  Jtms_State,
-	provenance:            Provenance_Store,
-	pending_effects:       [dynamic]Effect_Job,
-	inflight_effects:      map[u64]Effect_Inflight,
-	next_effect_job_id:    u64,
-	committed_derived:     map[Fact_Lookup_Key]bool,
-	stratum_changed:       bool,
-	earliest_dirty_strat:  u32,
-	max_activations:       u64,
-	next_recency:          u64,
-	live_memories_count:   u64,
-	allocator:             mem.Allocator,
+	rb:                     ^Rulebase,
+	arena:                  vmem.Arena,
+	interner:               String_Interner,
+	telemetry:              ^Telemetry_Sink,
+	facts:                  [dynamic]Fact,
+	facts_by_key:           map[Fact_Lookup_Key]Fact_Id,
+	logical_buckets:        map[u64][dynamic]Fact_Id,
+	free_logical_facts:     map[u16][dynamic]Fact_Id,
+	fact_alpha_mems:        map[Fact_Id][dynamic]u32,
+	alpha_mems:             map[u32]^Alpha_Memory,
+	seg_mems:               map[u32]^Segment_Memory,
+	dirty_segs:             [dynamic]u32,
+	dirty_segs_rem:         [dynamic]u32,
+	zero_input_seeded:      bool,
+	beta_mems:              map[u32]^Beta_Memory,
+	neg_mems:               map[u32]^Not_Exists_Memory,
+	accum_mems:             map[u32]^Accum_Memory,
+	eval_stack:             [dynamic]Eval_Frame,
+	eval_buf_pool:          [dynamic][dynamic]Beta_Token,
+	reconcile_live_hashes:  map[u64]bool,
+	reconcile_to_revoke:    [dynamic]Firing_Key,
+	agenda:                 Agenda,
+	fired_trace:            [dynamic]String_Id,
+	derived_seq_by_bind:    map[u16]u64,
+	jtms:                   Jtms_State,
+	provenance:             Provenance_Store,
+	pending_effects:        [dynamic]Effect_Job,
+	inflight_effects:       map[u64]Effect_Inflight,
+	next_effect_job_id:     u64,
+	committed_bridge_db:    ^xitdb.Database,
+	committed_derived:      map[Fact_Lookup_Key]bool,
+	dirty_derived_fids:     [dynamic]Fact_Id,
+	retracted_derived_keys: [dynamic]Fact_Lookup_Key,
+	stratum_changed:        bool,
+	earliest_dirty_strat:   u32,
+	max_activations:        u64,
+	next_recency:           u64,
+	live_memories_count:    u64,
+	allocator:              mem.Allocator,
 }
 
 @(require_results)
@@ -140,20 +153,27 @@ session_init :: proc(
 	s.facts = make([dynamic]Fact, 1, 16, allocator) // slot 0 = sentinel
 	s.facts_by_key = make(map[Fact_Lookup_Key]Fact_Id, 16, allocator)
 	s.logical_buckets = make(map[u64][dynamic]Fact_Id, 16, allocator)
+	s.free_logical_facts = make(map[u16][dynamic]Fact_Id, 8, allocator)
 	s.fact_alpha_mems = make(map[Fact_Id][dynamic]u32, 16, allocator)
 	s.alpha_mems = make(map[u32]^Alpha_Memory, 16, allocator)
 	s.seg_mems = make(map[u32]^Segment_Memory, 16, allocator)
 	s.dirty_segs = make([dynamic]u32, 0, 16, allocator)
+	s.dirty_segs_rem = make([dynamic]u32, 0, 16, allocator)
 	s.beta_mems = make(map[u32]^Beta_Memory, 16, allocator)
 	s.neg_mems = make(map[u32]^Not_Exists_Memory, 8, allocator)
 	s.accum_mems = make(map[u32]^Accum_Memory, 8, allocator)
 	s.eval_stack = make([dynamic]Eval_Frame, 0, 16, allocator)
+	s.eval_buf_pool = make([dynamic][dynamic]Beta_Token, 0, 8, allocator)
+	s.reconcile_live_hashes = make(map[u64]bool, 16, allocator)
+	s.reconcile_to_revoke = make([dynamic]Firing_Key, 0, 8, allocator)
 	s.fired_trace = make([dynamic]String_Id, 0, 16, allocator)
 	s.derived_seq_by_bind = make(map[u16]u64, 8, allocator)
 	s.pending_effects = make([dynamic]Effect_Job, 0, 8, allocator)
 	s.inflight_effects = make(map[u64]Effect_Inflight, 8, allocator)
 	s.next_effect_job_id = 1
 	s.committed_derived = make(map[Fact_Lookup_Key]bool, 8, allocator)
+	s.dirty_derived_fids = make([dynamic]Fact_Id, 0, 16, allocator)
+	s.retracted_derived_keys = make([dynamic]Fact_Lookup_Key, 0, 8, allocator)
 	s.earliest_dirty_strat = max(u32)
 	agenda_init(&s.agenda, allocator)
 	jtms_init(&s.jtms, allocator)
@@ -173,16 +193,25 @@ session_destroy :: proc(s: ^Session) {
 	provenance_destroy(&s.provenance)
 	jtms_destroy(&s.jtms)
 	effects_destroy(s)
+	delete(s.retracted_derived_keys)
+	delete(s.dirty_derived_fids)
 	delete(s.committed_derived)
 	agenda_destroy(&s.agenda)
 	delete(s.fired_trace)
 	delete(s.derived_seq_by_bind)
+	delete(s.reconcile_to_revoke)
+	delete(s.reconcile_live_hashes)
+	for buf in s.eval_buf_pool {
+		delete(buf)
+	}
+	delete(s.eval_buf_pool)
 	for &ef in s.eval_stack {
 		delete(ef.tokens)
 		delete(ef.sub_tokens)
 		delete(ef.pass_tokens)
 	}
 	delete(s.eval_stack)
+	delete(s.dirty_segs_rem)
 	delete(s.dirty_segs)
 
 	for _, nm in s.neg_mems {
@@ -233,6 +262,11 @@ session_destroy :: proc(s: ^Session) {
 	}
 	delete(s.fact_alpha_mems)
 
+	for _, flist in s.free_logical_facts {
+		delete(flist)
+	}
+	delete(s.free_logical_facts)
+
 	for _, list in s.logical_buckets {
 		delete(list)
 	}
@@ -280,9 +314,7 @@ _record_live_memory_watermark :: proc(s: ^Session) {
 
 // Normalizes incoming Values into Session string space (using immutable Rulebase IDs when matched).
 @(private)
-_normalize_fact_fields :: proc(s: ^Session, schema: Schema_Def, fields: []Value) -> []Value {
-	n := max(len(schema.fields), len(fields))
-	out := make([]Value, n, s.allocator)
+_normalize_fact_fields_into :: proc(s: ^Session, schema: Schema_Def, fields: []Value, out: []Value) {
 	for i := 0; i < len(fields); i += 1 {
 		v := fields[i]
 		if sid, is_s := v.(String_Id); is_s {
@@ -297,7 +329,53 @@ _normalize_fact_fields :: proc(s: ^Session, schema: Schema_Def, fields: []Value)
 		}
 		out[i] = v
 	}
+}
+
+@(private)
+_normalize_fact_fields :: proc(s: ^Session, schema: Schema_Def, fields: []Value) -> []Value {
+	n := max(len(schema.fields), len(fields))
+	out := make([]Value, n, s.allocator)
+	_normalize_fact_fields_into(s, schema, fields, out)
 	return out
+}
+
+@(private)
+_lookup_interned_string_id :: proc "contextless" (
+	rb_int: ^String_Interner,
+	sess_int: ^String_Interner,
+	txt: string,
+) -> (String_Id, bool) {
+	if len(txt) == 0 {
+		return EMPTY_STRING, true
+	}
+	if rb_int != nil {
+		if id, ok := rb_int.lookup[txt]; ok {
+			return id, true
+		}
+	}
+	if sess_int != nil {
+		if id, ok := sess_int.lookup[txt]; ok {
+			return String_Id(u32(id) | RUNTIME_STRING_BIT), true
+		}
+	}
+	return EMPTY_STRING, false
+}
+
+@(private)
+_record_dirty_derived_fact :: #force_inline proc(s: ^Session, fid: Fact_Id, binding_idx: u16) {
+	if s.committed_bridge_db != nil && int(binding_idx) < len(s.rb.bindings) && s.rb.bindings[binding_idx].kind == .Derived {
+		append(&s.dirty_derived_fids, fid)
+	}
+}
+
+@(private)
+_record_retracted_derived_key :: #force_inline proc(s: ^Session, f: ^Fact) {
+	if s.committed_bridge_db != nil && int(f.binding_idx) < len(s.rb.bindings) && s.rb.bindings[f.binding_idx].kind == .Derived {
+		lk := Fact_Lookup_Key{binding_idx = f.binding_idx, key = f.key}
+		if lk in s.committed_derived {
+			append(&s.retracted_derived_keys, lk)
+		}
+	}
 }
 
 session_insert_fact :: proc(
@@ -352,6 +430,7 @@ session_insert_fact_by_idx :: proc(
 		origin        = origin,
 	})
 	s.facts_by_key[lk] = fid
+	_record_dirty_derived_fact(s, fid, binding_idx)
 
 	alpha_eval_insert_fact(s, fid)
 	return fid, .None
@@ -395,6 +474,7 @@ session_insert_cursor_fact :: proc(
 		origin        = .External,
 	})
 	s.facts_by_key[lk] = fid
+	_record_dirty_derived_fact(s, fid, binding_idx)
 
 	alpha_eval_insert_fact(s, fid)
 	return fid, .None
@@ -424,6 +504,48 @@ session_modify_fact_by_key :: proc(
 	key: string,
 	new_fields: []Value,
 ) -> Session_Error {
+	if s != nil && s.rb != nil && s.provenance.mode == .Fast {
+		if bidx, ok := session_find_binding(s, binding_name); ok {
+			if key_id, k_ok := _lookup_interned_string_id(&s.rb.interner, &s.interner, key); k_ok {
+				lk := Fact_Lookup_Key{binding_idx = bidx, key = key_id}
+				if fid, found := s.facts_by_key[lk]; found {
+					f := &s.facts[fid]
+					if f.alive && f.origin == .External {
+						f.alive = false
+						alpha_eval_retract_fact(s, fid)
+						agenda_remove_fact(&s.agenda, fid)
+						jtms_retract_cascades_for_fact(s, fid)
+
+						bdef := s.rb.bindings[bidx]
+						schema := s.rb.schemas[bdef.schema_id]
+						need_len := max(len(schema.fields), len(new_fields))
+						if len(f.fields) != need_len {
+							if f.fields != nil {
+								delete(f.fields, s.allocator)
+							}
+							f.fields = make([]Value, need_len, s.allocator)
+						} else {
+							for &fv in f.fields {
+								fv = nil
+							}
+						}
+						_normalize_fact_fields_into(s, schema, new_fields, f.fields)
+						f.has_cursor = false
+						f.cursor = {}
+						f.recency = s.next_recency
+						s.next_recency += 1
+						f.alive = true
+						f.support_count = 1
+						f.proof_height = 0
+						f.best_derivation = INVALID_DERIVATION
+
+						alpha_eval_insert_fact(s, fid)
+						return .None
+					}
+				}
+			}
+		}
+	}
 	session_retract_fact_by_key(s, binding_name, key) or_return
 	_, err := session_insert_fact(s, binding_name, key, new_fields)
 	return err
@@ -438,6 +560,7 @@ session_retract_fact :: proc(s: ^Session, fid: Fact_Id) -> Session_Error {
 		return .None
 	}
 	f.alive = false
+	_record_retracted_derived_key(s, f)
 	lk := Fact_Lookup_Key{binding_idx = f.binding_idx, key = f.key}
 	if cur, has := s.facts_by_key[lk]; has && cur == fid {
 		delete_key(&s.facts_by_key, lk)

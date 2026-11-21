@@ -8,27 +8,61 @@ Activation_Key :: struct {
 }
 
 Activation :: struct {
-	rule_id:  u32,
-	phase:    String_Id,
-	salience: i32,
-	token:    Beta_Token,
-	alive:    bool,
+	rule_id:    u32,
+	stratum:    u32,
+	phase:      String_Id,
+	salience:   i32,
+	gen:        u32,
+	rule_q_idx: u32,
+	token:      Beta_Token,
+	alive:      bool,
+}
+
+Agenda_Heap_Entry :: struct {
+	slot_idx:    u32,
+	gen:         u32,
+	salience:    i32,
+	rule_id:     u32,
+	max_recency: u64,
+	tok_hash:    u64,
+}
+
+Agenda_Bucket_Key :: struct {
+	stratum: u32,
+	phase:   String_Id,
+}
+
+Agenda_Queued_Ref :: struct {
+	slot_idx: u32,
+	gen:      u32,
 }
 
 Agenda :: struct {
-	items:            [dynamic]Activation,
-	queued:           map[Activation_Key]bool,
-	refracted:        map[Activation_Key]bool,
-	fact_activations: map[Fact_Id][dynamic]Activation_Key,
-	phases:           [dynamic]String_Id,
-	allocator:        mem.Allocator,
+	slots:             [dynamic]Activation,
+	free_slots:        [dynamic]u32,
+	next_gen:          u32,
+	stratum_heaps:     map[u32][dynamic]Agenda_Heap_Entry,
+	phase_heaps:       map[Agenda_Bucket_Key][dynamic]Agenda_Heap_Entry,
+	phase_live_counts: map[String_Id]u32,
+	queued:            map[Activation_Key]Agenda_Queued_Ref,
+	rule_queued:       map[u32][dynamic]Activation_Key,
+	refracted:         map[Activation_Key]bool,
+	fact_activations:  map[Fact_Id][dynamic]Activation_Key,
+	phases:            [dynamic]String_Id,
+	allocator:         mem.Allocator,
 }
 
 @(private)
 agenda_init :: proc(ag: ^Agenda, allocator: mem.Allocator) {
 	ag.allocator = allocator
-	ag.items = make([dynamic]Activation, 0, 16, allocator)
-	ag.queued = make(map[Activation_Key]bool, 16, allocator)
+	ag.next_gen = 1
+	ag.slots = make([dynamic]Activation, 0, 16, allocator)
+	ag.free_slots = make([dynamic]u32, 0, 16, allocator)
+	ag.stratum_heaps = make(map[u32][dynamic]Agenda_Heap_Entry, 8, allocator)
+	ag.phase_heaps = make(map[Agenda_Bucket_Key][dynamic]Agenda_Heap_Entry, 8, allocator)
+	ag.phase_live_counts = make(map[String_Id]u32, 8, allocator)
+	ag.queued = make(map[Activation_Key]Agenda_Queued_Ref, 16, allocator)
+	ag.rule_queued = make(map[u32][dynamic]Activation_Key, 8, allocator)
 	ag.refracted = make(map[Activation_Key]bool, 16, allocator)
 	ag.fact_activations = make(map[Fact_Id][dynamic]Activation_Key, 16, allocator)
 	ag.phases = make([dynamic]String_Id, 0, 8, allocator)
@@ -40,11 +74,130 @@ agenda_destroy :: proc(ag: ^Agenda) {
 		delete(list)
 	}
 	delete(ag.fact_activations)
+	for _, list in ag.rule_queued {
+		delete(list)
+	}
+	delete(ag.rule_queued)
+	for _, h in ag.phase_heaps {
+		delete(h)
+	}
+	delete(ag.phase_heaps)
+	for _, h in ag.stratum_heaps {
+		delete(h)
+	}
+	delete(ag.stratum_heaps)
+	delete(ag.phase_live_counts)
 	delete(ag.refracted)
 	delete(ag.queued)
-	delete(ag.items)
+	delete(ag.free_slots)
+	delete(ag.slots)
 	delete(ag.phases)
 	ag^ = {}
+}
+
+@(private)
+_heap_entry_better :: #force_inline proc "contextless" (a, b: Agenda_Heap_Entry) -> bool {
+	if a.salience != b.salience {
+		return a.salience > b.salience
+	}
+	if a.max_recency != b.max_recency {
+		return a.max_recency > b.max_recency
+	}
+	if a.rule_id != b.rule_id {
+		return a.rule_id < b.rule_id
+	}
+	return a.tok_hash < b.tok_hash
+}
+
+@(private)
+_agenda_heap_push :: proc(h: ^[dynamic]Agenda_Heap_Entry, entry: Agenda_Heap_Entry) {
+	idx := len(h^)
+	append(h, entry)
+	for idx > 0 {
+		parent := (idx - 1) >> 1
+		if _heap_entry_better(h^[idx], h^[parent]) {
+			h^[idx], h^[parent] = h^[parent], h^[idx]
+			idx = parent
+		} else {
+			break
+		}
+	}
+}
+
+@(private)
+_agenda_heap_pop :: proc(h: ^[dynamic]Agenda_Heap_Entry) -> (entry: Agenda_Heap_Entry, ok: bool) {
+	n := len(h^)
+	if n == 0 {
+		return {}, false
+	}
+	entry = h^[0]
+	last := pop(h)
+	n -= 1
+	if n > 0 {
+		h^[0] = last
+		idx := 0
+		for {
+			left := (idx << 1) + 1
+			if left >= n {
+				break
+			}
+			best := left
+			right := left + 1
+			if right < n && _heap_entry_better(h^[right], h^[left]) {
+				best = right
+			}
+			if _heap_entry_better(h^[best], h^[idx]) {
+				h^[idx], h^[best] = h^[best], h^[idx]
+				idx = best
+			} else {
+				break
+			}
+		}
+	}
+	return entry, true
+}
+
+@(private)
+_agenda_kill_slot :: proc(ag: ^Agenda, slot_idx: u32) {
+	if int(slot_idx) >= len(ag.slots) {
+		return
+	}
+	slot := &ag.slots[slot_idx]
+	if !slot.alive {
+		return
+	}
+	slot.alive = false
+	slot.gen = ag.next_gen
+	ag.next_gen += 1
+	if slot.phase != EMPTY_STRING {
+		if cnt, has := ag.phase_live_counts[slot.phase]; has && cnt > 0 {
+			ag.phase_live_counts[slot.phase] = cnt - 1
+		}
+	}
+	ak := Activation_Key{rule_id = slot.rule_id, tok_hash = slot.token.fact_sig_hash}
+	if rq, has_rq := &ag.rule_queued[slot.rule_id]; has_rq {
+		idx := int(slot.rule_q_idx)
+		last := len(rq^) - 1
+		if idx >= 0 && idx <= last {
+			if idx != last {
+				moved_ak := rq^[last]
+				rq^[idx] = moved_ak
+				if mref, has_m := ag.queued[moved_ak]; has_m {
+					ag.slots[mref.slot_idx].rule_q_idx = u32(idx)
+				}
+			}
+			pop(rq)
+		}
+	}
+	delete_key(&ag.queued, ak)
+	append(&ag.free_slots, slot_idx)
+}
+
+@(private)
+agenda_cancel_key :: proc(ag: ^Agenda, ak: Activation_Key) {
+	if qref, has := ag.queued[ak]; has {
+		_agenda_kill_slot(ag, qref.slot_idx)
+	}
 }
 
 session_set_phases :: proc(s: ^Session, phases: []string) -> Session_Error {
@@ -69,108 +222,161 @@ agenda_stage_activation :: proc(s: ^Session, rule_id: u32, tok: Beta_Token) {
 	if ak in ag.refracted || ak in ag.queued {
 		return
 	}
-	ag.queued[ak] = true
 	rule := s.rb.rules[rule_id]
-	append(&ag.items, Activation{
-		rule_id  = rule_id,
-		phase    = rule.phase,
-		salience = rule.salience,
-		token    = tok,
-		alive    = true,
-	})
+
+	slot_idx: u32
+	if len(ag.free_slots) > 0 {
+		slot_idx = pop(&ag.free_slots)
+	} else {
+		slot_idx = u32(len(ag.slots))
+		append(&ag.slots, Activation{})
+	}
+	gen := ag.next_gen
+	ag.next_gen += 1
+
+	rq, has_rq := &ag.rule_queued[rule_id]
+	if !has_rq {
+		ag.rule_queued[rule_id] = make([dynamic]Activation_Key, 0, 4, ag.allocator)
+		rq = &ag.rule_queued[rule_id]
+	}
+	rule_q_idx := u32(len(rq^))
+	append(rq, ak)
+
+	ag.slots[slot_idx] = Activation{
+		rule_id    = rule_id,
+		stratum    = rule.stratum,
+		phase      = rule.phase,
+		salience   = rule.salience,
+		gen        = gen,
+		rule_q_idx = rule_q_idx,
+		token      = tok,
+		alive      = true,
+	}
+	ag.queued[ak] = Agenda_Queued_Ref{slot_idx = slot_idx, gen = gen}
+
+	entry := Agenda_Heap_Entry{
+		slot_idx    = slot_idx,
+		gen         = gen,
+		salience    = rule.salience,
+		rule_id     = rule_id,
+		max_recency = tok.max_recency,
+		tok_hash    = tok.fact_sig_hash,
+	}
+	sh, has_sh := &ag.stratum_heaps[rule.stratum]
+	if !has_sh {
+		ag.stratum_heaps[rule.stratum] = make([dynamic]Agenda_Heap_Entry, 0, 16, ag.allocator)
+		sh = &ag.stratum_heaps[rule.stratum]
+	}
+	_agenda_heap_push(sh, entry)
+
+	if rule.phase != EMPTY_STRING {
+		bk := Agenda_Bucket_Key{stratum = rule.stratum, phase = rule.phase}
+		ph_h, has_ph := &ag.phase_heaps[bk]
+		if !has_ph {
+			ag.phase_heaps[bk] = make([dynamic]Agenda_Heap_Entry, 0, 8, ag.allocator)
+			ph_h = &ag.phase_heaps[bk]
+		}
+		_agenda_heap_push(ph_h, entry)
+		ag.phase_live_counts[rule.phase] = ag.phase_live_counts[rule.phase] + 1
+	}
+
 	for i := 0; i < int(tok.fact_count); i += 1 {
 		fid := tok.fact_ids[i]
 		list, has := &ag.fact_activations[fid]
 		if !has {
-			ag.fact_activations[fid] = make([dynamic]Activation_Key, 0, 2, ag.allocator)
+			ag.fact_activations[fid] = make([dynamic]Activation_Key, 0, 4, ag.allocator)
 			list = &ag.fact_activations[fid]
 		}
-		append(list, ak)
+		already := false
+		if len(list^) <= 8 {
+			for prev in list^ {
+				if prev == ak {
+					already = true
+					break
+				}
+			}
+		}
+		if !already {
+			if len(list^) == cap(list^) {
+				kept := 0
+				for prev in list^ {
+					if (prev in ag.queued) || (prev in ag.refracted) {
+						list^[kept] = prev
+						kept += 1
+					}
+				}
+				resize(list, kept)
+			}
+			append(list, ak)
+		}
 	}
 }
 
 @(private)
 agenda_remove_fact :: proc(ag: ^Agenda, fid: Fact_Id) {
-	for &act in ag.items {
-		if !act.alive {
-			continue
+	if list, has := &ag.fact_activations[fid]; has {
+		for ak in list^ {
+			if qref, is_q := ag.queued[ak]; is_q {
+				_agenda_kill_slot(ag, qref.slot_idx)
+			}
+			delete_key(&ag.refracted, ak)
 		}
-		for i := 0; i < int(act.token.fact_count); i += 1 {
-			if act.token.fact_ids[i] == fid {
-				act.alive = false
-				ak := Activation_Key{rule_id = act.rule_id, tok_hash = act.token.fact_sig_hash}
-				delete_key(&ag.queued, ak)
-				break
+		clear(list)
+	}
+}
+
+@(private)
+agenda_cancel_rule_not_in_set :: proc(ag: ^Agenda, rule_id: u32, live_hashes: map[u64]bool) {
+	rq, has := &ag.rule_queued[rule_id]
+	if !has || len(rq^) == 0 {
+		return
+	}
+	for i := len(rq^) - 1; i >= 0; i -= 1 {
+		ak := rq^[i]
+		if !(ak.tok_hash in live_hashes) {
+			if qref, has_q := ag.queued[ak]; has_q {
+				_agenda_kill_slot(ag, qref.slot_idx)
 			}
 		}
 	}
-	if list, has := ag.fact_activations[fid]; has {
-		for ak in list {
-			delete_key(&ag.refracted, ak)
-			delete_key(&ag.queued, ak)
+}
+
+@(private)
+_agenda_pop_live_from_heap :: proc(ag: ^Agenda, h: ^[dynamic]Agenda_Heap_Entry) -> (act: Activation, found: bool) {
+	for {
+		entry, ok := _agenda_heap_pop(h)
+		if !ok {
+			return {}, false
 		}
-		delete(list)
-		delete_key(&ag.fact_activations, fid)
+		if int(entry.slot_idx) >= len(ag.slots) {
+			continue
+		}
+		slot := &ag.slots[entry.slot_idx]
+		if !slot.alive || slot.gen != entry.gen {
+			continue
+		}
+		act = slot^
+		_agenda_kill_slot(ag, entry.slot_idx)
+		return act, true
 	}
 }
 
 @(private)
-_activation_better :: proc(a, b: Activation) -> bool {
-	if a.salience != b.salience {
-		return a.salience > b.salience
-	}
-	if a.token.max_recency != b.token.max_recency {
-		return a.token.max_recency > b.token.max_recency
-	}
-	if a.rule_id != b.rule_id {
-		return a.rule_id < b.rule_id
-	}
-	return a.token.fact_sig_hash < b.token.fact_sig_hash
-}
-
-@(private)
-_pick_next_activation_for_stratum :: proc(s: ^Session, stratum: u32, check_stratum := true) -> (idx: int, found: bool) {
+_agenda_pop_for_stratum :: proc(s: ^Session, stratum: u32) -> (act: Activation, found: bool) {
 	ag := &s.agenda
-	rule_matches := proc(s: ^Session, rule_id: u32, stratum: u32, check_stratum: bool) -> bool {
-		if !check_stratum {
-			return true
-		}
-		return int(rule_id) < len(s.rb.rules) && s.rb.rules[rule_id].stratum == stratum
-	}
 
-	// Only consume phase focus entries once all rules or current phase finishes across strata,
-	// or pick highest matching activation in current phase first without dropping phase prematurely
-	// if rules in that phase exist in higher strata.
 	if len(ag.phases) > 0 {
 		for pi := 0; pi < len(ag.phases); {
 			cur_phase := ag.phases[pi]
-			best_idx := -1
-			any_in_phase := false
-			for act, i in ag.items {
-				if !act.alive || act.phase != cur_phase {
-					continue
-				}
-				any_in_phase = true
-				if !rule_matches(s, act.rule_id, stratum, check_stratum) {
-					continue
-				}
-				if best_idx < 0 || _activation_better(act, ag.items[best_idx]) {
-					best_idx = i
+			bk := Agenda_Bucket_Key{stratum = stratum, phase = cur_phase}
+			if ph_h, has_ph := &ag.phase_heaps[bk]; has_ph {
+				if popped, ok := _agenda_pop_live_from_heap(ag, ph_h); ok {
+					return popped, true
 				}
 			}
-			if best_idx >= 0 {
-				return best_idx, true
-			}
-			// Do not remove phase if activations in another stratum remain for it, or check if higher stratum needs it:
-			has_pending_in_rb_later := false
-			if check_stratum {
-				for r in s.rb.rules {
-					if r.phase == cur_phase && r.stratum > stratum {
-						has_pending_in_rb_later = true
-						break
-					}
-				}
-			}
+			any_in_phase := ag.phase_live_counts[cur_phase] > 0
+			max_st, has_max := s.rb.phase_max_stratum[cur_phase]
+			has_pending_in_rb_later := has_max && max_st > stratum
 			if any_in_phase || has_pending_in_rb_later {
 				pi += 1
 				continue
@@ -179,21 +385,10 @@ _pick_next_activation_for_stratum :: proc(s: ^Session, stratum: u32, check_strat
 		}
 	}
 
-	best_idx := -1
-	for act, i in ag.items {
-		if !act.alive || !rule_matches(s, act.rule_id, stratum, check_stratum) {
-			continue
-		}
-		if best_idx < 0 || _activation_better(act, ag.items[best_idx]) {
-			best_idx = i
-		}
+	if sh, has_sh := &ag.stratum_heaps[stratum]; has_sh {
+		return _agenda_pop_live_from_heap(ag, sh)
 	}
-	return best_idx, best_idx >= 0
-}
-
-@(private)
-_pick_next_activation :: proc(s: ^Session) -> (idx: int, found: bool) {
-	return _pick_next_activation_for_stratum(s, 0, check_stratum = false)
+	return {}, false
 }
 
 @(private)
@@ -216,7 +411,13 @@ _execute_rule_actions :: proc(s: ^Session, rule: Rule_Compiled, tok: ^Beta_Token
 		#partial switch act.kind {
 		case .Assert:
 			schema := s.rb.schemas[s.rb.bindings[act.target_bind].schema_id]
-			vals := make([]Value, len(schema.fields), context.temp_allocator)
+			vals_buf: [32]Value
+			vals: []Value
+			if len(schema.fields) <= len(vals_buf) {
+				vals = vals_buf[:len(schema.fields)]
+			} else {
+				vals = make([]Value, len(schema.fields), context.temp_allocator)
+			}
 			for fb in act.fields {
 				if fb.field_idx >= 0 && int(fb.field_idx) < len(vals) && fb.expr_prog >= 0 {
 					v, verr := vm_eval(

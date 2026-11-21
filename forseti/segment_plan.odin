@@ -22,18 +22,18 @@ Join_Key_Pair :: struct {
 }
 
 Beta_Node_Def :: struct {
+	join_keys:     []Join_Key_Pair,
+	field_binds:   []Alpha_Field_Bind,
 	id:            u32,
-	kind:          Beta_Node_Kind,
 	alpha_mem_id:  u32,
 	subnetwork_id: u32,
+	prog_idx:      u32,
+	rule_id:       u32,
+	var_slot:      u16, // for Bind / Accum
+	kind:          Beta_Node_Kind,
 	fact_slot:     u8,
 	decide_slot:   u8,
 	accum_op:      Accum_Op,
-	prog_idx:      u32,
-	rule_id:       u32,
-	join_keys:     []Join_Key_Pair,
-	field_binds:   []Alpha_Field_Bind,
-	var_slot:      u16, // for Bind / Accum
 }
 
 Segment_Input_Link :: struct {
@@ -42,31 +42,38 @@ Segment_Input_Link :: struct {
 }
 
 Segment_Def :: struct {
+	inputs:          []Segment_Input_Link,
+	all_linked_mask: u64,
 	id:              u32,
 	node_start:      u32,
 	node_count:      u32,
-	inputs:          []Segment_Input_Link,
-	all_linked_mask: u64,
 	rule_id:         u32,
+	pure_single_lia: bool,
 }
 
 @(private)
 _append_alpha_sub :: proc(ctx: ^Rb_Build_Ctx, alpha_mem_id: u32, seg_id: u32, bit_mask: u64, notify_only := false) {
-	list, has := &ctx.sub_lists[alpha_mem_id]
-	if !has {
-		ctx.sub_lists[alpha_mem_id] = make([dynamic]Alpha_Segment_Target, 0, 2, ctx.scratch_alloc)
-		list = &ctx.sub_lists[alpha_mem_id]
+	for int(alpha_mem_id) >= len(ctx.sub_head) {
+		append(&ctx.sub_head, -1)
+		append(&ctx.sub_counts, 0)
 	}
 	target := Alpha_Segment_Target{seg_id = seg_id, input_bit = bit_mask, notify_only = notify_only}
-	n := len(list^)
-	// Same segment appends in rule/node order, so a short tail scan avoids O(N^2) work at 1M rules.
-	check_from := n - 8 if n > 8 else 0
-	for i := n - 1; i >= check_from; i -= 1 {
-		if list^[i] == target {
+	// Same segment appends in rule/node order, so scanning up to 8 recent links avoids O(N^2) work at 1M rules.
+	cur := ctx.sub_head[alpha_mem_id]
+	for step := 0; cur >= 0 && step < 8; step += 1 {
+		edge := ctx.sub_edges[cur]
+		if edge.target == target {
 			return
 		}
+		cur = edge.next
 	}
-	append(list, target)
+	eidx := i32(len(ctx.sub_edges))
+	append(&ctx.sub_edges, _Sub_Edge{
+		target = target,
+		next   = ctx.sub_head[alpha_mem_id],
+	})
+	ctx.sub_head[alpha_mem_id] = eidx
+	ctx.sub_counts[alpha_mem_id] += 1
 }
 
 @(private)
@@ -196,15 +203,13 @@ _compile_subnetwork :: proc(
 				fact_descs   = sub_fact_descs[:],
 				decide_descs = outer_decide_descs,
 			}
-			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, cl.expr, ctx.alloc)
+			pidx, verr := _compile_and_intern_expr(ctx, &env, cl.expr)
 			if verr != .None {
 				return 0, .Vm_Compile_Failed
 			}
-			pidx := i32(len(ctx.programs))
-			append(&ctx.programs, prog)
 			append(&steps, Subnetwork_Step{
 				kind       = .Where,
-				guard_prog = pidx,
+				guard_prog = i32(pidx),
 			})
 
 		case:
@@ -240,12 +245,11 @@ _compile_subnetwork :: proc(
 					fact_descs   = sub_fact_descs[:],
 					decide_descs = outer_decide_descs,
 				}
-				prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, accum_expr, ctx.alloc)
+				pidx, verr := _compile_and_intern_expr(ctx, &env, accum_expr)
 				if verr != .None {
 					return 0, .Vm_Compile_Failed
 				}
-				acc_expr_prog = i32(len(ctx.programs))
-				append(&ctx.programs, prog)
+				acc_expr_prog = i32(pidx)
 			}
 		}
 
@@ -262,12 +266,11 @@ _compile_subnetwork :: proc(
 				fact_descs   = sub_fact_descs[:],
 				decide_descs = outer_decide_descs,
 			}
-			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, accum_guard, ctx.alloc)
+			pidx, verr := _compile_and_intern_expr(ctx, &env, accum_guard)
 			if verr != .None {
 				return 0, .Vm_Compile_Failed
 			}
-			acc_guard_prog = i32(len(ctx.programs))
-			append(&ctx.programs, prog)
+			acc_guard_prog = i32(pidx)
 		}
 	}
 
@@ -415,12 +418,10 @@ build_compiled_rule :: proc(
 				fact_descs   = fact_descs^[:],
 				decide_descs = decide_descs^[:],
 			}
-			prog, verr := vm_compile_decide_reusable(&ctx.vm_compiler, &env, cl.target, cl.fields, dslot, ctx.alloc)
+			pidx, verr := _compile_and_intern_decide(ctx, &env, cl.target, cl.fields, dslot)
 			if verr != .None {
 				return {}, .Vm_Compile_Failed
 			}
-			pidx := u32(len(ctx.programs))
-			append(&ctx.programs, prog)
 			append(decide_descs, Vm_Decide_Slot_Desc{
 				var_name  = cl.bind_var,
 				table_idx = tidx,
@@ -444,12 +445,10 @@ build_compiled_rule :: proc(
 				fact_descs   = fact_descs^[:],
 				decide_descs = decide_descs^[:],
 			}
-			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, cl.expr, ctx.alloc)
+			pidx, verr := _compile_and_intern_expr(ctx, &env, cl.expr)
 			if verr != .None {
 				return {}, .Vm_Compile_Failed
 			}
-			pidx := u32(len(ctx.programs))
-			append(&ctx.programs, prog)
 			append(&ctx.beta_nodes, Beta_Node_Def{
 				id       = u32(len(ctx.beta_nodes)),
 				kind     = .Filter,
@@ -468,12 +467,10 @@ build_compiled_rule :: proc(
 				fact_descs   = fact_descs^[:],
 				decide_descs = decide_descs^[:],
 			}
-			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, cl.expr, ctx.alloc)
+			pidx, verr := _compile_and_intern_expr(ctx, &env, cl.expr)
 			if verr != .None {
 				return {}, .Vm_Compile_Failed
 			}
-			pidx := u32(len(ctx.programs))
-			append(&ctx.programs, prog)
 			vslot := next_var
 			next_var += 1
 			bound_vars^[cl.bind_var] = vslot
@@ -500,6 +497,16 @@ build_compiled_rule :: proc(
 		all_mask = 0
 		append(&ctx.zero_input_segs, seg_id)
 	}
+	is_pure_lia := pat_idx == 1
+	if is_pure_lia {
+		for ni := node_start; ni < u32(len(ctx.beta_nodes)); ni += 1 {
+			k := ctx.beta_nodes[ni].kind
+			if k == .Join || k == .Not || k == .Exists || k == .Accum {
+				is_pure_lia = false
+				break
+			}
+		}
+	}
 	links := make([]Segment_Input_Link, len(input_links^), ctx.alloc)
 	copy(links, input_links^[:])
 	append(&ctx.segments, Segment_Def{
@@ -509,6 +516,7 @@ build_compiled_rule :: proc(
 		inputs          = links,
 		all_linked_mask = all_mask,
 		rule_id         = rule_id,
+		pure_single_lia = is_pure_lia,
 	})
 
 	seg_ids := make([]u32, 1, ctx.alloc)
@@ -554,16 +562,14 @@ build_compiled_rule :: proc(
 					fact_descs   = fact_descs^[:],
 					decide_descs = decide_descs^[:],
 				}
-				prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, fb.expr, ctx.alloc)
+				pidx, verr := _compile_and_intern_expr(ctx, &env, fb.expr)
 				if verr != .None {
 					return {}, .Vm_Compile_Failed
 				}
-				pidx := i32(len(ctx.programs))
-				append(&ctx.programs, prog)
 				ca.fields[fi] = Compiled_Action_Field{
 					field_idx  = fidx,
 					field_name = fb.name,
-					expr_prog  = pidx,
+					expr_prog  = i32(pidx),
 				}
 			}
 		case .Retract:
@@ -589,16 +595,14 @@ build_compiled_rule :: proc(
 					fact_descs   = fact_descs^[:],
 					decide_descs = decide_descs^[:],
 				}
-				prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, fb.expr, ctx.alloc)
+				pidx, verr := _compile_and_intern_expr(ctx, &env, fb.expr)
 				if verr != .None {
 					return {}, .Vm_Compile_Failed
 				}
-				pidx := i32(len(ctx.programs))
-				append(&ctx.programs, prog)
 				ca.fields[fi] = Compiled_Action_Field{
 					field_idx  = i16(fi),
 					field_name = fb.name,
-					expr_prog  = pidx,
+					expr_prog  = i32(pidx),
 				}
 			}
 		}
@@ -701,14 +705,12 @@ build_compiled_query :: proc(
 				var_names  = ctx.var_map,
 				fact_descs = fact_descs^[:],
 			}
-			prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, cl.expr, ctx.alloc)
+			pidx, verr := _compile_and_intern_expr(ctx, &env, cl.expr)
 			if verr != .None {
 				return {}, .Vm_Compile_Failed
 			}
-			pidx := i32(len(ctx.programs))
-			append(&ctx.programs, prog)
 			append(&steps, Query_Step{
-				guard_prog = pidx,
+				guard_prog = i32(pidx),
 			})
 		}
 	}

@@ -33,12 +33,28 @@ Alpha_Guard_Edge :: struct {
 }
 
 Alpha_Node :: struct {
-	id:           u32,
-	eq_field:     i16,
-	eq_buckets:   map[Value_Key]u32,
-	range_edges:  [dynamic]Alpha_Range_Edge,
-	guard_edges:  [dynamic]Alpha_Guard_Edge,
-	terminal_id:  i32, // -1 if no terminal at this node
+	eq_buckets:  ^map[Value_Key]u32,
+	range_edges: []Alpha_Range_Edge,
+	guard_edges: []Alpha_Guard_Edge,
+	id:          u32,
+	terminal_id: i32, // -1 if no terminal at this node
+	eq_field:    i16,
+}
+
+@(private)
+_Alpha_Build_Node :: struct {
+	eq_buckets:  ^map[Value_Key]u32,
+	range_edges: [dynamic]Alpha_Range_Edge,
+	guard_edges: [dynamic]Alpha_Guard_Edge,
+	id:          u32,
+	terminal_id: i32,
+	eq_field:    i16,
+}
+
+@(private)
+_Sub_Edge :: struct {
+	target: Alpha_Segment_Target,
+	next:   i32,
 }
 
 Alpha_Root :: struct {
@@ -166,7 +182,9 @@ Rulebase :: struct {
 	programs:          []Bytecode_Program,
 	strata_count:        u32,
 	stratum_recursive:   []bool,
+	stratum_wave_safe:   []bool,
 	stratum_rules:       [][]u32,
+	phase_max_stratum:   map[String_Id]u32,
 	zero_input_segs:     []u32,
 	sccs:                []Scc_Info,
 	schema_field_hashes: [][]Prehashed_Key,
@@ -226,14 +244,17 @@ Rb_Build_Ctx :: struct {
 	rb:              ^Rulebase,
 	alloc:           mem.Allocator,
 	scratch_alloc:   mem.Allocator,
-	alpha_nodes:     [dynamic]Alpha_Node,
+	alpha_nodes:     [dynamic]_Alpha_Build_Node,
 	alpha_terminals: [dynamic]Alpha_Terminal,
 	beta_nodes:      [dynamic]Beta_Node_Def,
 	subnetworks:     [dynamic]Subnetwork_Def,
 	segments:        [dynamic]Segment_Def,
 	zero_input_segs: [dynamic]u32,
 	programs:        [dynamic]Bytecode_Program,
-	sub_lists:       map[u32][dynamic]Alpha_Segment_Target,
+	prog_intern:     map[u64][dynamic]u32,
+	sub_head:        [dynamic]i32,
+	sub_counts:      [dynamic]u32,
+	sub_edges:       [dynamic]_Sub_Edge,
 	rule_stratum:    []u32,
 	rule_recursive:  []bool,
 	shared_count:    u64,
@@ -247,6 +268,228 @@ Rb_Build_Ctx :: struct {
 	pat_joins:       [dynamic]Join_Key_Pair,
 	pat_res:         [dynamic]u32,
 	vm_compiler:     Vm_Compiler,
+}
+
+@(private)
+_values_bit_equal :: proc "contextless" (a, b: Value) -> bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	switch va in a {
+	case bool:
+		vb, ok := b.(bool)
+		return ok && va == vb
+	case i32:
+		vb, ok := b.(i32)
+		return ok && va == vb
+	case i64:
+		vb, ok := b.(i64)
+		return ok && va == vb
+	case f64:
+		vb, ok := b.(f64)
+		return ok && (transmute(u64)va) == (transmute(u64)vb)
+	case String_Id:
+		vb, ok := b.(String_Id)
+		return ok && va == vb
+	case Entity_Id:
+		vb, ok := b.(Entity_Id)
+		return ok && va == vb
+	case Time_Ns:
+		vb, ok := b.(Time_Ns)
+		return ok && va == vb
+	case Enum_Val:
+		vb, ok := b.(Enum_Val)
+		return ok && va == vb
+	}
+	return false
+}
+
+@(private)
+_hash_value_exact :: proc "contextless" (v: Value) -> u64 {
+	if v == nil {
+		return 0x6e696c
+	}
+	switch x in v {
+	case bool:      return _hash_combine64(1, 1 if x else 0)
+	case i32:       return _hash_combine64(2, u64(u32(x)))
+	case i64:       return _hash_combine64(3, u64(x))
+	case f64:       return _hash_combine64(4, transmute(u64)x)
+	case String_Id: return _hash_combine64(5, u64(x))
+	case Entity_Id: return _hash_combine64(6, u64(x))
+	case Time_Ns:   return _hash_combine64(7, u64(x))
+	case Enum_Val:  return _hash_combine64(8, (u64(x.enum_id) << 32) | u64(x.variant))
+	}
+	return 0
+}
+
+@(private)
+_hash_str_bytes :: proc "contextless" (s: string) -> u64 {
+	h := u64(0x73747231) ~ u64(len(s))
+	b := transmute([]u8)s
+	for c in b {
+		h = _hash_combine64(h, u64(c))
+	}
+	return h
+}
+
+@(private)
+_hash_vm_compiler_program :: proc "contextless" (c: ^Vm_Compiler) -> u64 {
+	h := u64(0x50524f47)
+	h = _hash_combine64(h, u64(c.ra.max_used))
+	h = _hash_combine64(h, u64(len(c.code)))
+	for ins in c.code {
+		word := u64(ins.op) | (u64(ins.dst) << 8) | (u64(ins.lhs) << 16) | (u64(ins.rhs) << 24)
+		h = _hash_combine64(h, word)
+	}
+	h = _hash_combine64(h, u64(len(c.consts)))
+	for cv in c.consts {
+		h = _hash_combine64(h, _hash_value_exact(cv))
+	}
+	h = _hash_combine64(h, u64(len(c.field_refs)))
+	for fr in c.field_refs {
+		h = _hash_combine64(h, u64(fr.fact_slot) | (u64(u16(fr.field_idx)) << 8) | (u64(fr.expected_type) << 24))
+		h = _hash_combine64(h, u64(len(fr.segments)))
+		for seg in fr.segments {
+			h = _hash_combine64(h, _hash_str_bytes(seg))
+		}
+	}
+	h = _hash_combine64(h, u64(len(c.decide_calls)))
+	for dc in c.decide_calls {
+		h = _hash_combine64(h, u64(dc.table_idx) | (u64(dc.result_slot) << 32))
+		h = _hash_combine64(h, u64(len(dc.args)))
+		for a in dc.args {
+			h = _hash_combine64(h, u64(a.col_idx) | (u64(a.reg) << 8))
+		}
+	}
+	h = _hash_combine64(h, u64(len(c.ranges)))
+	for rn in c.ranges {
+		h = _hash_combine64(h, _hash_value_exact(rn.lo))
+		h = _hash_combine64(h, _hash_value_exact(rn.hi))
+		h = _hash_combine64(h, (u64(1) if rn.lo_inc else 0) | ((u64(1) if rn.hi_inc else 0) << 1))
+	}
+	return h
+}
+
+@(private)
+_vm_compiler_equals_program :: proc "contextless" (c: ^Vm_Compiler, p: ^Bytecode_Program) -> bool {
+	if c.ra.max_used != p.max_regs ||
+	   len(c.code) != len(p.code) ||
+	   len(c.consts) != len(p.consts) ||
+	   len(c.field_refs) != len(p.field_refs) ||
+	   len(c.decide_calls) != len(p.decide_calls) ||
+	   len(c.ranges) != len(p.ranges) {
+		return false
+	}
+	for i := 0; i < len(c.code); i += 1 {
+		if c.code[i] != p.code[i] {
+			return false
+		}
+	}
+	for i := 0; i < len(c.consts); i += 1 {
+		if !_values_bit_equal(c.consts[i], p.consts[i]) {
+			return false
+		}
+	}
+	for i := 0; i < len(c.field_refs); i += 1 {
+		fa := c.field_refs[i]
+		fb := p.field_refs[i]
+		if fa.fact_slot != fb.fact_slot ||
+		   fa.field_idx != fb.field_idx ||
+		   fa.expected_type != fb.expected_type ||
+		   len(fa.segments) != len(fb.segments) {
+			return false
+		}
+		for si := 0; si < len(fa.segments); si += 1 {
+			if fa.segments[si] != fb.segments[si] {
+				return false
+			}
+		}
+	}
+	for i := 0; i < len(c.decide_calls); i += 1 {
+		da := c.decide_calls[i]
+		db := p.decide_calls[i]
+		if da.table_idx != db.table_idx ||
+		   da.result_slot != db.result_slot ||
+		   len(da.args) != len(db.args) {
+			return false
+		}
+		for ai := 0; ai < len(da.args); ai += 1 {
+			if da.args[ai] != db.args[ai] {
+				return false
+			}
+		}
+	}
+	for i := 0; i < len(c.ranges); i += 1 {
+		ra := c.ranges[i]
+		rb_r := p.ranges[i]
+		if ra.lo_inc != rb_r.lo_inc ||
+		   ra.hi_inc != rb_r.hi_inc ||
+		   !_values_bit_equal(ra.lo, rb_r.lo) ||
+		   !_values_bit_equal(ra.hi, rb_r.hi) {
+			return false
+		}
+	}
+	return true
+}
+
+@(private)
+_intern_scratch_program :: proc(ctx: ^Rb_Build_Ctx) -> u32 {
+	h := _hash_vm_compiler_program(&ctx.vm_compiler)
+	if bucket, has_b := ctx.prog_intern[h]; has_b {
+		for idx in bucket {
+			if _vm_compiler_equals_program(&ctx.vm_compiler, &ctx.programs[idx]) {
+				return idx
+			}
+		}
+	}
+	prog := _finalize_vm_program(&ctx.vm_compiler, ctx.alloc)
+	// Point Field_Access_Desc segments onto rb.interner so programs outlive ir_destroy.
+	for &fr in prog.field_refs {
+		for si := 0; si < len(fr.segments); si += 1 {
+			seg_str := fr.segments[si]
+			if rb_sid, has_sid := ctx.rb.interner.lookup[seg_str]; has_sid {
+				canon := interner_get(&ctx.rb.interner, rb_sid)
+				fr.segments[si] = canon
+				if si < len(fr.seg_hashes) {
+					fr.seg_hashes[si].key = canon
+				}
+			}
+		}
+	}
+	pidx := u32(len(ctx.programs))
+	append(&ctx.programs, prog)
+	bucket, has_b := &ctx.prog_intern[h]
+	if !has_b {
+		ctx.prog_intern[h] = make([dynamic]u32, 0, 2, ctx.scratch_alloc)
+		bucket = &ctx.prog_intern[h]
+	}
+	append(bucket, pidx)
+	return pidx
+}
+
+@(private)
+_compile_and_intern_expr :: proc(
+	ctx: ^Rb_Build_Ctx,
+	env: ^Vm_Compile_Env,
+	eid: Expr_Id,
+) -> (pidx: u32, err: Vm_Error) {
+	vm_compile_expr_to_scratch(&ctx.vm_compiler, env, eid) or_return
+	return _intern_scratch_program(ctx), .None
+}
+
+@(private)
+_compile_and_intern_decide :: proc(
+	ctx: ^Rb_Build_Ctx,
+	env: ^Vm_Compile_Env,
+	table_name: String_Id,
+	args: []Field_Binding_IR,
+	decide_slot: u8,
+) -> (pidx: u32, err: Vm_Error) {
+	vm_compile_decide_to_scratch(&ctx.vm_compiler, env, table_name, args, decide_slot) or_return
+	return _intern_scratch_program(ctx), .None
 }
 
 @(private)
@@ -281,12 +524,9 @@ eval_literal_const_expr :: proc(ir: ^Rulebase_IR, eid: Expr_Id) -> (v: Value, ok
 @(private)
 new_alpha_node :: proc(ctx: ^Rb_Build_Ctx) -> u32 {
 	id := u32(len(ctx.alpha_nodes))
-	append(&ctx.alpha_nodes, Alpha_Node{
+	append(&ctx.alpha_nodes, _Alpha_Build_Node{
 		id          = id,
 		eq_field    = -1,
-		eq_buckets  = make(map[Value_Key]u32, 0, ctx.alloc),
-		range_edges = make([dynamic]Alpha_Range_Edge, 0, 0, ctx.alloc),
-		guard_edges = make([dynamic]Alpha_Guard_Edge, 0, 0, ctx.alloc),
 		terminal_id = -1,
 	})
 	return id
@@ -330,17 +570,25 @@ insert_alpha_chain :: proc(
 				cur.eq_field = pr.field_idx
 			}
 			if cur.eq_field == pr.field_idx {
-				if existing, has := cur.eq_buckets[pr.eq_key]; has {
-					ctx.shared_count += 1
-					cur_id = existing
-				} else {
-					if len(cur.eq_buckets) > 0 {
+				if cur.eq_buckets != nil {
+					if existing, has := cur.eq_buckets^[pr.eq_key]; has {
+						ctx.shared_count += 1
+						cur_id = existing
+						continue
+					}
+					if len(cur.eq_buckets^) > 0 {
 						ctx.shared_count += 1 // Shares the parent Hash_Split node across buckets
 					}
-					next_id := new_alpha_node(ctx)
-					ctx.alpha_nodes[cur_id].eq_buckets[pr.eq_key] = next_id
-					cur_id = next_id
 				}
+				next_id := new_alpha_node(ctx)
+				parent := &ctx.alpha_nodes[cur_id]
+				if parent.eq_buckets == nil {
+					m := new(map[Value_Key]u32, ctx.scratch_alloc)
+					m^ = make(map[Value_Key]u32, 4, ctx.scratch_alloc)
+					parent.eq_buckets = m
+				}
+				parent.eq_buckets^[pr.eq_key] = next_id
+				cur_id = next_id
 				continue
 			}
 			// Different equality field at same node: route through range/eq edge
@@ -358,7 +606,11 @@ insert_alpha_chain :: proc(
 				cur_id = u32(found_id)
 			} else {
 				next_id := new_alpha_node(ctx)
-				append(&ctx.alpha_nodes[cur_id].range_edges, Alpha_Range_Edge{
+				re_list := &ctx.alpha_nodes[cur_id].range_edges
+				if re_list.allocator.procedure == nil {
+					re_list^ = make([dynamic]Alpha_Range_Edge, 0, 2, ctx.scratch_alloc)
+				}
+				append(re_list, Alpha_Range_Edge{
 					field_idx = pr.field_idx,
 					op        = .Eq,
 					const_val = pr.const_val,
@@ -379,7 +631,11 @@ insert_alpha_chain :: proc(
 				cur_id = u32(found_id)
 			} else {
 				next_id := new_alpha_node(ctx)
-				append(&ctx.alpha_nodes[cur_id].range_edges, Alpha_Range_Edge{
+				re_list := &ctx.alpha_nodes[cur_id].range_edges
+				if re_list.allocator.procedure == nil {
+					re_list^ = make([dynamic]Alpha_Range_Edge, 0, 2, ctx.scratch_alloc)
+				}
+				append(re_list, Alpha_Range_Edge{
 					field_idx = pr.field_idx,
 					op        = pr.op,
 					const_val = pr.const_val,
@@ -406,6 +662,8 @@ insert_alpha_chain :: proc(
 		binding_idx = binding_idx,
 		field_binds = stored_binds,
 	})
+	append(&ctx.sub_head, -1)
+	append(&ctx.sub_counts, 0)
 	leaf.terminal_id = i32(tid)
 	return tid
 }
@@ -546,11 +804,9 @@ compile_pattern_clause :: proc(
 			var_names  = ctx.var_map,
 			fact_descs = fact_descs[:],
 		}
-		prog, verr := vm_compile_expr_reusable(&ctx.vm_compiler, &env, fb.expr, ctx.alloc)
-		if verr != .None {
+		if err := vm_compile_expr_to_scratch(&ctx.vm_compiler, &env, fb.expr); err != .None {
 			return 0, 0, nil, nil, nil, .Vm_Compile_Failed
 		}
-		_ = prog
 		_ = pat_slot
 	}
 
@@ -591,6 +847,12 @@ rulebase_compile :: proc(
 	if interner_init(&rb.interner, allocator) != nil {
 		return {}, .Alloc_Failed
 	}
+	if len(ir.interner.strings) > 0 {
+		if reserve(&rb.interner.strings, len(ir.interner.strings)) != nil ||
+		   reserve(&rb.interner.lookup, len(ir.interner.strings)) != nil {
+			return {}, .Alloc_Failed
+		}
+	}
 	for s in ir.interner.strings[1:] {
 		if _, ierr := intern(&rb.interner, s); ierr != nil {
 			return {}, .Alloc_Failed
@@ -611,10 +873,30 @@ rulebase_compile :: proc(
 		return {}, .Unstratified_Negation
 	}
 
+	// Deep-clone schema field and binding segment slices onto rb.arena so Rulebase outlives ir_destroy.
 	rb.schemas = make([]Schema_Def, len(ir.schemas), a)
-	copy(rb.schemas, ir.schemas)
+	for sch, sci in ir.schemas {
+		fcopy := make([]Field_Def, len(sch.fields), a)
+		copy(fcopy, sch.fields)
+		rb.schemas[sci] = Schema_Def{
+			name   = sch.name,
+			fields = fcopy,
+			span   = sch.span,
+		}
+	}
 	rb.bindings = make([]Binding_Def, len(ir.bindings), a)
-	copy(rb.bindings, ir.bindings)
+	for bd, bdi in ir.bindings {
+		scopy := make([]Selector_Segment, len(bd.segments), a)
+		copy(scopy, bd.segments)
+		rb.bindings[bdi] = Binding_Def{
+			kind        = bd.kind,
+			name        = bd.name,
+			schema_name = bd.schema_name,
+			schema_id   = bd.schema_id,
+			segments    = scopy,
+			span        = bd.span,
+		}
+	}
 
 	rb.schema_by_name = make(map[String_Id]u16, len(ir.schemas) + 1, a)
 	for s, si in ir.schemas {
@@ -647,14 +929,17 @@ rulebase_compile :: proc(
 		rb              = &rb,
 		alloc           = a,
 		scratch_alloc   = sa,
-		alpha_nodes     = make([dynamic]Alpha_Node, 0, max(len(ir.rules), 16), sa),
+		alpha_nodes     = make([dynamic]_Alpha_Build_Node, 0, max(len(ir.rules), 16), sa),
 		alpha_terminals = make([dynamic]Alpha_Terminal, 0, max(len(ir.rules), 16), sa),
 		beta_nodes      = make([dynamic]Beta_Node_Def, 0, max(len(ir.rules) * 2, 16), sa),
 		subnetworks     = make([dynamic]Subnetwork_Def, 0, 8, sa),
 		segments        = make([dynamic]Segment_Def, 0, max(len(ir.rules), 16), sa),
 		zero_input_segs = make([dynamic]u32, 0, 4, sa),
-		programs        = make([dynamic]Bytecode_Program, 0, max(len(ir.rules), 16), sa),
-		sub_lists       = make(map[u32][dynamic]Alpha_Segment_Target, 32, sa),
+		programs        = make([dynamic]Bytecode_Program, 0, min(max(len(ir.rules), 16), 4096), sa),
+		prog_intern     = make(map[u64][dynamic]u32, 64, sa),
+		sub_head        = make([dynamic]i32, 0, max(len(ir.rules), 16), sa),
+		sub_counts      = make([dynamic]u32, 0, max(len(ir.rules), 16), sa),
+		sub_edges       = make([dynamic]_Sub_Edge, 0, max(len(ir.rules), 16), sa),
 		rule_stratum    = strat_plan.rule_stratum,
 		rule_recursive  = strat_plan.rule_recursive,
 		bound_vars      = make(map[String_Id]u16, 16, sa),
@@ -687,16 +972,55 @@ rulebase_compile :: proc(
 		rb.queries[qi] = build_compiled_query(&ctx, qdef, u32(qi)) or_return
 	}
 
-	// Materialize compact arena slices and attach Alpha_Terminal -> Segment subscribers
+	// Materialize compact arena slices and attach contiguous Alpha_Terminal -> Segment subscribers.
 	rb.alpha_nodes = make([]Alpha_Node, len(ctx.alpha_nodes), a)
-	copy(rb.alpha_nodes, ctx.alpha_nodes[:])
+	for &bn, ni in ctx.alpha_nodes {
+		eq_m: ^map[Value_Key]u32 = nil
+		if bn.eq_buckets != nil && len(bn.eq_buckets^) > 0 {
+			eq_m = new(map[Value_Key]u32, a)
+			eq_m^ = make(map[Value_Key]u32, len(bn.eq_buckets^), a)
+			for k, v in bn.eq_buckets^ {
+				eq_m^[k] = v
+			}
+		}
+		r_edges: []Alpha_Range_Edge
+		if len(bn.range_edges) > 0 {
+			r_edges = make([]Alpha_Range_Edge, len(bn.range_edges), a)
+			copy(r_edges, bn.range_edges[:])
+		}
+		g_edges: []Alpha_Guard_Edge
+		if len(bn.guard_edges) > 0 {
+			g_edges = make([]Alpha_Guard_Edge, len(bn.guard_edges), a)
+			copy(g_edges, bn.guard_edges[:])
+		}
+		rb.alpha_nodes[ni] = Alpha_Node{
+			eq_buckets  = eq_m,
+			range_edges = r_edges,
+			guard_edges = g_edges,
+			id          = bn.id,
+			terminal_id = bn.terminal_id,
+			eq_field    = bn.eq_field,
+		}
+	}
 
 	rb.alpha_terminals = make([]Alpha_Terminal, len(ctx.alpha_terminals), a)
 	copy(rb.alpha_terminals, ctx.alpha_terminals[:])
-	for tid, list in ctx.sub_lists {
-		subs := make([]Alpha_Segment_Target, len(list), a)
-		copy(subs, list[:])
-		rb.alpha_terminals[tid].subscribers = subs
+	all_subs := make([]Alpha_Segment_Target, len(ctx.sub_edges), a)
+	sub_off := 0
+	for &term, tid in rb.alpha_terminals {
+		cnt := int(ctx.sub_counts[tid])
+		if cnt == 0 {
+			continue
+		}
+		sub_slice := all_subs[sub_off:sub_off + cnt]
+		sub_off += cnt
+		cur := ctx.sub_head[tid]
+		for idx := cnt - 1; idx >= 0 && cur >= 0; idx -= 1 {
+			edge := ctx.sub_edges[cur]
+			sub_slice[idx] = edge.target
+			cur = edge.next
+		}
+		term.subscribers = sub_slice
 	}
 
 	rb.beta_nodes = make([]Beta_Node_Def, len(ctx.beta_nodes), a)
@@ -713,21 +1037,6 @@ rulebase_compile :: proc(
 
 	rb.programs = make([]Bytecode_Program, len(ctx.programs), a)
 	copy(rb.programs, ctx.programs[:])
-	// Re-point VM Field_Access_Desc segment strings onto rb.interner so programs outlive ir_destroy.
-	for &prog in rb.programs {
-		for &fr in prog.field_refs {
-			for si := 0; si < len(fr.segments); si += 1 {
-				seg_str := fr.segments[si]
-				if rb_sid, has_sid := rb.interner.lookup[seg_str]; has_sid {
-					canon := interner_get(&rb.interner, rb_sid)
-					fr.segments[si] = canon
-					if si < len(fr.seg_hashes) {
-						fr.seg_hashes[si].key = canon
-					}
-				}
-			}
-		}
-	}
 
 	// Pre-hash static schema fields, binding paths, and rule names once at compile time.
 	rb.schema_field_hashes = make([][]Prehashed_Key, len(rb.schemas), a)
@@ -775,6 +1084,60 @@ rulebase_compile :: proc(
 		pos := stratum_cursors[st]
 		rb.stratum_rules[st][pos] = u32(ri)
 		stratum_cursors[st] = pos + 1
+	}
+
+	rb.stratum_wave_safe = make([]bool, strat_plan.strata_count, a)
+	for st in 0 ..< int(strat_plan.strata_count) {
+		rids := rb.stratum_rules[st]
+		safe := true
+		if len(rids) > 0 {
+			first_rc := rb.rules[rids[0]]
+			exp_salience := first_rc.salience
+			exp_phase := first_rc.phase
+			for rid in rids {
+				rc := rb.rules[rid]
+				if rc.salience != exp_salience || rc.phase != exp_phase {
+					safe = false
+					break
+				}
+				for act in rc.actions {
+					if act.kind == .Retract || act.kind == .Effect {
+						safe = false
+						break
+					}
+				}
+				if !safe {
+					break
+				}
+				for seg_id in rc.segment_ids {
+					sdef := rb.segments[seg_id]
+					for ni := sdef.node_start; ni < sdef.node_start + sdef.node_count; ni += 1 {
+						k := rb.beta_nodes[ni].kind
+						if k == .Not || k == .Exists || k == .Accum {
+							safe = false
+							break
+						}
+					}
+					if !safe {
+						break
+					}
+				}
+				if !safe {
+					break
+				}
+			}
+		}
+		rb.stratum_wave_safe[st] = safe
+	}
+
+	rb.phase_max_stratum = make(map[String_Id]u32, 4, a)
+	for rc in rb.rules {
+		if rc.phase == EMPTY_STRING {
+			continue
+		}
+		if prev, has := rb.phase_max_stratum[rc.phase]; !has || rc.stratum > prev {
+			rb.phase_max_stratum[rc.phase] = rc.stratum
+		}
 	}
 
 	rb.sccs = make([]Scc_Info, len(strat_plan.sccs), a)
