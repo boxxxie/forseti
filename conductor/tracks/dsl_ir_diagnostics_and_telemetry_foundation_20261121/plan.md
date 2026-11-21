@@ -35,10 +35,10 @@
 
 ## Phase 3: Compile-Time Semantic Validator, Lints, `cmd/forseti` CLI & Initial DSL Reference
 
-- [ ] Task: Implement semantic validation and static lint passes (`E2001–E2005`, `W2001–W2005`) (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 ATDD behavioral scenarios & `#caller_location` matrix cases in `specs/compiler_diagnostics_spec_test.odin` (unbound `?var` in `assert`/`where`/`not`, type mismatches, Cartesian join warning, self-loop warning, unused vars/tables, shadowed vars) asserting exact diagnostic codes and `file:line:col` spans
-    - [ ] Implement `forseti/sema.odin` with telemetry spans around each pass
-- [ ] Task: Implement `cmd/forseti` CLI (`check`, `ast`, `ir`) and author initial `docs/dsl-reference.md` (Red-First ATDD + CLI)
-    - [ ] Write failing Layer 1 CLI behavioral specs (via `specs/` CLI driver) verifying exit codes (`0` clean, non-zero on error or `--warnings-as-errors`), `--format=json`, and `--telemetry` output
-    - [ ] Implement `cmd/forseti/main.odin`, document initial grammar + `E1xxx`/`E2xxx`/`W2xxx` codes in `docs/dsl-reference.md`, and run `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` + ASan
+- [x] Task: Implement semantic validation and static lint passes (`E2001–E2005`, `W2001–W2005`) (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 ATDD behavioral scenarios & `#caller_location` matrix cases in `specs/compiler_diagnostics_spec_test.odin` (unbound `?var` in `assert`/`where`/`not`, type mismatches, Cartesian join warning, self-loop warning, unused vars/tables, shadowed vars) asserting exact diagnostic codes and `file:line:col` spans
+    - [x] Implement `forseti/sema.odin` with telemetry spans around each pass
+- [x] Task: Implement `cmd/forseti` CLI (`check`, `ast`, `ir`) and author initial `docs/dsl-reference.md` (Red-First ATDD + CLI)
+    - [x] Write failing Layer 1 CLI behavioral specs (via `specs/` CLI driver) verifying exit codes (`0` clean, non-zero on error or `--warnings-as-errors`), `--format=json`, and `--telemetry` output
+    - [x] Implement `cmd/forseti/main.odin`, document initial grammar + `E1xxx`/`E2xxx`/`W2xxx` codes in `docs/dsl-reference.md`, and run `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` + ASan
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Semantic Diagnostics, ATDD Specs, CLI & DSL Reference' (Protocol in workflow.md)

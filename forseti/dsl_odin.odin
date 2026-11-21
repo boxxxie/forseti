@@ -787,5 +787,6 @@ ir_builder_build :: proc(
 		ir.extra_exprs = make([]Expr_Id, len(extra_exprs), a) or_return
 		copy(ir.extra_exprs, extra_exprs[:])
 	}
+	analyze_ir(&ir, diags, telemetry) or_return
 	return ir, nil
 }

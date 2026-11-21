@@ -419,5 +419,9 @@ compile_source :: proc(
 	defer parsed_ast_destroy(&parsed)
 
 	ir = lower_ast_to_ir(&parsed.pool, &parsed.interner, parsed.line_starts[:], telemetry, allocator) or_return
+	defer if err != nil {
+		ir_destroy(&ir)
+	}
+	analyze_ir(&ir, diags, telemetry) or_return
 	return ir, nil
 }
