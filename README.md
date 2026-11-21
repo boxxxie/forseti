@@ -1,19 +1,24 @@
-# `forseti` — Data-Oriented Rules Engine Research & Design (Odin)
+# `forseti` — Data-Oriented Rules Engine for Odin
 
-Research and architecture workspace for designing a high-performance, data-oriented rules engine in [Odin](https://odin-lang.org/), synthesizing the strongest ideas across modern rule-engine paradigms:
+**Forseti** is a high-performance, data-oriented rules engine for [Odin](https://odin-lang.org/), built primarily for **Master Data Management (MDM) with verifiable causal audit trails**, backed by [`xitdb`](../xitdb/README.md) (`Core_Memory` default at ~3M ops/sec, attachable `Core_Buffered_File`, and `Core_Overlay` zero-copy counterfactual forks).
 
-- **Compiled DMN Decision Tables** (Tablex, GoRules ZEN / JDM) — gap/overlap/dead-rule static proofs, cost-ordered decision trees, and ternary bitset evaluation.
-- **Lazy PHREAK & Rete/UL Pattern Matching** (Drools PHREAK, Soar Rete/UL, CLIPS, Clara Rules, O'Doyle / Pararules) — segment bitmask linking, hash-indexed joins, pause/resume evaluation stacks, and dual typed-struct / EAV working memory.
-- **Truth Maintenance & Retractable Aggregations** (Clara Rules JTMS, CLIPS `logical` CE, DBSP Z-sets) — automatic cascading retractions (`+1` / `-1` weights) and incremental `min` / `max` / `sum` / `count` accumulators.
-- **Stratified Recursion & Relational Engines** (Soufflé, Ascent, Egglog, Feldera DBSP) — Tarjan SCC stratification, semi-naive fixed-point evaluation, and E-graphs / congruence closure.
-- **Causal Provenance, Semirings & 3-Phase Effects** (Runic, Radul & Sussman Propagators, ProvSQL) — compact `#soa` derivation lineage, algebraic provenance semirings, counterfactual `diff_replay`, and lock-free `Prepare -> Execute -> Apply` external effects.
+It unifies the strongest techniques across modern rule-engine paradigms over one shared canonical IR (`Rulebase_IR`):
 
-## Reference Repositories
+- **3 Authoring Tiers over One IR:**
+  1. **External `.forseti` DSL** *(Priority #1)* — zero-copy parser, hot-reload, compiler-grade errors/warnings, and static table verification.
+  2. **Internal Odin DSL** — typed `proc{...}` combinators building the exact same IR without a separate build step.
+  3. **AOT Odin Codegen (`forseti gen`)** — emits `"contextless"` zero-allocation Odin procedures for frozen hot paths.
+- **Compiled DMN Decision Tables (`Tablex++` / `ZEN`):** `U`/`A`/`P`/`F`/`C`/`M`/`R` hit policies, ZEN-style static gap/overlap/dead-rule proofs with concrete counterexample witnesses, cost-ordered lazy decision trees, and branchless `u64` bitset matrices.
+- **Lazy PHREAK + Rete/UL Matcher:** Shared alpha network, `u64` segment bitmasks, Left & Right unlinking, lazy per-session memory allocation scaling from `10` to `1,000,000` rules, and a 32-bit `#must_tail` expression/guard VM.
+- **Clara-Grade Reasoning + Stratified Datalog:** DBSP-style Z-set (`+1`/`-1`) JTMS with automatic cascading retractions, `not`/`exists`, retractable incremental accumulators (`count`, `sum`, `avg`, `min`, `max`, `distinct`), and Tarjan SCC semi-naive recursion for cyclic hierarchies.
+- **Causal Provenance, Semirings & 3-Phase Effects:** Compact `#soa` derivation DAG committed atomically into `xitdb` (`decisions`, `idx.decisions_by_entity`, `idx.decisions_by_rule`, `__tx`), algebraic semiring evaluators (`Boolean`, `Why`, `How`, `Viterbi`), `explain`/`impact`/`diff_replay`, and Runic-style `Prepare -> Execute -> Apply` async effects.
+- **First-Class Telemetry & Longitudinal Benchmarks:** Built-in phase/rule/memory telemetry (`JSONL` / Chrome Trace) and [`hugi`](../hugi/README.md) + `obench` benchmarks in [`hugi.json`](hugi.json) spanning `10` to `1,000,000` rules.
 
-All upstream reference codebases are cloned locally (gitignored) into `reference/` using:
+---
 
-```bash
-./scripts/clone_references.sh
-```
+## Navigation
 
-See [reference/README.md](reference/README.md) for the annotated source map, commit SHAs, and specific algorithms/modules to inspect in each repository.
+- **Agent & Build Guide:** [`AGENTS.md`](AGENTS.md)
+- **Conductor Context & Sequenced Tracks:** [`conductor/tracks.md`](conductor/tracks.md) | [`conductor/index.md`](conductor/index.md)
+- **Benchmark Config:** [`hugi.json`](hugi.json)
+- **Reference Engines (16 Cloned Repos):** [`reference/README.md`](reference/README.md) (populate via `./scripts/clone_references.sh`)

@@ -1,0 +1,13 @@
+{
+  "track_id": "jtms_accumulators_stratified_datalog_and_provenance_20261121",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-21T18:45:00Z",
+  "updated_at": "2026-11-21T18:45:00Z",
+  "dependencies": [
+    "decision_tables_verifier_and_aot_codegen_20261121",
+    "xitdb_substrate_and_optin_fast_memory_20261121",
+    "phreak_rete_ul_matcher_and_guard_vm_20261121"
+  ],
+  "description": "Z-Set JTMS, Retractable Accumulators, Tarjan SCC Stratified Datalog, Semiring Causal Provenance, and 3-Phase Async Effects"
+}

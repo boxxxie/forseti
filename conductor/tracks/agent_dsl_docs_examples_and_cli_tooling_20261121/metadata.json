@@ -1,0 +1,16 @@
+{
+  "track_id": "agent_dsl_docs_examples_and_cli_tooling_20261121",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-21T18:45:00Z",
+  "updated_at": "2026-11-21T18:45:00Z",
+  "dependencies": [
+    "dsl_ir_diagnostics_and_telemetry_foundation_20261121",
+    "decision_tables_verifier_and_aot_codegen_20261121",
+    "xitdb_substrate_and_optin_fast_memory_20261121",
+    "phreak_rete_ul_matcher_and_guard_vm_20261121",
+    "jtms_accumulators_stratified_datalog_and_provenance_20261121",
+    "million_rule_benchmarks_and_telemetry_suite_20261121"
+  ],
+  "description": "Agent-Proof DSL Reference (docs/ & usage-rules.md), CI-Verified Examples, Full CLI (cmd/forseti), and 4-Layer ATDD Specs"
+}

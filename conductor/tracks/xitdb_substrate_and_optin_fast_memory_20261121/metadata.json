@@ -1,0 +1,11 @@
+{
+  "track_id": "xitdb_substrate_and_optin_fast_memory_20261121",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-21T18:45:00Z",
+  "updated_at": "2026-11-21T18:45:00Z",
+  "dependencies": [
+    "dsl_ir_diagnostics_and_telemetry_foundation_20261121"
+  ],
+  "description": "xitdb Fact/Audit Substrate, diff_collection Z-Set Delta Bridge, Core_Overlay Forks, and Opt-In Fast-Memory Adaptations"
+}

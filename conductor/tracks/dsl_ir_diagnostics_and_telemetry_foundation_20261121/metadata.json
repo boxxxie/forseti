@@ -1,0 +1,9 @@
+{
+  "track_id": "dsl_ir_diagnostics_and_telemetry_foundation_20261121",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-21T18:45:00Z",
+  "updated_at": "2026-11-21T18:45:00Z",
+  "dependencies": [],
+  "description": "Core .forseti External & Internal DSL, Canonical Rulebase_IR, Compile-Time Diagnostics, and Telemetry Foundation"
+}
