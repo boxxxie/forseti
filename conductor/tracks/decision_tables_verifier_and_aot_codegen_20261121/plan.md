@@ -21,12 +21,12 @@
 
 ## Phase 2: Cost-Ordered Lazy Decision Tree & Ternary Bitset Matrix Compilers
 
-- [ ] Task: Implement cost-weighted decision tree builder and zero-alloc lazy evaluator (`F`, `U`, `A`, `P`) (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 ATDD decision-table specs in `specs/decision_tables_spec_test.odin` verifying row-attributed outcomes, lazy expensive-column skipping (`cost 100` skipped when cheap `cost 1` decides), and zero heap allocations during `decide`
-    - [ ] Implement `forseti/table_tree.odin` and `forseti/table_eval.odin`
-- [ ] Task: Implement ternary `u64` bitset matrix evaluator for multi-hit policies (`C`, `C+`, `C<`, `C>`, `C#`, `M`, `R`) (Red-First ATDD + Pattern D `t.seed`)
-    - [ ] Write failing Layer 1 multi-hit specs in `specs/decision_tables_spec_test.odin` plus Pattern D `t.seed` property invariants comparing bitset evaluation against oracle across 1–500-row randomized tables (`C`, `M`, `R`, aggregators)
-    - [ ] Implement `forseti/table_bitset.odin` with `intrinsics.count_trailing_zeros` hit extraction and `Decision_Trace` population
+- [x] Task: Implement cost-weighted decision tree builder and zero-alloc lazy evaluator (`F`, `U`, `A`, `P`) (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 ATDD decision-table specs in `specs/decision_tables_spec_test.odin` verifying row-attributed outcomes, lazy expensive-column skipping (`cost 100` skipped when cheap `cost 1` decides), and zero heap allocations during `decide`
+    - [x] Implement `forseti/table_tree.odin` and `forseti/table_eval.odin`
+- [x] Task: Implement ternary `u64` bitset matrix evaluator for multi-hit policies (`C`, `C+`, `C<`, `C>`, `C#`, `M`, `R`) (Red-First ATDD + Pattern D `t.seed`)
+    - [x] Write failing Layer 1 multi-hit specs in `specs/decision_tables_spec_test.odin` plus Pattern D `t.seed` property invariants comparing bitset evaluation against oracle across 1–500-row randomized tables (`C`, `M`, `R`, aggregators)
+    - [x] Implement `forseti/table_bitset.odin` with `intrinsics.count_trailing_zeros` hit extraction and `Decision_Trace` population
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Cost-Tree & Bitset Matrix Evaluators' (Protocol in workflow.md)
 
 ---

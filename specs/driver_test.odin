@@ -52,6 +52,89 @@ driver_verify_table_with_budget :: proc(
 	return forseti.verify_decision_table(ir, table_idx, diags, telemetry, forseti.Verify_Options{max_budget = max_budget})
 }
 
+@(private = "file")
+Lazy_Eval_Ctx :: struct {
+	ct:          ^forseti.Compiled_Table,
+	args:        []Table_Test_Arg,
+	call_counts: ^[64]int,
+}
+
+@(private = "file")
+test_arg_to_value :: proc(ct: ^forseti.Compiled_Table, arg: Table_Test_Arg) -> forseti.Value {
+	switch v in arg {
+	case bool:
+		return v
+	case i32:
+		return v
+	case i64:
+		return v
+	case f64:
+		return v
+	case string:
+		return forseti.compiled_table_string_value(ct, v)
+	}
+	return {}
+}
+
+@(private = "file")
+test_lazy_getter :: proc(col_idx: int, user_data: rawptr) -> forseti.Value {
+	ctx := (^Lazy_Eval_Ctx)(user_data)
+	ctx.call_counts[col_idx] += 1
+	return test_arg_to_value(ctx.ct, ctx.args[col_idx])
+}
+
+driver_eval_table :: proc(
+	ir: ^forseti.Rulebase_IR,
+	table_name: string,
+	args: []Table_Test_Arg,
+	lazy: bool,
+	telemetry: ^forseti.Telemetry_Sink,
+) -> (run: Decision_Run, err_msg: string) {
+	found := false
+	table_idx := u32(0)
+	for t, ti in ir.tables {
+		if forseti.ir_string(ir, t.name) == table_name {
+			table_idx = u32(ti)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return {}, fmt.tprintf("unknown table %q", table_name)
+	}
+
+	ct, cerr := forseti.compile_table(ir, table_idx, telemetry)
+	if cerr != nil {
+		return {}, fmt.tprintf("compile_table error: %v", cerr)
+	}
+	run.table = ct
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	prev_alloc := context.allocator
+	context.allocator = mem.tracking_allocator(&track)
+
+	if lazy {
+		lctx := Lazy_Eval_Ctx{
+			ct          = &run.table,
+			args        = args,
+			call_counts = &run.call_counts,
+		}
+		run.result = forseti.decide_lazy(&run.table, test_lazy_getter, rawptr(&lctx))
+	} else {
+		vals: [64]forseti.Value
+		for a, i in args {
+			vals[i] = test_arg_to_value(&run.table, a)
+		}
+		run.result = forseti.decide_values(&run.table, vals[:len(args)])
+	}
+
+	context.allocator = prev_alloc
+	run.alloc_count = len(track.allocation_map)
+	mem.tracking_allocator_destroy(&track)
+	return run, ""
+}
+
 driver_cleanup_cli_dir :: proc(ptr: rawptr) {
 	p := (^string)(ptr)
 	if p != nil {

@@ -28,14 +28,30 @@ Cli_Run :: struct {
 	stderr:    string,
 }
 
+Table_Test_Arg :: union {
+	bool,
+	i32,
+	i64,
+	f64,
+	string,
+}
+
+Decision_Run :: struct {
+	table:       forseti.Compiled_Table,
+	result:      forseti.Decision_Result,
+	call_counts: [64]int,
+	alloc_count: int,
+}
+
 World :: struct {
-	t:         ^testing.T,
-	arena:     vmem.Arena,
-	telemetry: forseti.Telemetry_Sink,
-	policies:  map[string]Policy_Slot,
-	cli_dir:   string,
-	cli_bin:   string,
-	cli_runs:  map[string]Cli_Run,
+	t:             ^testing.T,
+	arena:         vmem.Arena,
+	telemetry:     forseti.Telemetry_Sink,
+	policies:      map[string]Policy_Slot,
+	cli_dir:       string,
+	cli_bin:       string,
+	cli_runs:      map[string]Cli_Run,
+	decision_runs: map[string]Decision_Run,
 }
 
 world_init :: proc(w: ^World, t: ^testing.T, loc := #caller_location) {
@@ -49,10 +65,15 @@ world_init :: proc(w: ^World, t: ^testing.T, loc := #caller_location) {
 
 	w.policies = make(map[string]Policy_Slot, 8)
 	w.cli_runs = make(map[string]Cli_Run, 8)
+	w.decision_runs = make(map[string]Decision_Run, 8)
 }
 
 world_destroy :: proc(w: ^World) {
 	vmem.arena_check_temp(&w.arena)
+	for _, &dr in w.decision_runs {
+		forseti.compiled_table_destroy(&dr.table)
+	}
+	delete(w.decision_runs)
 	for _, &slot in w.policies {
 		if slot.compiled {
 			forseti.ir_destroy(&slot.ir)
@@ -216,6 +237,138 @@ upon_verifying_table_with_budget :: proc(
 	}
 	err := driver_verify_table_with_budget(&slot.ir, table_idx, &slot.diags, &w.telemetry, max_budget)
 	testing.expect_value(w.t, err, nil, loc = loc)
+}
+
+upon_deciding_table :: proc(
+	w: ^World,
+	policy_label: string,
+	table_name: string,
+	run_label: string,
+	args: []Table_Test_Arg,
+	loc := #caller_location,
+) {
+	slot, ok := &w.policies[policy_label]
+	if !testing.expectf(w.t, ok && slot.compiled, "policy %q must be compiled", policy_label, loc = loc) {
+		return
+	}
+	if prev, has := &w.decision_runs[run_label]; has {
+		forseti.compiled_table_destroy(&prev.table)
+	}
+	run, err_msg := driver_eval_table(&slot.ir, table_name, args, lazy = false, telemetry = &w.telemetry)
+	if !testing.expectf(w.t, err_msg == "", "failed evaluating table %q: %s", table_name, err_msg, loc = loc) {
+		forseti.compiled_table_destroy(&run.table)
+		return
+	}
+	w.decision_runs[run_label] = run
+}
+
+upon_deciding_table_lazily :: proc(
+	w: ^World,
+	policy_label: string,
+	table_name: string,
+	run_label: string,
+	args: []Table_Test_Arg,
+	loc := #caller_location,
+) {
+	slot, ok := &w.policies[policy_label]
+	if !testing.expectf(w.t, ok && slot.compiled, "policy %q must be compiled", policy_label, loc = loc) {
+		return
+	}
+	if prev, has := &w.decision_runs[run_label]; has {
+		forseti.compiled_table_destroy(&prev.table)
+	}
+	run, err_msg := driver_eval_table(&slot.ir, table_name, args, lazy = true, telemetry = &w.telemetry)
+	if !testing.expectf(w.t, err_msg == "", "failed lazy evaluating table %q: %s", table_name, err_msg, loc = loc) {
+		forseti.compiled_table_destroy(&run.table)
+		return
+	}
+	w.decision_runs[run_label] = run
+}
+
+then_decision_result_is :: proc(
+	w: ^World,
+	run_label: string,
+	expected_match: bool,
+	expected_out0: string,
+	expected_row: string,
+	loc := #caller_location,
+) {
+	run, ok := &w.decision_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown decision run %q", run_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, run.result.matched, expected_match, loc = loc)
+	if expected_match {
+		actual_out0 := forseti.compiled_table_output_string(&run.table, run.result.outputs[0])
+		testing.expect_value(w.t, actual_out0, expected_out0, loc = loc)
+		actual_row := forseti.compiled_table_winning_row_id(&run.table, run.result)
+		testing.expect_value(w.t, actual_row, expected_row, loc = loc)
+	}
+}
+
+then_decision_column_eval_counts :: proc(
+	w: ^World,
+	run_label: string,
+	col: int,
+	expected_calls: int,
+	expect_skipped_bit: bool,
+	loc := #caller_location,
+) {
+	run, ok := &w.decision_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown decision run %q", run_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, run.call_counts[col], expected_calls, loc = loc)
+	bit := u64(1) << u64(col)
+	testing.expect_value(w.t, (run.result.trace.skipped_col_mask & bit) != 0, expect_skipped_bit, loc = loc)
+}
+
+then_decision_allocated_zero_bytes :: proc(w: ^World, run_label: string, loc := #caller_location) {
+	run, ok := &w.decision_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown decision run %q", run_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, run.alloc_count, 0, loc = loc)
+}
+
+then_decision_int_output_is :: proc(
+	w: ^World,
+	run_label: string,
+	col: int,
+	expected: i64,
+	expected_hits: u32,
+	loc := #caller_location,
+) {
+	run, ok := &w.decision_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown decision run %q", run_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, run.result.matched_row_count, expected_hits, loc = loc)
+	testing.expect_value(w.t, run.result.output_set[col], true, loc = loc)
+	val, is_i64 := run.result.outputs[col].(i64)
+	testing.expect(w.t, is_i64, loc = loc)
+	if is_i64 {
+		testing.expect_value(w.t, val, expected, loc = loc)
+	}
+}
+
+then_decision_outputs_are :: proc(
+	w: ^World,
+	run_label: string,
+	expected_outs: []string,
+	expected_hits: u32,
+	loc := #caller_location,
+) {
+	run, ok := &w.decision_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown decision run %q", run_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, run.result.matched_row_count, expected_hits, loc = loc)
+	for exp, i in expected_outs {
+		testing.expect_value(w.t, run.result.output_set[i], true, loc = loc)
+		actual := forseti.compiled_table_output_string(&run.table, run.result.outputs[i])
+		testing.expect_value(w.t, actual, exp, loc = loc)
+	}
 }
 
 given_cli_binary :: proc(w: ^World, loc := #caller_location) {
