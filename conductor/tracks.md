@@ -4,7 +4,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 1: Core `.forseti` External & Internal DSL, Canonical `Rulebase_IR`, Compile-Time Diagnostics, Telemetry Foundation, and 4-Layer `specs/` Harness** *(Priority: Step 1 — Foundation)*
+- [~] **Track 1: Core `.forseti` External & Internal DSL, Canonical `Rulebase_IR`, Compile-Time Diagnostics, Telemetry Foundation, and 4-Layer `specs/` Harness** *(Priority: Step 1 — Foundation)*
   *Link: [./tracks/dsl_ir_diagnostics_and_telemetry_foundation_20261121/](./tracks/dsl_ir_diagnostics_and_telemetry_foundation_20261121/)*
 
 ---

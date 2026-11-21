@@ -8,12 +8,12 @@
 
 ## Phase 1: Project Package Bootstrap, `String_Interner`, Lexer & Telemetry Core
 
-- [ ] Task: Scaffold `forseti/`, `tests/`, sibling `specs/` (`dsl_test.odin`, `driver_test.odin`), and `Telemetry_Sink` core (Pattern E TDD)
-    - [ ] Write failing Pattern E unit tests covering `String_Interner` deduplication, `EMPTY_STRING` sentinel, `resolve_line_col` UTF-8 boundary resolution, and `Telemetry_Sink` hierarchical span recording + JSONL/Chrome Trace export + disabled zero-cost `#config(FORSETI_TELEMETRY, false)` build
-    - [ ] Implement `forseti/types.odin` (`Span`, `String_Id`, `Value`, distinct IDs), `forseti/interner.odin`, `forseti/telemetry.odin`, and bootstrap `specs/dsl_test.odin` (`world_init(&w, t)`, `defer world_destroy(&w)`, `#caller_location`) + `specs/driver_test.odin`; verify strict `odin check` + leak-checked `odin test`
-- [ ] Task: Implement zero-copy `.forseti` lexer with sticky `.EOF` and malformed UTF-8 progress safety (Pattern E + Pattern D `t.seed`)
-    - [ ] Write failing unit + Pattern D `t.seed` malformed-UTF-8 recovery tests covering all `.forseti` keywords, table pipe/separator tokens (`|`, `||`, `-`), comparisons, `?var` sigils, string escapes, comments, and line map offsets
-    - [ ] Implement `forseti/lexer.odin` (`@(private)` internals) with ASCII fast path and `utf8.decode_rune_in_string` fallback
+- [x] Task: Scaffold `forseti/`, `tests/`, sibling `specs/` (`dsl_test.odin`, `driver_test.odin`), and `Telemetry_Sink` core (Pattern E TDD)
+    - [x] Write failing Pattern E unit tests covering `String_Interner` deduplication, `EMPTY_STRING` sentinel, `resolve_line_col` UTF-8 boundary resolution, and `Telemetry_Sink` hierarchical span recording + JSONL/Chrome Trace export + disabled zero-cost `#config(FORSETI_TELEMETRY, false)` build
+    - [x] Implement `forseti/types.odin` (`Span`, `String_Id`, `Value`, distinct IDs), `forseti/interner.odin`, `forseti/telemetry.odin`, and bootstrap `specs/dsl_test.odin` (`world_init(&w, t)`, `defer world_destroy(&w)`, `#caller_location`) + `specs/driver_test.odin`; verify strict `odin check` + leak-checked `odin test`
+- [x] Task: Implement zero-copy `.forseti` lexer with sticky `.EOF` and malformed UTF-8 progress safety (Pattern E + Pattern D `t.seed`)
+    - [x] Write failing unit + Pattern D `t.seed` malformed-UTF-8 recovery tests covering all `.forseti` keywords, table pipe/separator tokens (`|`, `||`, `-`), comparisons, `?var` sigils, string escapes, comments, and line map offsets
+    - [x] Implement `forseti/lexer.odin` (`@(private)` internals) with ASCII fast path and `utf8.decode_rune_in_string` fallback
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Lexer, String Interner, Telemetry & Specs Bootstrap' (Protocol in workflow.md)
 
 ---
