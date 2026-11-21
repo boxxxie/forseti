@@ -19,7 +19,11 @@ _write_derived_fact_record :: proc(
 	fhashes: []Prehashed_Key,
 ) -> xitdb.Error {
 	kstr := session_string(s, f.key)
-	rec_wc := xitdb.hash_map_put_cursor(col_map, kstr) or_return
+	hbuf: [64]u8 = ---
+	h := xitdb.database_digest_string_buf(col_map.cursor.db, kstr, hbuf[:])
+	_, _ = xitdb.hash_map_remove_by_hash(col_map, h)
+	xitdb.hash_map_put_key_by_hash(col_map, h, kstr) or_return
+	rec_wc := xitdb.hash_map_put_cursor_by_hash(col_map, h) or_return
 	rec_m := xitdb.write_hash_map_init(rec_wc) or_return
 	for _, sfi in schema.fields {
 		if sfi >= len(f.fields) || f.fields[sfi] == nil {
@@ -89,7 +93,6 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			cm := get_derived_col(s, moment_wc, &col_maps, lk.binding_idx) or_return
 			kstr := session_string(s, lk.key)
 			_, _ = xitdb.hash_map_remove(&cm, kstr)
-			delete_key(&s.committed_derived, lk)
 		}
 
 		for fid in s.dirty_derived_fids {
@@ -109,7 +112,6 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			schema := s.rb.schemas[bdef.schema_id]
 			fhashes := s.rb.schema_field_hashes[bdef.schema_id]
 			_write_derived_fact_record(s, &cm, f, schema, fhashes) or_return
-			s.committed_derived[Fact_Lookup_Key{binding_idx = bi, key = f.key}] = true
 		}
 	} else {
 		for bdef, bi in s.rb.bindings {
@@ -126,7 +128,6 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			}
 
 			if ctx.sync_committed {
-				stale_keys := make([dynamic]Fact_Lookup_Key, 0, 4, context.temp_allocator)
 				for lk in s.committed_derived {
 					if lk.binding_idx != u16(bi) {
 						continue
@@ -135,11 +136,7 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 					if !has_cur || !s.facts[cur_fid].alive {
 						kstr := session_string(s, lk.key)
 						_, _ = xitdb.hash_map_remove(&col_map, kstr)
-						append(&stale_keys, lk)
 					}
-				}
-				for slk in stale_keys {
-					delete_key(&s.committed_derived, slk)
 				}
 			}
 
@@ -150,9 +147,6 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 					continue
 				}
 				_write_derived_fact_record(s, &col_map, &f, schema, fhashes) or_return
-				if ctx.sync_committed {
-					s.committed_derived[Fact_Lookup_Key{binding_idx = u16(bi), key = f.key}] = true
-				}
 			}
 		}
 	}
@@ -332,6 +326,36 @@ session_commit_derived_and_audit :: proc(s: ^Session, bridge: ^Store_Bridge) -> 
 	}
 	moment_idx, err = store_bridge_commit_moment(bridge, _commit_derived_and_audit_tx_cb, &cctx)
 	if err == nil && is_primary {
+		if is_incremental {
+			for lk in s.retracted_derived_keys {
+				cur_fid, has_cur := s.facts_by_key[lk]
+				if has_cur && s.facts[cur_fid].alive {
+					continue
+				}
+				delete_key(&s.committed_derived, lk)
+			}
+			for fid in s.dirty_derived_fids {
+				if fid == INVALID_FACT || int(fid) >= len(s.facts) {
+					continue
+				}
+				f := &s.facts[fid]
+				if !f.alive || int(f.binding_idx) >= len(s.rb.bindings) || s.rb.bindings[f.binding_idx].kind != .Derived {
+					continue
+				}
+				s.committed_derived[Fact_Lookup_Key{binding_idx = f.binding_idx, key = f.key}] = true
+			}
+		} else {
+			clear(&s.committed_derived)
+			for &f in s.facts {
+				if !f.alive || int(f.binding_idx) >= len(s.rb.bindings) || s.rb.bindings[f.binding_idx].kind != .Derived {
+					continue
+				}
+				if len(s.rb.binding_path_hashes[f.binding_idx]) == 0 {
+					continue
+				}
+				s.committed_derived[Fact_Lookup_Key{binding_idx = f.binding_idx, key = f.key}] = true
+			}
+		}
 		s.committed_bridge_db = bridge.db
 		s.provenance.committed_deriv_len = len(s.provenance.derivs)
 		clear(&s.provenance.dirty_retracted_derivs)

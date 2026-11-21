@@ -67,12 +67,15 @@ fast_hash128_sum_into :: proc "contextless" (data: []u8, out: []u8) #no_bounds_c
 	}
 }
 
+@(private)
+_fast_hash128_proc :: proc(data: []u8, out_hash: []u8, _: rawptr) {
+	fast_hash128_sum_into(data, out_hash)
+}
+
 fast_hasher :: proc(id: u32 = FAST_HASH_ID, file_id: u64 = 0) -> xitdb.Hasher {
 	effective_id := id if id != 0 else FAST_HASH_ID
 	return xitdb.Hasher{
-		hash_proc = proc(data: []u8, out_hash: []u8, _: rawptr) {
-			fast_hash128_sum_into(data, out_hash)
-		},
+		hash_proc = _fast_hash128_proc,
 		hash_size = FAST_HASH_SIZE,
 		id        = effective_id,
 		file_id   = file_id,
@@ -97,10 +100,10 @@ prehashed_key_make :: proc(key: string) -> Prehashed_Key {
 }
 
 prehashed_key_digest :: #force_inline proc(db: ^xitdb.Database, pk: ^Prehashed_Key, fallback_buf: []u8) -> []u8 {
-	if db.hasher.id == 0 && db.hasher.hash_size == 20 {
+	if db.hasher.hash_proc == xitdb.sha1_hasher().hash_proc && db.hasher.hash_size == 20 && db.hasher.user_data == nil {
 		return pk.sha1[:]
 	}
-	if db.hasher.id == FAST_HASH_ID && db.hasher.hash_size == FAST_HASH_SIZE {
+	if db.hasher.hash_proc == _fast_hash128_proc && db.hasher.hash_size == FAST_HASH_SIZE && db.hasher.user_data == nil {
 		return pk.fast128[:]
 	}
 	return xitdb.database_digest_string_buf(db, pk.key, fallback_buf)

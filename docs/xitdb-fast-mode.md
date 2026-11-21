@@ -43,7 +43,7 @@ Do **not** enable `.Fast_Memory` or `forseti.fast_hasher()` (`"fh16"`) outside t
 
 - **Disk Cores Forbidden:** Opening `Core_Buffered_File` via `store_bridge_open_file` (or any disk-backed store checked by `_core_has_disk_backing`) with `cfg.mode == .Fast_Memory` or `cfg.custom_hasher.id == FAST_HASH_ID` is rejected with `Store_Bridge_Error.Disk_Fast_Mode_Forbidden`.
 - **Safe Mode Hasher Guard:** Passing `custom_hasher` with `id == FAST_HASH_ID` (`"fh16"`) while `cfg.mode == .Safe_V2` is rejected with `Store_Bridge_Error.Invalid_Config`.
-- **No Cross-Format Wire Compatibility:** Memory images initialized with `forseti.fast_hasher()` carry `hash_id = 0x66683136` (`"fh16"`) and `hash_size = 16`. Attempting to open a `Safe_V2` SHA-1 image with `fast_hasher()` (or vice versa) fails deterministically with `xitdb.Xitdb_Error.Invalid_Hash_Id`.
+- **No Cross-Format Wire Compatibility:** Memory images initialized with `forseti.fast_hasher()` carry `hash_id = 0x66683136` (`"fh16"`) and `hash_size = 16`. Attempting to open a `Safe_V2` SHA-1 image with `fast_hasher()` (or vice versa) fails deterministically with `xitdb.Xitdb_Error.Invalid_Hash_Size`.
 - **Adversarial Hash-Flooding Risk:** `fast_hash128_sum_into` uses fixed constants and is non-cryptographic; never expose untrusted adversarial keys directly to a `Fast_Memory` HAMT.
 
 ---
