@@ -1,0 +1,25 @@
+# Compiled Odin binaries
+*.bin
+*.exe
+*.out
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+bin/
+
+# Reference repositories (cloned via scripts/clone_references.sh)
+reference/*
+!reference/README.md
+
+# Temporary & scratch files
+.tmp/
+.worktrees/
+*.patch
+
+# OS & Editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

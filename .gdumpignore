@@ -1,0 +1,5 @@
+reference/**
+.tmp/**
+.worktrees/**
+*.patch
+*.bin
