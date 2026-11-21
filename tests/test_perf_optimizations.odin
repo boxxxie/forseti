@@ -592,3 +592,462 @@ rule win_domain {
 	}
 	testing.expectf(t, len(sess.facts) < 100, "expected recycled facts len < 100, got %d", len(sess.facts))
 }
+
+@(test)
+test_fast_mode_jtms_cascade_scratch_growth :: proc(t: ^testing.T) {
+	b: strings.Builder
+	strings.builder_init(&b, context.temp_allocator)
+	defer free_all(context.temp_allocator)
+
+	strings.write_string(&b, `module fast_jtms_growth version "1.0"
+schema Root { group: i64 }
+schema Fan { group: i64, k: i64 }
+schema LeafFan { m: i64 }
+schema Block { group: i64 }
+schema Mid { group: i64, k: i64 }
+schema Leaf { group: i64, k: i64, m: i64 }
+source Root : Root at .r[?id]
+source Fan : Fan at .fan[?id]
+source LeafFan : LeafFan at .lf[?id]
+source Block : Block at .blk[?id]
+derived Mid : Mid at .m[?id]
+derived Leaf : Leaf at .l[?id]
+
+rule make_mid {
+  when { ?_r := Root(group: ?g); ?_f := Fan(group: ?g, k: ?k) }
+  then { assert Mid(group: ?g, k: ?k) }
+}
+rule make_leaf {
+  when { ?_m := Mid(group: ?g, k: ?k); ?_lf := LeafFan(m: ?m) }
+  then { assert Leaf(group: ?g, k: ?k, m: ?m) }
+}
+rule revoke_many {
+  when { ?_r := Root(group: ?g); not Block(group: ?g); where ?g == 2 }
+  then {
+`)
+	for i := 0; i < 22; i += 1 {
+		fmt.sbprintf(&b, "    assert Mid(group: ?g, k: %d)\n", 100 + i)
+	}
+	strings.write_string(&b, "  }\n}\n")
+
+	rb := _compile_test_rb(t, strings.to_string(b), "fast_jtms_growth.forseti")
+	defer forseti.rulebase_destroy(&rb)
+
+	sess := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(sess, &rb, forseti.Session_Config{provenance_mode = .Fast}), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(sess)
+		free(sess)
+	}
+
+	kbuf: [24]u8 = ---
+	for k := 0; k < 26; k += 1 {
+		fk := fmt.bprintf(kbuf[:], "f:%d", k)
+		_, _ = forseti.session_insert_fact(sess, "Fan", fk, {i64(1), i64(k)})
+	}
+	for m := 0; m < 2; m += 1 {
+		lk := fmt.bprintf(kbuf[:], "lf:%d", m)
+		_, _ = forseti.session_insert_fact(sess, "LeafFan", lk, {i64(m)})
+	}
+
+	// Wave 1: 26 direct Mid children and 52 Leaf grandchildren exceed 16-entry scratch_dead_justs in both functions.
+	_, _ = forseti.session_insert_fact(sess, "Root", "r1", {i64(1)})
+	_, ferr := forseti.session_fire(sess)
+	testing.expect_value(t, ferr, forseti.Session_Error.None)
+	testing.expect_value(t, _count_alive_binding(sess, "Mid"), 26)
+	testing.expect_value(t, _count_alive_binding(sess, "Leaf"), 52)
+
+	testing.expect_value(t, forseti.session_retract_fact_by_key(sess, "Root", "r1"), forseti.Session_Error.None)
+	testing.expect_value(t, _count_alive_binding(sess, "Mid"), 0)
+	testing.expect_value(t, _count_alive_binding(sess, "Leaf"), 0)
+
+	// Wave 2: reuse scratch_dead_justs cleanly across another full cascade.
+	_, _ = forseti.session_insert_fact(sess, "Root", "r1", {i64(1)})
+	_, ferr2 := forseti.session_fire(sess)
+	testing.expect_value(t, ferr2, forseti.Session_Error.None)
+	testing.expect_value(t, _count_alive_binding(sess, "Mid"), 26)
+	testing.expect_value(t, _count_alive_binding(sess, "Leaf"), 52)
+
+	testing.expect_value(t, forseti.session_retract_fact_by_key(sess, "Root", "r1"), forseti.Session_Error.None)
+	testing.expect_value(t, _count_alive_binding(sess, "Mid"), 0)
+	testing.expect_value(t, _count_alive_binding(sess, "Leaf"), 0)
+
+	// Exercise jtms_revoke_firing via `not Block` blocking a rule firing with 22 logical assertions -> 44 Leaves.
+	_, _ = forseti.session_insert_fact(sess, "Root", "r2", {i64(2)})
+	_, ferr3 := forseti.session_fire(sess)
+	testing.expect_value(t, ferr3, forseti.Session_Error.None)
+	testing.expect_value(t, _count_alive_binding(sess, "Mid"), 22)
+	testing.expect_value(t, _count_alive_binding(sess, "Leaf"), 44)
+
+	_, _ = forseti.session_insert_fact(sess, "Block", "b2", {i64(2)})
+	_, ferr4 := forseti.session_fire(sess)
+	testing.expect_value(t, ferr4, forseti.Session_Error.None)
+	testing.expect_value(t, _count_alive_binding(sess, "Mid"), 0)
+	testing.expect_value(t, _count_alive_binding(sess, "Leaf"), 0)
+}
+
+@(test)
+test_fast_mode_accum_inplace_modify_and_logical_recycling :: proc(t: ^testing.T) {
+	src := `module fast_accum_recycle version "1.0"
+schema Item { id: string, grp: string, val: i64 }
+schema Trigger { grp: string, mult: i64 }
+schema DerivedItem { grp: string, val: i64 }
+schema QueryGrp { grp: string }
+schema ExtAgg { grp: string, s: i64, c: i64, mn: i64, mx: i64 }
+schema DerAgg { grp: string, s: i64, c: i64 }
+source Item : Item at .items[?id]
+source Trigger : Trigger at .trig[?id]
+derived DerivedItem : DerivedItem at .d_items[?id]
+source QueryGrp : QueryGrp at .q[?id]
+derived ExtAgg : ExtAgg at .ext_agg[?id]
+derived DerAgg : DerAgg at .der_agg[?id]
+
+rule ext_stats {
+  when {
+    ?_q := QueryGrp(grp: ?g)
+    ?s := sum(?v) from Item(grp: ?g, val: ?v)
+    ?c := count(?v) from Item(grp: ?g, val: ?v)
+    ?mn := min(?v) from Item(grp: ?g, val: ?v)
+    ?mx := max(?v) from Item(grp: ?g, val: ?v)
+  }
+  then { assert ExtAgg(grp: ?g, s: ?s, c: ?c, mn: ?mn, mx: ?mx) }
+}
+
+rule make_derived {
+  when { ?_t := Trigger(grp: ?g, mult: ?m) }
+  then { assert DerivedItem(grp: ?g, val: ?m * 10) }
+}
+
+rule der_stats {
+  when {
+    ?_q := QueryGrp(grp: ?g)
+    ?s := sum(?v) from DerivedItem(grp: ?g, val: ?v)
+    ?c := count(?v) from DerivedItem(grp: ?g, val: ?v)
+  }
+  then { assert DerAgg(grp: ?g, s: ?s, c: ?c) }
+}`
+
+	rb := _compile_test_rb(t, src, "fast_accum_recycle.forseti")
+	defer forseti.rulebase_destroy(&rb)
+
+	sess := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(sess, &rb, forseti.Session_Config{provenance_mode = .Fast}), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(sess)
+		free(sess)
+	}
+
+	g1, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "g1")
+	g2, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "g2")
+	i1, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "i1")
+	i2, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "i2")
+	i3, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "i3")
+
+	_, _ = forseti.session_insert_fact(sess, "QueryGrp", "qg1", {g1})
+	_, _ = forseti.session_insert_fact(sess, "QueryGrp", "qg2", {g2})
+	_, _ = forseti.session_insert_fact(sess, "Item", "i1", {i1, g1, i64(10)})
+	_, _ = forseti.session_insert_fact(sess, "Item", "i2", {i2, g1, i64(30)})
+	_, _ = forseti.session_insert_fact(sess, "Item", "i3", {i3, g2, i64(5)})
+	_, _ = forseti.session_insert_fact(sess, "Trigger", "t1", {g1, i64(2)})
+
+	_, fe1 := forseti.session_fire(sess)
+	testing.expect_value(t, fe1, forseti.Session_Error.None)
+
+	find_ext :: proc(s: ^forseti.Session, grp: forseti.String_Id) -> (res: [4]i64, ok: bool) {
+		bidx, _ := forseti.session_find_binding(s, "ExtAgg")
+		for &f in s.facts {
+			if f.alive && f.binding_idx == bidx && f.fields[0] == forseti.Value(grp) {
+				return {f.fields[1].(i64), f.fields[2].(i64), f.fields[3].(i64), f.fields[4].(i64)}, true
+			}
+		}
+		return {}, false
+	}
+	find_der :: proc(s: ^forseti.Session, grp: forseti.String_Id) -> (s_val: i64, c_val: i64, ok: bool) {
+		bidx, _ := forseti.session_find_binding(s, "DerAgg")
+		for &f in s.facts {
+			if f.alive && f.binding_idx == bidx && f.fields[0] == forseti.Value(grp) {
+				return f.fields[1].(i64), f.fields[2].(i64), true
+			}
+		}
+		return 0, 0, false
+	}
+
+	e1, e1_ok := find_ext(sess, g1)
+	testing.expect(t, e1_ok)
+	testing.expect_value(t, e1, [4]i64{40, 2, 10, 30})
+	ds1, dc1, dok1 := find_der(sess, g1)
+	testing.expect(t, dok1)
+	testing.expect_value(t, ds1, i64(20))
+	testing.expect_value(t, dc1, i64(1))
+
+	// In-place modify value (keeping same group).
+	testing.expect_value(t, forseti.session_modify_fact_by_key(sess, "Item", "i2", {i2, g1, i64(50)}), forseti.Session_Error.None)
+	_, fe2 := forseti.session_fire(sess)
+	testing.expect_value(t, fe2, forseti.Session_Error.None)
+	e2, e2_ok := find_ext(sess, g1)
+	testing.expect(t, e2_ok)
+	testing.expect_value(t, e2, [4]i64{60, 2, 10, 50})
+
+	// In-place modify changing group key from g1 -> g2.
+	testing.expect_value(t, forseti.session_modify_fact_by_key(sess, "Item", "i2", {i2, g2, i64(15)}), forseti.Session_Error.None)
+	_, fe3 := forseti.session_fire(sess)
+	testing.expect_value(t, fe3, forseti.Session_Error.None)
+	e3a, _ := find_ext(sess, g1)
+	e3b, _ := find_ext(sess, g2)
+	testing.expect_value(t, e3a, [4]i64{10, 1, 10, 10})
+	testing.expect_value(t, e3b, [4]i64{20, 2, 5, 15})
+
+	// Logical Fact_Id recycling in stratum 0 before stratum 1 accumulator re-evaluates.
+	testing.expect_value(t, forseti.session_retract_fact_by_key(sess, "Trigger", "t1"), forseti.Session_Error.None)
+	_, _ = forseti.session_insert_fact(sess, "Trigger", "t2", {g1, i64(7)})
+	_, fe4 := forseti.session_fire(sess)
+	testing.expect_value(t, fe4, forseti.Session_Error.None)
+	ds4, dc4, dok4 := find_der(sess, g1)
+	testing.expect(t, dok4)
+	testing.expect_value(t, ds4, i64(70))
+	testing.expect_value(t, dc4, i64(1))
+}
+
+@(test)
+test_fast_mode_derived_modify_and_nil_field_commit :: proc(t: ^testing.T) {
+	src := `module fast_derived_commit version "1.0"
+schema Trig1 { score: i64 }
+schema Trig2 { score: i64 }
+schema Out { score: i64, note: string }
+schema ExtOut { id: string, score: i64, note: string }
+source Trig1 : Trig1 at .trig1[?id]
+source Trig2 : Trig2 at .trig2[?id]
+derived Out : Out at .out[?id]
+derived ExtOut : ExtOut at .ext_out[?id]
+
+rule from_t1 {
+  when { ?_t := Trig1(score: ?s) }
+  then { assert Out(score: ?s, note: "present") }
+}
+rule from_t2 {
+  when { ?_t := Trig2(score: ?s) }
+  then { assert Out(score: ?s, note: "replaced") }
+}`
+
+	rb := _compile_test_rb(t, src, "fast_derived_commit.forseti")
+	defer forseti.rulebase_destroy(&rb)
+
+	sb := new(forseti.Store_Bridge)
+	testing.expect_value(t, forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{mode = .Fast_Memory}), nil)
+	defer {
+		forseti.store_bridge_destroy(sb)
+		free(sb)
+	}
+
+	sess := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(sess, &rb, forseti.Session_Config{provenance_mode = .Fast}), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(sess)
+		free(sess)
+	}
+
+	// Moment 0: logical Out("Out:1") with note="present", plus ExtOut("e1") with note="initial".
+	e1_sid, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "e1")
+	init_note_sid, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "initial")
+	_, _ = forseti.session_insert_fact(sess, "Trig1", "t1", {i64(100)})
+	_, _ = forseti.session_insert_fact(sess, "ExtOut", "e1", {e1_sid, i64(10), init_note_sid}, .External)
+	_, fe0 := forseti.session_fire(sess)
+	testing.expect_value(t, fe0, forseti.Session_Error.None)
+
+	_, ce0 := forseti.session_commit_derived_and_audit(sess, sb)
+	testing.expect_value(t, ce0, nil)
+
+	// Verify Moment 0 Out("Out:1").note=="present" and ExtOut("e1").note=="initial" in xitdb.
+	m0, ok0, _ := forseti.store_bridge_moment_cursor(sb, -1)
+	testing.expect(t, ok0)
+	out0_c, has_out0, _ := forseti.store_resolve_path(m0, ".out")
+	testing.expect(t, has_out0)
+	rec0, has_r0, _ := forseti.store_lookup_record(out0_c, "Out:1")
+	testing.expect(t, has_r0)
+	note0, has_n0, _ := forseti.cursor_read_field_path(rec0, {"note"}, &sess.interner, .String)
+	testing.expect(t, has_n0)
+	testing.expect_value(t, forseti.interner_get(&sess.interner, note0.(forseti.String_Id)), "present")
+
+	ext0_c, has_ext0, _ := forseti.store_resolve_path(m0, ".ext_out")
+	testing.expect(t, has_ext0)
+	erec0, has_er0, _ := forseti.store_lookup_record(ext0_c, "e1")
+	testing.expect(t, has_er0)
+	enote0, has_en0, _ := forseti.cursor_read_field_path(erec0, {"note"}, &sess.interner, .String)
+	testing.expect(t, has_en0)
+	testing.expect_value(t, forseti.interner_get(&sess.interner, enote0.(forseti.String_Id)), "initial")
+
+	// Moment 1: recycle Out("Out:1") and in-place modify ExtOut("e1") clearing optional `note` to nil.
+	testing.expect_value(t, forseti.session_retract_fact_by_key(sess, "Trig1", "t1"), forseti.Session_Error.None)
+	_, _ = forseti.session_insert_fact(sess, "Trig2", "t2", {i64(250)})
+	testing.expect_value(t, forseti.session_modify_fact_by_key(sess, "ExtOut", "e1", {e1_sid, i64(999), nil}), forseti.Session_Error.None)
+	_, fe1 := forseti.session_fire(sess)
+	testing.expect_value(t, fe1, forseti.Session_Error.None)
+
+	_, ce1 := forseti.session_commit_derived_and_audit(sess, sb)
+	testing.expect_value(t, ce1, nil)
+
+	m1, ok1, _ := forseti.store_bridge_moment_cursor(sb, -1)
+	testing.expect(t, ok1)
+	out1_c, has_out1, _ := forseti.store_resolve_path(m1, ".out")
+	testing.expect(t, has_out1)
+	rec1, has_r1, _ := forseti.store_lookup_record(out1_c, "Out:1")
+	testing.expect(t, has_r1)
+	score1, has_s1, _ := forseti.cursor_read_field_path(rec1, {"score"}, &sess.interner, .I64)
+	testing.expect(t, has_s1)
+	testing.expect_value(t, score1, forseti.Value(i64(250)))
+	note1, has_n1, _ := forseti.cursor_read_field_path(rec1, {"note"}, &sess.interner, .String)
+	testing.expect(t, has_n1)
+	testing.expect_value(t, forseti.interner_get(&sess.interner, note1.(forseti.String_Id)), "replaced")
+
+	ext1_c, has_ext1, _ := forseti.store_resolve_path(m1, ".ext_out")
+	testing.expect(t, has_ext1)
+	erec1, has_er1, _ := forseti.store_lookup_record(ext1_c, "e1")
+	testing.expect(t, has_er1)
+	escore1, has_es1, _ := forseti.cursor_read_field_path(erec1, {"score"}, &sess.interner, .I64)
+	testing.expect(t, has_es1)
+	testing.expect_value(t, escore1, forseti.Value(i64(999)))
+	_, still_has_note, _ := forseti.cursor_read_field_path(erec1, {"note"}, &sess.interner, .String)
+	testing.expect(t, !still_has_note)
+}
+
+@(test)
+test_agenda_phase_and_stratum_heap_bounded_growth :: proc(t: ^testing.T) {
+	src := `module agenda_bounds version "1.0"
+schema Tick { id: string, v: i64 }
+schema Out { id: string }
+source Tick : Tick at .t[?id]
+derived Out : Out at .o[?id]
+
+rule p1 phase "p1" salience 10 {
+  when { ?_t := Tick(id: ?id, v: ?v); where ?v >= 1 }
+  then { assert Out(id: ?id) }
+}
+rule p2 phase "p2" salience 50 {
+  when { ?_t := Tick(id: ?id, v: ?v); where ?v >= 1 }
+  then { assert Out(id: ?id) }
+}`
+
+	rb := _compile_test_rb(t, src, "agenda_bounds.forseti")
+	defer forseti.rulebase_destroy(&rb)
+
+	// 1. Default unphased execution (len(phases) == 0) must not populate phase_heaps.
+	s_no_phase := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(s_no_phase, &rb, forseti.Session_Config{provenance_mode = .Fast}), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(s_no_phase)
+		free(s_no_phase)
+	}
+
+	kbuf: [24]u8 = ---
+	for i := 0; i < 500; i += 1 {
+		key := fmt.bprintf(kbuf[:], "n:%d", i)
+		ks, _ := forseti.intern_session_string(&rb.interner, &s_no_phase.interner, key)
+		_, _ = forseti.session_insert_fact(s_no_phase, "Tick", key, {ks, i64(1)})
+		_, _ = forseti.session_fire(s_no_phase)
+		_ = forseti.session_retract_fact_by_key(s_no_phase, "Tick", key)
+	}
+	testing.expect_value(t, len(s_no_phase.agenda.phase_heaps), 0)
+
+	// 2. Staging activations before session_set_phases preserves strict p1-before-p2 order,
+	//    and repeated churn keeps stratum_heaps and phase_heaps compacted.
+	s_phased := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(s_phased, &rb, forseti.Session_Config{provenance_mode = .Fast}), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(s_phased)
+		free(s_phased)
+	}
+
+	k0, _ := forseti.intern_session_string(&rb.interner, &s_phased.interner, "pre:0")
+	_, _ = forseti.session_insert_fact(s_phased, "Tick", "pre:0", {k0, i64(1)})
+	testing.expect_value(t, forseti.phreak_evaluate_linked_rules(s_phased), forseti.Session_Error.None)
+	testing.expect_value(t, forseti.session_set_phases(s_phased, {"p1", "p2"}), forseti.Session_Error.None)
+	fired0, fe0 := forseti.session_fire(s_phased)
+	testing.expect_value(t, fe0, forseti.Session_Error.None)
+	testing.expect_value(t, fired0, u64(2))
+	testing.expect_value(t, forseti.session_string(s_phased, s_phased.fired_trace[0]), "p1")
+	testing.expect_value(t, forseti.session_string(s_phased, s_phased.fired_trace[1]), "p2")
+	_ = forseti.session_retract_fact_by_key(s_phased, "Tick", "pre:0")
+
+	for i := 0; i < 500; i += 1 {
+		testing.expect_value(t, forseti.session_set_phases(s_phased, {"p1", "p2"}), forseti.Session_Error.None)
+		key := fmt.bprintf(kbuf[:], "p:%d", i)
+		ks, _ := forseti.intern_session_string(&rb.interner, &s_phased.interner, key)
+		_, _ = forseti.session_insert_fact(s_phased, "Tick", key, {ks, i64(1)})
+		_, _ = forseti.session_fire(s_phased)
+		_ = forseti.session_retract_fact_by_key(s_phased, "Tick", key)
+	}
+	sh_total := 0
+	for _, h in s_phased.agenda.stratum_heaps {
+		sh_total += len(h)
+	}
+	ph_total := 0
+	for _, h in s_phased.agenda.phase_heaps {
+		ph_total += len(h)
+	}
+	testing.expectf(t, sh_total <= 256, "expected bounded stratum_heaps <= 256, got %d", sh_total)
+	testing.expectf(t, ph_total <= 256, "expected bounded phase_heaps <= 256, got %d", ph_total)
+}
+
+@(test)
+test_prehashed_key_custom_20byte_hasher_id0 :: proc(t: ^testing.T) {
+	inv_sha1 :: proc(data: []u8, out_hash: []u8, _: rawptr) {
+		xitdb.sha1_sum_into(data, out_hash)
+		for i := 0; i < 20; i += 1 {
+			out_hash[i] = ~out_hash[i]
+		}
+	}
+
+	cfg := forseti.Xitdb_Config{
+		mode = .Safe_V2,
+		custom_hasher = xitdb.Hasher{
+			hash_proc = inv_sha1,
+			hash_size = 20,
+			id        = 0,
+		},
+	}
+
+	sb := new(forseti.Store_Bridge)
+	testing.expect_value(t, forseti.store_bridge_init_standalone(sb, cfg), nil)
+	defer {
+		forseti.store_bridge_destroy(sb)
+		free(sb)
+	}
+
+	pk_std := forseti.prehashed_key_make("k_std")
+	pk_pre := forseti.prehashed_key_make("k_pre")
+
+	Commit_Ctx :: struct {
+		pk_pre: ^forseti.Prehashed_Key,
+	}
+	cctx := Commit_Ctx{pk_pre = &pk_pre}
+	cb :: proc(m_wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+		ctx := (^Commit_Ctx)(user_data)
+		m := xitdb.write_hash_map_init(m_wc^) or_return
+		xitdb.hash_map_put(&m, "k_std", i64(111)) or_return
+		forseti.hash_map_put_prehashed(&m, ctx.pk_pre, i64(222)) or_return
+		return nil
+	}
+	_, cerr := forseti.store_bridge_commit_moment(sb, cb, &cctx)
+	testing.expect_value(t, cerr, nil)
+
+	mcur, mok, merr := forseti.store_bridge_moment_cursor(sb, -1)
+	testing.expect_value(t, merr, nil)
+	testing.expect(t, mok)
+
+	rm := xitdb.Read_Hash_Map{cursor = mcur}
+	c1, g1 := forseti.hash_map_get_cursor_prehashed(rm, &pk_std)
+	testing.expect_value(t, g1, nil)
+	rc1, ok1 := c1.?
+	testing.expect(t, ok1)
+	v1, r1 := xitdb.cursor_read_int(rc1)
+	testing.expect_value(t, r1, nil)
+	testing.expect_value(t, v1, i64(111))
+
+	c2, g2 := xitdb.hash_map_get_cursor(rm, "k_pre")
+	testing.expect_value(t, g2, nil)
+	rc2, ok2 := c2.?
+	testing.expect(t, ok2)
+	v2, r2 := xitdb.cursor_read_int(rc2)
+	testing.expect_value(t, r2, nil)
+	testing.expect_value(t, v2, i64(222))
+}
