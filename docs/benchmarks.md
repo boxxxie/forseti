@@ -1,6 +1,24 @@
+[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · [xitdb Modes](xitdb-fast-mode.md) · **Benchmarks** · [Agent Rules](../usage-rules.md)
+
 # Forseti Benchmarks & Scaling Architecture
 
-This report documents Forseti's longitudinal `hugi` / `obench` benchmark suite across `7` benchmark groups (`93` parameterized benchmarks total) scaling up to `1,000,000` rules, `10,000` working-memory facts, `10,000`-row JTMS cascades, and `5,000`-edge transitive closures, along with before/after measurements from the Phase 2 telemetry-guided optimization pass (`be8f675` -> `e9cd4fc`).
+This report documents Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) / [`obench`](https://github.com/zeybek/obench) benchmark suite across `7` benchmark groups (`93` parameterized benchmarks total) scaling up to `1,000,000` rules, `10,000` working-memory facts, `10,000`-row JTMS cascades, and `5,000`-edge transitive closures, along with before/after measurements from the Phase 2 telemetry-guided optimization pass (`be8f675` -> `e9cd4fc`).
+
+> [!IMPORTANT]
+> **TL;DR Scaling Scorecard (`e9cd4fc` on Ryzen 7 7735U, `-o:speed -microarch:native`):**
+> - **AOT Table (`10,000` rows):** `716.48 ps` (`2.0` CPU cycles, `0` allocs)
+> - **Lazy Cost Tree (`10,000` rows):** `28.80 ns` (`O(1)`, `0` allocs)
+> - **`1,000,000`-Rule Compile & Sparse Init:** `1.772 s` compile (`~556 B/rule`), `19.48 us` `session_init` (`O(1)`), `2.27 us` single-rule match
+> - **`@zero_alloc` PHREAK Hot Match (`.Fast`):** `1.32 ms` at `1,000` background facts (`12.14x` speedup, `0` allocs)
+> - **Incremental `xitdb` `Safe_V2` Diff (`10 / 10k`):** `3.56 us` (`2.81 M items/s`, `0` allocs)
+
+## Contents
+
+- [1. Testbed & Methodology](#1-testbed--methodology)
+- [2. `10` to `1,000,000` Rule Scaling (`--profile-1m` & `scale_rules`)](#2-10-to-1000000-rule-scaling---profile-1m--scale_rules)
+- [3. Longitudinal `hugi` Suite Results (`e9cd4fc`) & Phase 2 Deltas (`be8f675 -> e9cd4fc`)](#3-longitudinal-hugi-suite-results-e9cd4fc--phase-2-deltas-be8f675---e9cd4fc)
+- [4. Telemetry-Guided Optimizations Implemented](#4-telemetry-guided-optimizations-implemented)
+- [5. Reproduction Commands](#5-reproduction-commands)
 
 ---
 

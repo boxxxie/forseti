@@ -1,6 +1,19 @@
+[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · **DSL Reference** · [xitdb Modes](xitdb-fast-mode.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
+
 # Forseti DSL Reference
 
 **Forseti** unifies external `.forseti` policies (Tier 1), an internal Odin DSL via [`Ir_Builder`](../forseti/dsl_odin.odin) (Tier 2), and AOT Odin codegen via [`codegen_odin_module`](../forseti/codegen_odin.odin) (Tier 3) over one canonical `Rulebase_IR`. Every compiled module shares the same semantic validator, Tarjan SCC stratifier, and decision-table verifier.
+
+## Contents
+
+- [1. Architecture & Authoring Decision Tree](#1-architecture--authoring-decision-tree)
+- [2. Lexical Conventions](#2-lexical-conventions)
+- [3. Complete EBNF Grammar & Type System](#3-complete-ebnf-grammar--type-system)
+- [4. Decision Tables, Hit Policies & Static Verification](#4-decision-tables-hit-policies--static-verification)
+- [5. Rules, Reasoning, Stratification & Async Effects](#5-rules-reasoning-stratification--async-effects)
+- [6. Tier 2 Internal Odin DSL](#6-tier-2-internal-odin-dsl)
+- [7. Complete Diagnostic Catalog (`E1xxx–E4xxx`, `W2xxx–W3xxx`)](#7-complete-diagnostic-catalog-e1xxxe4xxx-w2xxxw3xxx)
+- [8. Complete `cmd/forseti` CLI Reference](#8-complete-cmdforseti-cli-reference)
 
 ---
 
@@ -148,7 +161,8 @@ query find_canon_by_domain(domain: string) {
 }
 ```
 
-> **Note:** `verify(no_overlap)` enforces pairwise disjointness even on `First` tables. When using a catch-all `- | -` fallback row under `hit First`, use `verify(complete, no_dead_rules)` or `hit Unique` with explicit disjoint cells (`< 100` / `false`).
+> [!NOTE]
+> `verify(no_overlap)` enforces pairwise disjointness even on `First` tables. When using a catch-all `- | -` fallback row under `hit First`, use `verify(complete, no_dead_rules)` or `hit Unique` with explicit disjoint cells (`< 100` / `false`).
 
 ---
 
