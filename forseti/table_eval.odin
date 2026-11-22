@@ -181,24 +181,14 @@ classify_value_atom :: proc(ct: ^Compiled_Table, col_idx: int, val: Value) -> in
 		for lo <= hi {
 			mid := lo + (hi - lo) / 2
 			a := dom.atoms[mid]
-			if a.lo_inc && a.hi_inc {
-				if fv < a.float_lo {
-					hi = mid - 1
-				} else if fv > a.float_hi {
-					lo = mid + 1
-				} else {
-					return mid
-				}
+			below := (mid > 0 || !math.is_inf(a.float_lo, -1)) && (fv < a.float_lo if a.lo_inc else fv <= a.float_lo)
+			above := (mid < len(dom.atoms) - 1 || !math.is_inf(a.float_hi, 1)) && (fv > a.float_hi if a.hi_inc else fv >= a.float_hi)
+			if below {
+				hi = mid - 1
+			} else if above {
+				lo = mid + 1
 			} else {
-				below := (mid > 0 || !math.is_inf(a.float_lo, -1)) && fv <= a.float_lo
-				above := (mid < len(dom.atoms) - 1 || !math.is_inf(a.float_hi, 1)) && fv >= a.float_hi
-				if below {
-					hi = mid - 1
-				} else if above {
-					lo = mid + 1
-				} else {
-					return mid
-				}
+				return mid
 			}
 		}
 		return -1

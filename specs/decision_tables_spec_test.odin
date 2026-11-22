@@ -184,8 +184,8 @@ table career_consolidation version "1.0" hit Priority {
   outputs { resolution: enum("escalate", "merge_role", "ignore") }
   rows {
     r_ignore:   false | -     || "ignore";
-    r_merge:    true  | true  || "merge_role";
-    r_escalate: true  | -     || "escalate";
+    r_merge:    true  | -     || "merge_role";
+    r_escalate: true  | true  || "escalate";
   }
 }
 
@@ -207,6 +207,7 @@ query eval_mdm_tables() {
 		table_eval_case("identity unique steward review", "identity_routing", {true, 0.65}, true, "steward_review", "r_review"),
 		table_eval_case("identity unique split", "identity_routing", {false, 0.99}, true, "keep_separate", "r_split"),
 		table_eval_case("career priority picks escalate over merge_role", "career_consolidation", {true, true}, true, "escalate", "r_escalate"),
+		table_eval_case("career priority picks merge_role when same_org without overlap", "career_consolidation", {true, false}, true, "merge_role", "r_merge"),
 		table_eval_case("career priority picks ignore when false/false", "career_consolidation", {false, false}, true, "ignore", "r_ignore"),
 	}
 

@@ -17,6 +17,7 @@ Verify_Ctx :: struct {
 	ir:              ^Rulebase_IR,
 	tbl:             Table_Def,
 	doms:            []Column_Domain,
+	eval_order:      []int,
 	row_masks:       [][][]u64, // [row][col][word]
 	row_has_unsat:   []bool,
 	reachable:       []bool,
@@ -51,7 +52,18 @@ is_single_hit_policy :: proc "contextless" (hp: Hit_Policy) -> bool {
 }
 
 @(private)
-verify_region_dfs :: proc(ctx: ^Verify_Ctx, row_idx: int, region: [][]u64) -> mem.Allocator_Error {
+_rows_overlap :: proc(row_masks: [][][]u64, col_count, a, b: int, box: [][]u64) -> bool {
+	for ci in 0 ..< col_count {
+		mask_and(box[ci], row_masks[a][ci], row_masks[b][ci])
+		if mask_is_empty(box[ci]) {
+			return false
+		}
+	}
+	return true
+}
+
+@(private)
+verify_region_dfs :: proc(ctx: ^Verify_Ctx, order_pos: int, region: [][]u64) -> mem.Allocator_Error {
 	if ctx.budget <= 0 {
 		ctx.budget_exceeded = true
 		return nil
@@ -59,7 +71,7 @@ verify_region_dfs :: proc(ctx: ^Verify_Ctx, row_idx: int, region: [][]u64) -> me
 	ctx.budget -= 1
 
 	col_count := len(ctx.doms)
-	if row_idx >= len(ctx.tbl.rows) {
+	if order_pos >= len(ctx.eval_order) {
 		if len(ctx.gap_witnesses) < 3 {
 			w := format_witness(ctx.ir, ctx.tbl, ctx.doms, region, ctx.alloc) or_return
 			append(&ctx.gap_witnesses, w)
@@ -67,8 +79,9 @@ verify_region_dfs :: proc(ctx: ^Verify_Ctx, row_idx: int, region: [][]u64) -> me
 		return nil
 	}
 
+	row_idx := ctx.eval_order[order_pos]
 	if ctx.row_has_unsat[row_idx] {
-		return verify_region_dfs(ctx, row_idx + 1, region)
+		return verify_region_dfs(ctx, order_pos + 1, region)
 	}
 
 	hit := make([][]u64, col_count, context.temp_allocator)
@@ -83,7 +96,7 @@ verify_region_dfs :: proc(ctx: ^Verify_Ctx, row_idx: int, region: [][]u64) -> me
 	}
 
 	if !all_nonempty {
-		return verify_region_dfs(ctx, row_idx + 1, region)
+		return verify_region_dfs(ctx, order_pos + 1, region)
 	}
 
 	ctx.reachable[row_idx] = true
@@ -105,7 +118,7 @@ verify_region_dfs :: proc(ctx: ^Verify_Ctx, row_idx: int, region: [][]u64) -> me
 				child[c] = region[c]
 			}
 		}
-		verify_region_dfs(ctx, row_idx + 1, child) or_return
+		verify_region_dfs(ctx, order_pos + 1, child) or_return
 		if ctx.budget_exceeded {
 			return nil
 		}
@@ -287,23 +300,82 @@ verify_decision_table :: proc(
 					}
 				}
 				if diff_cols <= 1 {
-					diag_add(
-						diags,
-						ir.line_starts,
-						.W3003,
-						.Warning,
-						tbl.rows[j].span,
-						fmt.tprintf(
-							"rows %q and %q in table %q produce identical outputs and are mergeable",
-							ir_string(ir, tbl.rows[i].id),
-							ir_string(ir, tbl.rows[j].id),
-							ir_string(ir, tbl.name),
-						),
-						"combine matching cells into a single rule",
-						telemetry,
-					) or_return
+					mergeable := true
+					#partial switch tbl.hit_policy {
+					case .Collect, .Collect_Sum, .Collect_Count:
+						if _rows_overlap(row_masks, col_count, i, j, overlap_box) {
+							mergeable = false
+						}
+					case .First, .Merge, .Reverse_Merge:
+						if j > i + 1 {
+							can_move_j_up := true
+							can_move_i_down := true
+							for k in i + 1 ..< j {
+								if row_has_unsat[k] || row_outputs_equal(ir, tbl.rows[i], tbl.rows[k]) {
+									continue
+								}
+								if _rows_overlap(row_masks, col_count, k, j, overlap_box) {
+									can_move_j_up = false
+								}
+								if _rows_overlap(row_masks, col_count, i, k, overlap_box) {
+									can_move_i_down = false
+								}
+								if !can_move_j_up && !can_move_i_down {
+									break
+								}
+							}
+							mergeable = can_move_j_up || can_move_i_down
+						}
+					}
+					if mergeable {
+						diag_add(
+							diags,
+							ir.line_starts,
+							.W3003,
+							.Warning,
+							tbl.rows[j].span,
+							fmt.tprintf(
+								"rows %q and %q in table %q produce identical outputs and are mergeable",
+								ir_string(ir, tbl.rows[i].id),
+								ir_string(ir, tbl.rows[j].id),
+								ir_string(ir, tbl.name),
+							),
+							"combine matching cells into a single rule",
+							telemetry,
+						) or_return
+					}
 				}
 			}
+		}
+	}
+
+	eval_order := make([]int, row_count, arena_alloc) or_return
+	for ri in 0 ..< row_count {
+		eval_order[ri] = ri
+	}
+	if tbl.hit_policy == .Priority && len(tbl.outputs) > 0 && tbl.outputs[0].type.kind == .Enum && int(tbl.outputs[0].type.ref_id) < len(ir.enums) {
+		edef := ir.enums[tbl.outputs[0].type.ref_id]
+		ranks := make([]int, row_count, arena_alloc) or_return
+		for ri in 0 ..< row_count {
+			ranks[ri] = len(edef.variants)
+			if sval, sok := extract_string_const(ir, tbl.rows[ri].outputs[0]); sok {
+				s := ir_string(ir, sval)
+				for v, vi in edef.variants {
+					if ir_string(ir, v) == s {
+						ranks[ri] = vi
+						break
+					}
+				}
+			}
+		}
+		for i := 1; i < row_count; i += 1 {
+			key := eval_order[i]
+			j := i - 1
+			for j >= 0 && ranks[eval_order[j]] > ranks[key] {
+				eval_order[j + 1] = eval_order[j]
+				j -= 1
+			}
+			eval_order[j + 1] = key
 		}
 	}
 
@@ -312,6 +384,7 @@ verify_decision_table :: proc(
 		ir              = ir,
 		tbl             = tbl,
 		doms            = doms,
+		eval_order      = eval_order,
 		row_masks       = row_masks,
 		row_has_unsat   = row_has_unsat,
 		reachable       = make([]bool, row_count, arena_alloc) or_return,
@@ -344,23 +417,17 @@ verify_decision_table :: proc(
 		) or_return
 	} else {
 		if is_single_hit_policy(tbl.hit_policy) {
-			for ri in 0 ..< row_count {
+			for pos in 0 ..< row_count {
+				ri := eval_order[pos]
 				if !ctx.reachable[ri] && !row_has_unsat[ri] {
 					shadow_b: strings.Builder
 					strings.builder_init(&shadow_b, context.temp_allocator)
-					for pi in 0 ..< ri {
+					for prev_pos in 0 ..< pos {
+						pi := eval_order[prev_pos]
 						if row_has_unsat[pi] {
 							continue
 						}
-						inter := true
-						for ci in 0 ..< col_count {
-							mask_and(overlap_box[ci], row_masks[pi][ci], row_masks[ri][ci])
-							if mask_is_empty(overlap_box[ci]) {
-								inter = false
-								break
-							}
-						}
-						if inter {
+						if _rows_overlap(row_masks, col_count, pi, ri, overlap_box) {
 							if strings.builder_len(shadow_b) > 0 {
 								strings.write_string(&shadow_b, ", ")
 							}
