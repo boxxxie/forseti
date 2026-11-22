@@ -70,6 +70,7 @@ rule emit_work {
 
 @(private = "file")
 _seed_provenance_session :: proc(n: int) -> (rb: ^forseti.Rulebase, s: ^forseti.Session, sample_leaf: forseti.Fact_Id) {
+	sample_leaf = forseti.INVALID_FACT
 	ok: bool
 	rb, ok = compile_benchmark_source(_BENCH_PROV_SRC, "bench_prov.forseti")
 	if !ok {
@@ -106,7 +107,7 @@ _seed_provenance_session :: proc(n: int) -> (rb: ^forseti.Rulebase, s: ^forseti.
 _bench_explain_dag_leaf :: proc(b: ^hugi.Bencher) {
 	n := max(hugi.param(b), 10)
 	rb, s, leaf_fid := _seed_provenance_session(n)
-	if rb == nil || s == nil || leaf_fid == forseti.INVALID_FACT {
+	if rb == nil || s == nil {
 		return
 	}
 	defer {
@@ -114,6 +115,9 @@ _bench_explain_dag_leaf :: proc(b: ^hugi.Bencher) {
 		free(s)
 		forseti.rulebase_destroy(rb)
 		free(rb)
+	}
+	if leaf_fid == forseti.INVALID_FACT {
+		return
 	}
 
 	hugi.set_items(b, 1)
@@ -150,7 +154,7 @@ _bench_impact_rule_blast_radius :: proc(b: ^hugi.Bencher) {
 _bench_semiring_why_provenance :: proc(b: ^hugi.Bencher) {
 	n := max(hugi.param(b), 10)
 	rb, s, leaf_fid := _seed_provenance_session(n)
-	if rb == nil || s == nil || leaf_fid == forseti.INVALID_FACT {
+	if rb == nil || s == nil {
 		return
 	}
 	defer {
@@ -158,6 +162,9 @@ _bench_semiring_why_provenance :: proc(b: ^hugi.Bencher) {
 		free(s)
 		forseti.rulebase_destroy(rb)
 		free(rb)
+	}
+	if leaf_fid == forseti.INVALID_FACT {
+		return
 	}
 
 	hugi.set_items(b, 1)
@@ -172,7 +179,7 @@ _bench_semiring_why_provenance :: proc(b: ^hugi.Bencher) {
 _bench_semiring_how_viterbi :: proc(b: ^hugi.Bencher) {
 	n := max(hugi.param(b), 10)
 	rb, s, leaf_fid := _seed_provenance_session(n)
-	if rb == nil || s == nil || leaf_fid == forseti.INVALID_FACT {
+	if rb == nil || s == nil {
 		return
 	}
 	defer {
@@ -180,6 +187,9 @@ _bench_semiring_how_viterbi :: proc(b: ^hugi.Bencher) {
 		free(s)
 		forseti.rulebase_destroy(rb)
 		free(rb)
+	}
+	if leaf_fid == forseti.INVALID_FACT {
+		return
 	}
 
 	hugi.set_items(b, 2)
@@ -281,9 +291,6 @@ _Effect_Worker_Slice :: struct {
 	jobs:    []forseti.Effect_Job,
 	results: []forseti.Effect_Result,
 	facts:   []forseti.Effect_Result_Fact,
-	ok_sid:  forseti.String_Id,
-	rb_int:  ^forseti.String_Interner,
-	s_int:   ^forseti.String_Interner,
 }
 
 @(private = "file")
@@ -366,7 +373,6 @@ _bench_async_effects_3phase :: proc(b: ^hugi.Bencher) {
 				jobs    = jobs[start:end],
 				results = results[start:end],
 				facts   = facts[start:end],
-				ok_sid  = ok_sid,
 			}
 			threads[w] = thread.create_and_start_with_data(&slices[w], _effect_worker_batch_proc)
 			active_workers += 1

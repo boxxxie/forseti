@@ -168,6 +168,10 @@ _beta_remove_from_bucket :: proc(
 				break
 			}
 		}
+		if len(bucket^) == 0 {
+			delete(bucket^)
+			delete_key(buckets, h)
+		}
 	}
 }
 

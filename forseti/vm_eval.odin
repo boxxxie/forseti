@@ -1044,10 +1044,16 @@ vm_eval :: proc(
 		return {}, .Unsupported_Expr
 	}
 	local_decide: [4]Decision_Result = ---
+	wide_decide: [16]Decision_Result = ---
 	eff_decide := decide_out
 	if eff_decide == nil && len(prog.decide_calls) > 0 {
-		local_decide = {}
-		eff_decide = local_decide[:]
+		if len(prog.decide_calls) <= len(local_decide) {
+			local_decide = {}
+			eff_decide = local_decide[:]
+		} else {
+			wide_decide = {}
+			eff_decide = wide_decide[:]
+		}
 	}
 	table := VM_DISPATCH_TABLE
 	vm := Vm_State{
