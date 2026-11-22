@@ -1,6 +1,15 @@
+[README](README.md) · [Docs Hub](docs/README.md) · [Odin API](docs/odin-api.md) · [DSL Reference](docs/dsl-reference.md) · [xitdb Modes](docs/xitdb-fast-mode.md) · [Benchmarks](docs/benchmarks.md) · **Agent Rules**
+
 # Forseti Usage Rules & Agent Guide
 
-Prescriptive rules, authoring decision trees, Odin embedding recipes, and pitfalls to avoid when writing `.forseti` policies, Odin integrations, and 4-layer `specs/` tests. For full grammar and diagnostic catalogs, see [`docs/dsl-reference.md`](docs/dsl-reference.md).
+Prescriptive rules, authoring decision trees, Odin embedding recipes, and pitfalls to avoid when writing `.forseti` policies, Odin integrations, and 4-layer `specs/` tests. For full grammar and diagnostic catalogs, see [`docs/dsl-reference.md`](docs/dsl-reference.md); for full Odin runtime details, see [`docs/odin-api.md`](docs/odin-api.md).
+
+## Contents
+
+- [Core Mental Model & Invariants](#core-mental-model--invariants)
+- [Decision Trees](#decision-trees)
+- [Canonical Recipes](#canonical-recipes)
+- [Top 12 Agent Pitfalls (DO vs. DO NOT)](#top-12-agent-pitfalls-do-vs-do-not)
 
 ---
 

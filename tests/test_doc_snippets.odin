@@ -127,8 +127,10 @@ _verify_doc_forseti_snippets :: proc(t: ^testing.T, doc_path: string) -> int {
 
 @(test)
 test_doc_forseti_snippets_compile_and_match_expected_diagnostics :: proc(t: ^testing.T) {
+	readme_cnt := _verify_doc_forseti_snippets(t, "README.md")
 	dsl_cnt := _verify_doc_forseti_snippets(t, "docs/dsl-reference.md")
 	usage_cnt := _verify_doc_forseti_snippets(t, "usage-rules.md")
+	testing.expect(t, readme_cnt >= 1)
 	testing.expect(t, dsl_cnt >= 1)
 	testing.expect(t, usage_cnt >= 1)
 }

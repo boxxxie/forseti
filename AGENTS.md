@@ -15,7 +15,7 @@ Guidelines and architecture invariants for coding agents developing **Forseti** 
 - **`cmd/forseti/`** — CLI (`check`, `verify-tables`, `ast`, `ir`, `gen`, `run`, `explain`, `impact`, `diff-replay`, `telemetry`, `export-dot` / `export-mermaid`).
 - **`benchmarks/`** — `hugi` + `obench` benchmark suite scaling `10` to `1,000,000` rules (`benchmarks/history.hugidb`).
 - **`examples/`** — CI-verified standalone runnable examples (`01_decision_tables` .. `07_telemetry_and_diff_replay`) demonstrating the `.forseti` DSL, internal Odin DSL, AOT codegen, `xitdb` integration, and telemetry.
-- **`docs/` & `usage-rules.md`** — Concise LLM quick reference ([`usage-rules.md`](usage-rules.md)), complete DSL reference ([`docs/dsl-reference.md`](docs/dsl-reference.md)), `xitdb` fast-mode tradeoffs ([`docs/xitdb-fast-mode.md`](docs/xitdb-fast-mode.md)), and scaling benchmarks ([`docs/benchmarks.md`](docs/benchmarks.md)).
+- **`docs/` & `usage-rules.md`** — Documentation hub ([`docs/README.md`](docs/README.md)), Odin embedding guide ([`docs/odin-api.md`](docs/odin-api.md)), concise LLM quick reference ([`usage-rules.md`](usage-rules.md)), complete DSL reference ([`docs/dsl-reference.md`](docs/dsl-reference.md)), `xitdb` fast-mode tradeoffs ([`docs/xitdb-fast-mode.md`](docs/xitdb-fast-mode.md)), and scaling benchmarks ([`docs/benchmarks.md`](docs/benchmarks.md)).
 - **`conductor/`** — Conductor project context and sequenced implementation tracks ([`conductor/tracks.md`](conductor/tracks.md)).
 - **`reference/`** — Gitignored upstream reference engines indexed in [`reference/README.md`](reference/README.md) (populate with `./scripts/clone_references.sh`).
 

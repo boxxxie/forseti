@@ -1,6 +1,8 @@
+[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · **xitdb Modes** · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
+
 # `xitdb` Safe Defaults vs. Opt-In Fast-Memory Profile
 
-Forseti uses `xitdb` as its universal append-only fact and audit-trail store. By default, every store runs in `Xitdb_Mode.Safe_V2` to preserve bit-for-bit wire compatibility, SHA-1 HAMT collision resistance, and CRC-64/XZ commit trailer verification. For trusted, non-durable in-memory scratch and matching workloads, `Xitdb_Mode.Fast_Memory` provides an explicit opt-in non-cryptographic HAMT hasher (`forseti.fast_hasher()`) with documented safety and compatibility boundaries while leaving `../xitdb` wire defaults untouched.
+Forseti uses [`xitdb`](https://github.com/boxxxie/odin-xitdb) as its universal append-only fact and audit-trail store. By default, every store runs in `Xitdb_Mode.Safe_V2` to preserve bit-for-bit wire compatibility, SHA-1 HAMT collision resistance, and CRC-64/XZ commit trailer verification. For trusted, non-durable in-memory scratch and matching workloads, `Xitdb_Mode.Fast_Memory` provides an explicit opt-in non-cryptographic HAMT hasher (`forseti.fast_hasher()`) with documented safety and compatibility boundaries while leaving upstream `xitdb` wire defaults untouched.
 
 ---
 
@@ -24,7 +26,7 @@ cfg := forseti.Xitdb_Config{
 	custom_hasher = forseti.fast_hasher(), // default when omitted under .Fast_Memory
 }
 ```
-Implemented inside Forseti ([`forseti/xitdb_bridge.odin`](../forseti/xitdb_bridge.odin), [`forseti/xitdb_key_hash.odin`](../forseti/xitdb_key_hash.odin)) without modifying upstream `../xitdb` defaults:
+Implemented inside Forseti ([`forseti/xitdb_bridge.odin`](../forseti/xitdb_bridge.odin), [`forseti/xitdb_key_hash.odin`](../forseti/xitdb_key_hash.odin)) without modifying upstream `xitdb` defaults:
 
 1. **128-bit Non-Cryptographic HAMT Hasher (`forseti.fast_hasher()`):**
    - Replaces SHA-1 per key with `forseti.fast_hash128_sum_into` (`u128` multiply-xor mixing), reducing HAMT KV pair digest overhead (`FAST_HASH_SIZE = 16`, distinct header `FAST_HASH_ID = 0x66683136` / `"fh16"`).
