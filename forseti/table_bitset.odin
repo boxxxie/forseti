@@ -114,10 +114,17 @@ eval_bitset_matrix :: proc(ct: ^Compiled_Table, input: Table_Input, res: ^Decisi
 
 			atom_idx := fetch_input_col(ct, input, ci, &fetched_mask, &cached_vals, &cached_atoms)
 			if atom_idx < 0 || atom_idx >= len(ct.bitset.col_atom_masks[ci]) {
+				any_live := false
 				for cw in 0 ..< chunk_len {
-					live[cw] = 0
+					live[cw] &= ~nw[chunk_start + cw]
+					if live[cw] != 0 {
+						any_live = true
+					}
 				}
-				break
+				if !any_live {
+					break
+				}
+				continue
 			}
 
 			amask := ct.bitset.col_atom_masks[ci][atom_idx]

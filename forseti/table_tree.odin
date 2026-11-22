@@ -258,6 +258,35 @@ apply_single_hit_winner :: proc(ct: ^Compiled_Table, orig_row: u32, res: ^Decisi
 }
 
 @(private)
+_eval_rows_fallback :: proc(
+	ct: ^Compiled_Table,
+	rows: []u32,
+	input: Table_Input,
+	fetched_mask: ^u64,
+	cached_vals: ^[64]Value,
+	cached_atoms: ^[64]int,
+	res: ^Decision_Result,
+) {
+	for orig_row in rows {
+		row_ok := true
+		for ci in 0 ..< ct.col_count {
+			if mask_is_full(ct.row_masks[orig_row][ci], len(ct.col_domains[ci].atoms)) {
+				continue
+			}
+			atom_idx := fetch_input_col(ct, input, ci, fetched_mask, cached_vals, cached_atoms)
+			if atom_idx < 0 || atom_idx >= len(ct.col_domains[ci].atoms) || (ct.row_masks[orig_row][ci][atom_idx / 64] & (u64(1) << u64(atom_idx % 64))) == 0 {
+				row_ok = false
+				break
+			}
+		}
+		if row_ok {
+			apply_single_hit_winner(ct, orig_row, res)
+			return
+		}
+	}
+}
+
+@(private)
 eval_decision_tree :: proc(ct: ^Compiled_Table, input: Table_Input, res: ^Decision_Result) {
 	if len(ct.dt_nodes) == 0 {
 		return
@@ -276,20 +305,7 @@ eval_decision_tree :: proc(ct: ^Compiled_Table, input: Table_Input, res: ^Decisi
 				break
 			}
 			if len(node.fallback_rows) > 0 {
-				for orig_row in node.fallback_rows {
-					row_ok := true
-					for ci in 0 ..< ct.col_count {
-						atom_idx := fetch_input_col(ct, input, ci, &fetched_mask, &cached_vals, &cached_atoms)
-						if atom_idx < 0 || (ct.row_masks[orig_row][ci][atom_idx / 64] & (u64(1) << u64(atom_idx % 64))) == 0 {
-							row_ok = false
-							break
-						}
-					}
-					if row_ok {
-						apply_single_hit_winner(ct, orig_row, res)
-						break
-					}
-				}
+				_eval_rows_fallback(ct, node.fallback_rows, input, &fetched_mask, &cached_vals, &cached_atoms, res)
 			}
 			break
 		}
@@ -297,6 +313,7 @@ eval_decision_tree :: proc(ct: ^Compiled_Table, input: Table_Input, res: ^Decisi
 		ci := int(node.col_idx)
 		atom_idx := fetch_input_col(ct, input, ci, &fetched_mask, &cached_vals, &cached_atoms)
 		if atom_idx < 0 || u32(atom_idx) >= node.edge_count {
+			_eval_rows_fallback(ct, ct.eval_order, input, &fetched_mask, &cached_vals, &cached_atoms, res)
 			break
 		}
 		node_idx = ct.dt_edges[node.edge_start + u32(atom_idx)].next_node

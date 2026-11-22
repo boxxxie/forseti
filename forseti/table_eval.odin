@@ -1,5 +1,6 @@
 package forseti
 
+import "core:math"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:slice"
@@ -172,28 +173,15 @@ classify_value_atom :: proc(ct: ^Compiled_Table, col_idx: int, val: Value) -> in
 
 	case .Float_Interval:
 		fv, ok := value_to_f64(val)
-		if !ok || len(dom.atoms) == 0 {
+		if !ok || math.is_nan(fv) || len(dom.atoms) == 0 {
 			return -1
-		}
-		if len(dom.atoms) == 1 {
-			return 0
 		}
 		lo := 0
 		hi := len(dom.atoms) - 1
 		for lo <= hi {
 			mid := lo + (hi - lo) / 2
 			a := dom.atoms[mid]
-			if mid == 0 {
-				if fv < a.float_hi {
-					return 0
-				}
-				lo = mid + 1
-			} else if mid == len(dom.atoms) - 1 {
-				if fv > a.float_lo {
-					return mid
-				}
-				hi = mid - 1
-			} else if a.lo_inc && a.hi_inc {
+			if a.lo_inc && a.hi_inc {
 				if fv < a.float_lo {
 					hi = mid - 1
 				} else if fv > a.float_hi {
@@ -202,9 +190,11 @@ classify_value_atom :: proc(ct: ^Compiled_Table, col_idx: int, val: Value) -> in
 					return mid
 				}
 			} else {
-				if fv <= a.float_lo {
+				below := (mid > 0 || !math.is_inf(a.float_lo, -1)) && fv <= a.float_lo
+				above := (mid < len(dom.atoms) - 1 || !math.is_inf(a.float_hi, 1)) && fv >= a.float_hi
+				if below {
 					hi = mid - 1
-				} else if fv >= a.float_hi {
+				} else if above {
 					lo = mid + 1
 				} else {
 					return mid
@@ -229,12 +219,14 @@ classify_value_atom :: proc(ct: ^Compiled_Table, col_idx: int, val: Value) -> in
 		return -1
 
 	case .String_Set:
-		if sid, ok := val.(String_Id); ok {
-			if sid != String_Id(INVALID_ID) {
-				for atom, ai in dom.atoms {
-					if !atom.is_other && atom.str_id == sid {
-						return ai
-					}
+		sid, ok := val.(String_Id)
+		if !ok || len(dom.atoms) == 0 {
+			return -1
+		}
+		if sid != String_Id(INVALID_ID) {
+			for atom, ai in dom.atoms {
+				if !atom.is_other && atom.str_id == sid {
+					return ai
 				}
 			}
 		}
@@ -252,20 +244,27 @@ fetch_input_col :: proc(
 	cached_vals: ^[64]Value,
 	cached_atoms: ^[64]int,
 ) -> int {
-	bit := u64(1) << u64(col_idx)
-	if (fetched_mask^ & bit) != 0 {
-		return cached_atoms[col_idx]
+	if col_idx < 0 || col_idx >= ct.col_count {
+		return -1
 	}
-	fetched_mask^ |= bit
+	if col_idx < 64 {
+		bit := u64(1) << u64(col_idx)
+		if (fetched_mask^ & bit) != 0 {
+			return cached_atoms[col_idx]
+		}
+		fetched_mask^ |= bit
+	}
 	v: Value
 	if input.getter != nil {
 		v = input.getter(col_idx, input.user_data)
 	} else if col_idx < len(input.values) {
 		v = input.values[col_idx]
 	}
-	cached_vals[col_idx] = v
 	atom_idx := classify_value_atom(ct, col_idx, v)
-	cached_atoms[col_idx] = atom_idx
+	if col_idx < 64 {
+		cached_vals[col_idx] = v
+		cached_atoms[col_idx] = atom_idx
+	}
 	return atom_idx
 }
 
@@ -320,8 +319,10 @@ compile_table :: proc(
 		compiled_table_destroy(&ct)
 	}
 	interner_init(&ct.interner, allocator) or_return
-	for s in ir.interner.strings[1:] {
-		_ = intern(&ct.interner, s) or_return
+	if len(ir.interner.strings) > 1 {
+		for s in ir.interner.strings[1:] {
+			_ = intern(&ct.interner, s) or_return
+		}
 	}
 
 	arena_alloc := vmem.arena_allocator(&ct.arena)
@@ -373,7 +374,7 @@ compile_table :: proc(
 	for ri in 0 ..< ct.row_count {
 		ct.eval_order[ri] = u32(ri)
 	}
-	if tbl.hit_policy == .Priority && ct.out_count > 0 && tbl.outputs[0].type.kind == .Enum {
+	if tbl.hit_policy == .Priority && ct.out_count > 0 && tbl.outputs[0].type.kind == .Enum && int(tbl.outputs[0].type.ref_id) < len(ir.enums) {
 		edef := ir.enums[tbl.outputs[0].type.ref_id]
 		ranks := make([]int, ct.row_count, context.temp_allocator)
 		for ri in 0 ..< ct.row_count {
@@ -421,6 +422,13 @@ compile_table :: proc(
 }
 
 decide :: proc(ct: ^Compiled_Table, input: Table_Input, extra_hits: []u32 = nil) -> Decision_Result {
+	if ct == nil {
+		return Decision_Result{
+			trace = Decision_Trace{
+				winning_row_idx = -1,
+			},
+		}
+	}
 	res := Decision_Result{
 		table_name    = ct.table_name,
 		table_version = ct.table_version,
@@ -430,8 +438,8 @@ decide :: proc(ct: ^Compiled_Table, input: Table_Input, extra_hits: []u32 = nil)
 			winning_row_idx = -1,
 		},
 	}
-	if ct == nil || ct.row_count == 0 {
-		if ct != nil && ct.hit_policy == .Collect_Count {
+	if ct.row_count == 0 {
+		if ct.hit_policy == .Collect_Count {
 			res.outputs[0] = i64(0)
 			res.output_set[0] = true
 		}

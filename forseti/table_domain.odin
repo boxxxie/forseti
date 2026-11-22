@@ -1,6 +1,7 @@
 package forseti
 
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:slice"
 import "core:strings"
@@ -302,6 +303,14 @@ build_column_domain :: proc(
 				collect_float_cuts(ir, row.cells[col_idx], &cuts)
 			}
 		}
+		valid_n := 0
+		for v in cuts {
+			if !math.is_nan(v) {
+				cuts[valid_n] = v
+				valid_n += 1
+			}
+		}
+		resize(&cuts, valid_n)
 		slice.sort(cuts[:])
 		uniq := make([dynamic]f64, 0, len(cuts), context.temp_allocator)
 		for v in cuts {
@@ -316,14 +325,26 @@ build_column_domain :: proc(
 		}
 		if len(uniq) == 0 {
 			dom.atoms = make([]Domain_Atom, 1, allocator) or_return
-			dom.atoms[0] = Domain_Atom{kind = .Float_Interval, float_rep = 0.0}
+			dom.atoms[0] = Domain_Atom{
+				kind      = .Float_Interval,
+				float_lo  = math.inf_f64(-1),
+				float_hi  = math.inf_f64(1),
+				float_rep = 0.0,
+			}
 		} else {
 			atoms := make([dynamic]Domain_Atom, 0, len(uniq) * 2 + 1, allocator) or_return
-			append(&atoms, Domain_Atom{
-				kind      = .Float_Interval,
-				float_hi  = uniq[0],
-				float_rep = uniq[0] - 1.0,
-			})
+			if !math.is_inf(uniq[0], -1) {
+				rep := uniq[0] - 1.0
+				if rep >= uniq[0] || math.is_inf(rep, 0) || math.is_nan(rep) {
+					rep = math.nextafter(uniq[0], math.inf_f64(-1))
+				}
+				append(&atoms, Domain_Atom{
+					kind      = .Float_Interval,
+					float_lo  = math.inf_f64(-1),
+					float_hi  = uniq[0],
+					float_rep = rep,
+				})
+			}
 			for i in 0 ..< len(uniq) {
 				v := uniq[i]
 				append(&atoms, Domain_Atom{
@@ -336,20 +357,34 @@ build_column_domain :: proc(
 				})
 				if i + 1 < len(uniq) {
 					nxt := uniq[i + 1]
-					append(&atoms, Domain_Atom{
-						kind      = .Float_Interval,
-						float_lo  = v,
-						float_hi  = nxt,
-						float_rep = 0.5 * (v + nxt),
-					})
+					if math.nextafter(v, math.inf_f64(1)) != nxt {
+						diff := nxt - v
+						mid := (v + 0.5 * diff) if (!math.is_inf(diff, 0) && !math.is_nan(diff)) else (0.5 * v + 0.5 * nxt)
+						if mid <= v || mid >= nxt || math.is_inf(mid, 0) || math.is_nan(mid) {
+							mid = math.nextafter(v, math.inf_f64(1))
+						}
+						append(&atoms, Domain_Atom{
+							kind      = .Float_Interval,
+							float_lo  = v,
+							float_hi  = nxt,
+							float_rep = mid,
+						})
+					}
 				}
 			}
 			last := uniq[len(uniq) - 1]
-			append(&atoms, Domain_Atom{
-				kind      = .Float_Interval,
-				float_lo  = last,
-				float_rep = last + 1.0,
-			})
+			if !math.is_inf(last, 1) {
+				rep := last + 1.0
+				if rep <= last || math.is_inf(rep, 0) || math.is_nan(rep) {
+					rep = math.nextafter(last, math.inf_f64(1))
+				}
+				append(&atoms, Domain_Atom{
+					kind      = .Float_Interval,
+					float_lo  = last,
+					float_hi  = math.inf_f64(1),
+					float_rep = rep,
+				})
+			}
 			dom.atoms = atoms[:]
 		}
 
@@ -376,6 +411,66 @@ build_column_domain :: proc(
 
 	dom.word_count = max((len(dom.atoms) + 63) / 64, 1)
 	return dom, nil
+}
+
+@(private)
+_float_interval_cmp :: proc "contextless" (atom: Domain_Atom, op: Binary_Op, c: f64) -> bool {
+	if math.is_nan(c) {
+		return false
+	}
+	if atom.lo_inc && atom.hi_inc {
+		p := atom.float_lo
+		#partial switch op {
+		case .Eq:  return p == c
+		case .Neq: return p != c
+		case .Lt:  return p < c
+		case .Lte: return p <= c
+		case .Gt:  return p > c
+		case .Gte: return p >= c
+		}
+		return false
+	}
+	a := atom.float_lo
+	b := atom.float_hi
+	#partial switch op {
+	case .Eq:
+		return false
+	case .Neq:
+		return true
+	case .Lt:
+		if b <= c {
+			return true
+		}
+		if c <= a {
+			return false
+		}
+		return atom.float_rep < c
+	case .Lte:
+		if b <= c {
+			return true
+		}
+		if c <= a {
+			return false
+		}
+		return atom.float_rep <= c
+	case .Gt:
+		if a >= c {
+			return true
+		}
+		if c >= b {
+			return false
+		}
+		return atom.float_rep > c
+	case .Gte:
+		if a >= c {
+			return true
+		}
+		if c >= b {
+			return false
+		}
+		return atom.float_rep >= c
+	}
+	return false
 }
 
 @(private)
@@ -496,36 +591,23 @@ atom_matches_expr :: proc(ir: ^Rulebase_IR, atom: Domain_Atom, eid: Expr_Id) -> 
 		return false, false
 
 	case .Float_Interval:
-		v := atom.float_rep
 		if cval, cok := extract_float_const(ir, eid); cok {
-			return v == cval, true
+			return _float_interval_cmp(atom, .Eq, cval), true
 		}
 		if e.kind == .Cell_Cmp {
 			if rhs, rok := extract_float_const(ir, e.rhs); rok {
-				#partial switch e.binary_op {
-				case .Eq:
-					return v == rhs, true
-				case .Neq:
-					return v != rhs, true
-				case .Lt:
-					return v < rhs, true
-				case .Lte:
-					return v <= rhs, true
-				case .Gt:
-					return v > rhs, true
-				case .Gte:
-					return v >= rhs, true
-				}
+				return _float_interval_cmp(atom, e.binary_op, rhs), true
 			}
 		}
 		if e.kind == .Range {
 			lo, lok := extract_float_const(ir, e.lhs)
 			hi, hok := extract_float_const(ir, e.rhs)
 			if lok && hok {
-				if e.inclusive {
-					return v >= lo && v <= hi, true
+				if math.is_nan(lo) || math.is_nan(hi) || lo > hi || (!e.inclusive && lo >= hi) {
+					return false, true
 				}
-				return v >= lo && v < hi, true
+				hi_op := Binary_Op.Lte if e.inclusive else Binary_Op.Lt
+				return _float_interval_cmp(atom, .Gte, lo) && _float_interval_cmp(atom, hi_op, hi), true
 			}
 		}
 		if e.kind == .In_List {

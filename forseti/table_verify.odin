@@ -410,7 +410,7 @@ verify_decision_table :: proc(
 
 	// Check unused declared output enum variants (W3005)
 	for out_col, oi in tbl.outputs {
-		if out_col.type.kind != .Enum {
+		if out_col.type.kind != .Enum || int(out_col.type.ref_id) >= len(ir.enums) {
 			continue
 		}
 		edef := ir.enums[out_col.type.ref_id]
@@ -418,7 +418,7 @@ verify_decision_table :: proc(
 			vstr := ir_string(ir, variant)
 			produced := false
 			for ri in 0 ..< row_count {
-				if row_has_unsat[ri] || (is_single_hit_policy(tbl.hit_policy) && !ctx.budget_exceeded && !ctx.reachable[ri]) {
+				if row_has_unsat[ri] || (is_single_hit_policy(tbl.hit_policy) && !ctx.budget_exceeded && !any_truncated && !ctx.reachable[ri]) {
 					continue
 				}
 				if sval, sok := extract_string_const(ir, tbl.rows[ri].outputs[oi]); sok {
