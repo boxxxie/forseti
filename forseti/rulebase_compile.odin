@@ -197,7 +197,9 @@ value_to_key :: proc "contextless" (v: Value) -> (k: Value_Key, ok: bool) {
 	case bool:      return Value_Key{kind = .Bool, raw = 1 if x else 0}, true
 	case i32:       return Value_Key{kind = .I64, raw = u64(i64(x))}, true
 	case i64:       return Value_Key{kind = .I64, raw = u64(x)}, true
-	case f64:       return Value_Key{kind = .F64, raw = transmute(u64)x}, true
+	case f64:
+		canonical := f64(0.0) if x == 0.0 else x
+		return Value_Key{kind = .F64, raw = transmute(u64)canonical}, true
 	case String_Id: return Value_Key{kind = .String, raw = u64(x)}, true
 	case Entity_Id: return Value_Key{kind = .Entity, raw = u64(x)}, true
 	case Time_Ns:   return Value_Key{kind = .Time, raw = u64(x)}, true
@@ -243,6 +245,7 @@ Rb_Build_Ctx :: struct {
 	ir:              ^Rulebase_IR,
 	rb:              ^Rulebase,
 	alloc:           mem.Allocator,
+	build_alloc:     mem.Allocator,
 	scratch_alloc:   mem.Allocator,
 	alpha_nodes:     [dynamic]_Alpha_Build_Node,
 	alpha_terminals: [dynamic]Alpha_Terminal,
@@ -463,7 +466,7 @@ _intern_scratch_program :: proc(ctx: ^Rb_Build_Ctx) -> u32 {
 	append(&ctx.programs, prog)
 	bucket, has_b := &ctx.prog_intern[h]
 	if !has_b {
-		ctx.prog_intern[h] = make([dynamic]u32, 0, 2, ctx.scratch_alloc)
+		ctx.prog_intern[h] = make([dynamic]u32, 0, 2, ctx.build_alloc)
 		bucket = &ctx.prog_intern[h]
 	}
 	append(bucket, pidx)
@@ -583,8 +586,8 @@ insert_alpha_chain :: proc(
 				next_id := new_alpha_node(ctx)
 				parent := &ctx.alpha_nodes[cur_id]
 				if parent.eq_buckets == nil {
-					m := new(map[Value_Key]u32, ctx.scratch_alloc)
-					m^ = make(map[Value_Key]u32, 4, ctx.scratch_alloc)
+					m := new(map[Value_Key]u32, ctx.build_alloc)
+					m^ = make(map[Value_Key]u32, 4, ctx.build_alloc)
 					parent.eq_buckets = m
 				}
 				parent.eq_buckets^[pr.eq_key] = next_id
@@ -608,7 +611,7 @@ insert_alpha_chain :: proc(
 				next_id := new_alpha_node(ctx)
 				re_list := &ctx.alpha_nodes[cur_id].range_edges
 				if re_list.allocator.procedure == nil {
-					re_list^ = make([dynamic]Alpha_Range_Edge, 0, 2, ctx.scratch_alloc)
+					re_list^ = make([dynamic]Alpha_Range_Edge, 0, 2, ctx.build_alloc)
 				}
 				append(re_list, Alpha_Range_Edge{
 					field_idx = pr.field_idx,
@@ -633,7 +636,7 @@ insert_alpha_chain :: proc(
 				next_id := new_alpha_node(ctx)
 				re_list := &ctx.alpha_nodes[cur_id].range_edges
 				if re_list.allocator.procedure == nil {
-					re_list^ = make([dynamic]Alpha_Range_Edge, 0, 2, ctx.scratch_alloc)
+					re_list^ = make([dynamic]Alpha_Range_Edge, 0, 2, ctx.build_alloc)
 				}
 				append(re_list, Alpha_Range_Edge{
 					field_idx = pr.field_idx,
@@ -735,7 +738,7 @@ compile_pattern_clause :: proc(
 		if const_v, c_ok := eval_literal_const_expr(ctx.ir, fb.expr); c_ok {
 			v := const_v
 			if ftype == .I32 {
-				if iv, is_i := v.(i64); is_i {
+				if iv, is_i := v.(i64); is_i && iv >= i64(min(i32)) && iv <= i64(max(i32)) {
 					v = i32(iv)
 				}
 			}
@@ -752,7 +755,7 @@ compile_pattern_clause :: proc(
 			if const_v, c_ok := eval_literal_const_expr(ctx.ir, ex.rhs); c_ok {
 				v := const_v
 				if ftype == .I32 {
-					if iv, is_i := v.(i64); is_i {
+					if iv, is_i := v.(i64); is_i && iv >= i64(min(i32)) && iv <= i64(max(i32)) {
 						v = i32(iv)
 					}
 				}
@@ -936,29 +939,63 @@ rulebase_compile :: proc(
 		ir              = ir,
 		rb              = &rb,
 		alloc           = a,
+		build_alloc     = allocator,
 		scratch_alloc   = sa,
-		alpha_nodes     = make([dynamic]_Alpha_Build_Node, 0, max(len(ir.rules), 16), sa),
-		alpha_terminals = make([dynamic]Alpha_Terminal, 0, max(len(ir.rules), 16), sa),
-		beta_nodes      = make([dynamic]Beta_Node_Def, 0, max(len(ir.rules) * 2, 16), sa),
-		subnetworks     = make([dynamic]Subnetwork_Def, 0, 8, sa),
-		segments        = make([dynamic]Segment_Def, 0, max(len(ir.rules), 16), sa),
-		zero_input_segs = make([dynamic]u32, 0, 4, sa),
-		programs        = make([dynamic]Bytecode_Program, 0, min(max(len(ir.rules), 16), 4096), sa),
-		prog_intern     = make(map[u64][dynamic]u32, 64, sa),
-		sub_head        = make([dynamic]i32, 0, max(len(ir.rules), 16), sa),
-		sub_counts      = make([dynamic]u32, 0, max(len(ir.rules), 16), sa),
-		sub_edges       = make([dynamic]_Sub_Edge, 0, max(len(ir.rules), 16), sa),
+		alpha_nodes     = make([dynamic]_Alpha_Build_Node, 0, max(len(ir.rules), 16), allocator),
+		alpha_terminals = make([dynamic]Alpha_Terminal, 0, max(len(ir.rules), 16), allocator),
+		beta_nodes      = make([dynamic]Beta_Node_Def, 0, max(len(ir.rules) * 2, 16), allocator),
+		subnetworks     = make([dynamic]Subnetwork_Def, 0, 8, allocator),
+		segments        = make([dynamic]Segment_Def, 0, max(len(ir.rules), 16), allocator),
+		zero_input_segs = make([dynamic]u32, 0, 4, allocator),
+		programs        = make([dynamic]Bytecode_Program, 0, min(max(len(ir.rules), 16), 4096), allocator),
+		prog_intern     = make(map[u64][dynamic]u32, 64, allocator),
+		sub_head        = make([dynamic]i32, 0, max(len(ir.rules), 16), allocator),
+		sub_counts      = make([dynamic]u32, 0, max(len(ir.rules), 16), allocator),
+		sub_edges       = make([dynamic]_Sub_Edge, 0, max(len(ir.rules), 16), allocator),
 		rule_stratum    = strat_plan.rule_stratum,
 		rule_recursive  = strat_plan.rule_recursive,
-		bound_vars      = make(map[String_Id]u16, 16, sa),
-		var_map         = make(map[String_Id]u8, 16, sa),
-		fact_descs      = make([dynamic]Vm_Fact_Slot_Desc, 0, 8, sa),
-		decide_descs    = make([dynamic]Vm_Decide_Slot_Desc, 0, 4, sa),
-		input_links     = make([dynamic]Segment_Input_Link, 0, 8, sa),
-		pat_preds       = make([dynamic]Alpha_Pred, 0, 8, sa),
-		pat_binds       = make([dynamic]Alpha_Field_Bind, 0, 8, sa),
-		pat_joins       = make([dynamic]Join_Key_Pair, 0, 4, sa),
-		pat_res         = make([dynamic]u32, 0, 2, sa),
+		bound_vars      = make(map[String_Id]u16, 16, allocator),
+		var_map         = make(map[String_Id]u8, 16, allocator),
+		fact_descs      = make([dynamic]Vm_Fact_Slot_Desc, 0, 8, allocator),
+		decide_descs    = make([dynamic]Vm_Decide_Slot_Desc, 0, 4, allocator),
+		input_links     = make([dynamic]Segment_Input_Link, 0, 8, allocator),
+		pat_preds       = make([dynamic]Alpha_Pred, 0, 8, allocator),
+		pat_binds       = make([dynamic]Alpha_Field_Bind, 0, 8, allocator),
+		pat_joins       = make([dynamic]Join_Key_Pair, 0, 4, allocator),
+		pat_res         = make([dynamic]u32, 0, 2, allocator),
+	}
+	defer {
+		for &bn in ctx.alpha_nodes {
+			if bn.eq_buckets != nil {
+				delete(bn.eq_buckets^)
+				free(bn.eq_buckets, allocator)
+			}
+			delete(bn.range_edges)
+			delete(bn.guard_edges)
+		}
+		for _, b in ctx.prog_intern {
+			delete(b)
+		}
+		delete(ctx.alpha_nodes)
+		delete(ctx.alpha_terminals)
+		delete(ctx.beta_nodes)
+		delete(ctx.subnetworks)
+		delete(ctx.segments)
+		delete(ctx.zero_input_segs)
+		delete(ctx.programs)
+		delete(ctx.prog_intern)
+		delete(ctx.sub_head)
+		delete(ctx.sub_counts)
+		delete(ctx.sub_edges)
+		delete(ctx.bound_vars)
+		delete(ctx.var_map)
+		delete(ctx.fact_descs)
+		delete(ctx.decide_descs)
+		delete(ctx.input_links)
+		delete(ctx.pat_preds)
+		delete(ctx.pat_binds)
+		delete(ctx.pat_joins)
+		delete(ctx.pat_res)
 	}
 	vm_compiler_init_scratch(&ctx.vm_compiler, sa)
 
@@ -1138,13 +1175,20 @@ rulebase_compile :: proc(
 		rb.stratum_wave_safe[st] = safe
 	}
 
-	rb.phase_max_stratum = make(map[String_Id]u32, 4, a)
+	phase_max := make(map[String_Id]u32, 4, allocator)
+	defer delete(phase_max)
 	for rc in rb.rules {
 		if rc.phase == EMPTY_STRING {
 			continue
 		}
-		if prev, has := rb.phase_max_stratum[rc.phase]; !has || rc.stratum > prev {
-			rb.phase_max_stratum[rc.phase] = rc.stratum
+		if prev, has := phase_max[rc.phase]; !has || rc.stratum > prev {
+			phase_max[rc.phase] = rc.stratum
+		}
+	}
+	if len(phase_max) > 0 {
+		rb.phase_max_stratum = make(map[String_Id]u32, len(phase_max), a)
+		for ph, st in phase_max {
+			rb.phase_max_stratum[ph] = st
 		}
 	}
 

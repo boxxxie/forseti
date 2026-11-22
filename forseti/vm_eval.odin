@@ -38,6 +38,9 @@ resolve_runtime_string :: proc "contextless" (
 	sess_int: ^String_Interner,
 	sid: String_Id,
 ) -> string {
+	if sid == String_Id(INVALID_ID) {
+		return ""
+	}
 	raw := u32(sid)
 	if (raw & RUNTIME_STRING_BIT) != 0 {
 		if sess_int == nil {
@@ -317,11 +320,17 @@ _vm_helper_decide_call :: proc "contextless" (vm: ^Vm_State, dst: u8, desc_idx: 
 		if int(a.col_idx) < len(vals) {
 			v := vm.regs[a.reg]
 			if sid, is_s := v.(String_Id); is_s {
-				txt := resolve_runtime_string(vm.interner, vm.sess_interner, sid)
-				if ct_sid, ok := ct.interner.lookup[txt]; ok {
-					v = ct_sid
-				} else {
+				if sid == String_Id(INVALID_ID) {
 					v = String_Id(INVALID_ID)
+				} else if sid == EMPTY_STRING {
+					v = EMPTY_STRING
+				} else {
+					txt := resolve_runtime_string(vm.interner, vm.sess_interner, sid)
+					if ct_sid, ok := ct.interner.lookup[txt]; ok {
+						v = ct_sid
+					} else {
+						v = String_Id(INVALID_ID)
+					}
 				}
 			}
 			vals[a.col_idx] = v

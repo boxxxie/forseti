@@ -127,7 +127,7 @@ session_query :: proc(
 			continue
 		}
 
-		// Match either populated Alpha_Memory OR scan live facts for `step.binding_idx` when wildcard/lazy.
+		// Match against the populated Alpha_Memory (created lazily on first matching fact).
 		am, has_am := s.alpha_mems[step.alpha_mem_id]
 		if !has_am || len(am.fact_ids) == 0 {
 			clear(&cur)

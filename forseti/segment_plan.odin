@@ -344,7 +344,7 @@ build_compiled_rule :: proc(
 	for cl in rdef.when_clauses {
 		#partial switch cl.kind {
 		case .Pattern:
-			if pat_idx >= MAX_RULE_PATTERNS || len(fact_descs^) > int(max(u8)) {
+			if pat_idx >= MAX_RULE_PATTERNS || len(fact_descs^) >= int(max(u8)) {
 				return {}, .Too_Many_Patterns
 			}
 			fslot := u8(len(fact_descs^))
@@ -432,7 +432,7 @@ build_compiled_rule :: proc(
 			})
 
 		case .Decide:
-			if len(decide_descs^) > int(max(u8)) {
+			if len(decide_descs^) >= int(max(u8)) {
 				return {}, .Vm_Compile_Failed
 			}
 			dslot := u8(len(decide_descs^))
@@ -741,6 +741,8 @@ build_compiled_query :: proc(
 			append(&steps, Query_Step{
 				guard_prog = i32(pidx),
 			})
+		case:
+			return {}, .Unsupported_Clause
 		}
 	}
 
