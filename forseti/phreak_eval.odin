@@ -161,19 +161,52 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 				#partial switch bn.kind {
 				case .Left_Input_Adapter:
 					clear(&frame.tokens)
+					if frame.node_idx == 0 && seg.pure_two_join {
+						sm, sm_ok := s.seg_mems[frame.seg_id]
+						join_bn := s.rb.beta_nodes[seg.node_start + 1]
+						if sm_ok && _beta_join_try_delta_two_way(s, sm, bn, join_bn, &frame.tokens) {
+							frame.is_delta = true
+							telemetry_count_add(s.telemetry, .Beta_Tuples_Staged, u64(len(frame.tokens)))
+							frame.node_idx = 2
+							continue
+						}
+					}
+
 					am, am_ok := s.alpha_mems[bn.alpha_mem_id]
 					sm, sm_ok := s.seg_mems[frame.seg_id]
-					start_idx := 0
-					if am_ok && sm_ok && seg.pure_single_lia &&
-					   sm.last_lia_epoch == am.retract_epoch && sm.last_lia_len <= len(am.fact_ids) {
-						start_idx = sm.last_lia_len
-						frame.is_delta = true
-					} else {
-						frame.is_delta = false
+					if am_ok && sm_ok && seg.delta_outer_ok && !sm.subnetwork_dirty {
+						ins_buf: [MAX_ALPHA_DELTA_LOG]Fact_Id = ---
+						can_delta, _, delta_ids, _, _ := _alpha_collect_delta_window(
+							s,
+							am,
+							sm.last_lia_epoch,
+							sm.last_lia_insert_epoch,
+							sm.last_lia_len,
+							&ins_buf,
+						)
+						if can_delta {
+							frame.is_delta = true
+							for fid in delta_ids {
+								f := &s.facts[fid]
+								if !f.alive {
+									continue
+								}
+								if tok, ok := _token_extend_fact(s, Beta_Token{fact_sig_hash = 0x544f4b00}, f, bn.field_binds); ok {
+									append(&frame.tokens, tok)
+								}
+							}
+							sm.last_lia_epoch = am.retract_epoch
+							sm.last_lia_insert_epoch = am.insert_epoch
+							sm.last_lia_len = len(am.fact_ids)
+							telemetry_count_add(s.telemetry, .Beta_Tuples_Staged, u64(len(frame.tokens)))
+							frame.node_idx += 1
+							continue
+						}
 					}
-					if am_ok && start_idx < len(am.fact_ids) {
-						for idx := start_idx; idx < len(am.fact_ids); idx += 1 {
-							fid := am.fact_ids[idx]
+
+					frame.is_delta = false
+					if am_ok {
+						for fid in am.fact_ids {
 							f := &s.facts[fid]
 							if !f.alive {
 								continue
@@ -185,10 +218,14 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 					}
 					if am_ok && sm_ok {
 						sm.last_lia_epoch = am.retract_epoch
+						sm.last_lia_insert_epoch = am.insert_epoch
 						sm.last_lia_len = len(am.fact_ids)
+						sm.subnetwork_dirty = false
 					} else if sm_ok {
 						sm.last_lia_epoch = max(u64)
+						sm.last_lia_insert_epoch = 0
 						sm.last_lia_len = 0
+						sm.subnetwork_dirty = false
 					}
 					telemetry_count_add(s.telemetry, .Beta_Tuples_Staged, u64(len(frame.tokens)))
 					frame.node_idx += 1

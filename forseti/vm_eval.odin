@@ -22,7 +22,7 @@ Vm_State :: struct {
 	field_refs:     []Field_Access_Desc,
 	decide_calls:   []Decide_Call_Desc,
 	ranges:         []Range_Desc,
-	decide_results: [16]Decision_Result,
+	decide_results: []Decision_Result,
 	tables:         []Compiled_Table,
 	interner:       ^String_Interner,
 	sess_interner:  ^String_Interner,
@@ -1043,35 +1043,31 @@ vm_eval :: proc(
 	if prog == nil || len(prog.code) == 0 {
 		return {}, .Unsupported_Expr
 	}
+	local_decide: [4]Decision_Result = ---
+	eff_decide := decide_out
+	if eff_decide == nil && len(prog.decide_calls) > 0 {
+		local_decide = {}
+		eff_decide = local_decide[:]
+	}
 	table := VM_DISPATCH_TABLE
 	vm := Vm_State{
-		vars          = vars,
-		fact_slots    = fact_slots,
-		consts        = prog.consts,
-		field_refs    = prog.field_refs,
-		decide_calls  = prog.decide_calls,
-		ranges        = prog.ranges,
-		tables        = tables,
-		interner      = interner,
-		sess_interner = sess_interner,
-		dispatch      = &table,
-		saved_ctx     = context,
-		steps_left    = step_limit,
-	}
-	for d, di in decide_out {
-		if di < len(vm.decide_results) {
-			vm.decide_results[di] = d
-		}
+		vars           = vars,
+		fact_slots     = fact_slots,
+		consts         = prog.consts,
+		field_refs     = prog.field_refs,
+		decide_calls   = prog.decide_calls,
+		ranges         = prog.ranges,
+		decide_results = eff_decide,
+		tables         = tables,
+		interner       = interner,
+		sess_interner  = sess_interner,
+		dispatch       = &table,
+		saved_ctx      = context,
+		steps_left     = step_limit,
 	}
 	vm.dispatch[prog.code[0].op](&vm, raw_data(prog.code))
 	if vm.err != .None {
 		return {}, vm.err
-	}
-	if decide_out != nil {
-		n := min(len(decide_out), len(vm.decide_results))
-		for i := 0; i < n; i += 1 {
-			decide_out[i] = vm.decide_results[i]
-		}
 	}
 	return vm.result, .None
 }

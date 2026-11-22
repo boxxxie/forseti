@@ -666,6 +666,19 @@ session_sync_and_fire :: proc(
 	delta_syncer_sync(syncer, bridge, &sr) or_return
 	defer sync_result_destroy(&sr)
 
+	if len(sr.deltas) > 64 {
+		need_cap := len(s.facts) + len(sr.deltas)
+		if cap(s.facts) < need_cap {
+			reserve(&s.facts, need_cap)
+		}
+		if len(s.facts_by_key) + len(sr.deltas) > cap(s.facts_by_key) {
+			reserve(&s.facts_by_key, len(s.facts_by_key) + len(sr.deltas))
+		}
+		if len(s.fact_alpha_mems) + len(sr.deltas) > cap(s.fact_alpha_mems) {
+			reserve(&s.fact_alpha_mems, len(s.fact_alpha_mems) + len(sr.deltas))
+		}
+	}
+
 	// Map watched dot paths -> Rulebase source Binding_Def indices cleanly.
 	path_buf: [256]u8 = ---
 	for d in sr.deltas {

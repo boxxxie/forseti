@@ -650,6 +650,7 @@ impact :: proc(
 	direct_set := make(map[Fact_Id]bool, 8, context.temp_allocator)
 	direct_list := make([dynamic]Fact_Id, 0, 8, allocator)
 	deriv_list := make([dynamic]Derivation_Id, 0, 8, allocator)
+	deriv_set := make(map[Derivation_Id]bool, 16, context.temp_allocator)
 
 	if rderivs, has := s.provenance.rule_derivs[rule_id]; has {
 		for did in rderivs {
@@ -657,7 +658,10 @@ impact :: proc(
 			if !d.alive {
 				continue
 			}
-			append(&deriv_list, did)
+			if !(did in deriv_set) {
+				deriv_set[did] = true
+				append(&deriv_list, did)
+			}
 			if d.derived_fact != INVALID_FACT && int(d.derived_fact) < len(s.facts) && s.facts[d.derived_fact].alive {
 				if !(d.derived_fact in direct_set) {
 					direct_set[d.derived_fact] = true
@@ -688,17 +692,9 @@ impact :: proc(
 						trans_set[nxt] = true
 						append(&trans_list, nxt)
 					}
-					if j.deriv_id != INVALID_DERIVATION {
-						already := false
-						for pd in deriv_list {
-							if pd == j.deriv_id {
-								already = true
-								break
-							}
-						}
-						if !already {
-							append(&deriv_list, j.deriv_id)
-						}
+					if j.deriv_id != INVALID_DERIVATION && !(j.deriv_id in deriv_set) {
+						deriv_set[j.deriv_id] = true
+						append(&deriv_list, j.deriv_id)
 					}
 				}
 			}

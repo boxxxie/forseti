@@ -35,30 +35,47 @@ Fact_Lookup_Key :: struct {
 	key:         String_Id,
 }
 
+MAX_ALPHA_DELTA_LOG :: 64
+
 Alpha_Memory :: struct {
-	id:            u32,
-	fact_ids:      [dynamic]Fact_Id,
-	fact_pos:      map[Fact_Id]int,
-	version:       u64,
-	retract_epoch: u64,
+	id:              u32,
+	fact_ids:        [dynamic]Fact_Id,
+	fact_pos:        map[Fact_Id]int,
+	version:         u64,
+	insert_epoch:    u64,
+	retract_epoch:   u64,
+	recent_inserts:  [MAX_ALPHA_DELTA_LOG]Fact_Id,
+	recent_retracts: [MAX_ALPHA_DELTA_LOG]Fact_Id,
 }
 
 Segment_Memory :: struct {
-	seg_id:         u32,
-	linked_mask:    u64,
-	was_linked:     bool,
-	dirty:          bool,
-	last_lia_epoch: u64,
-	last_lia_len:   int,
+	seg_id:                u32,
+	linked_mask:           u64,
+	was_linked:            bool,
+	dirty:                 bool,
+	subnetwork_dirty:      bool,
+	last_lia_epoch:        u64,
+	last_lia_insert_epoch: u64,
+	last_lia_len:          int,
 }
 
 Beta_Memory :: struct {
 	node_id:             u32,
 	right_alpha_version: u64,
 	right_retract_epoch: u64,
+	right_insert_epoch:  u64,
 	indexed_count:       int,
 	right_facts:         [dynamic]Fact_Id,
+	right_fact_pos:      map[Fact_Id]int,
 	right_buckets:       map[u64][dynamic]Fact_Id,
+	right_bucket_hash:   map[Fact_Id]u64,
+	left_initialized:    bool,
+	left_alpha_version:  u64,
+	left_retract_epoch:  u64,
+	left_insert_epoch:   u64,
+	left_indexed_count:  int,
+	left_buckets:        map[u64][dynamic]Fact_Id,
+	left_bucket_hash:    map[Fact_Id]u64,
 }
 
 Session_Config :: struct {
@@ -243,7 +260,14 @@ session_destroy :: proc(s: ^Session) {
 			delete(bucket)
 		}
 		delete(bm.right_buckets)
+		delete(bm.right_bucket_hash)
+		delete(bm.right_fact_pos)
 		delete(bm.right_facts)
+		for _, bucket in bm.left_buckets {
+			delete(bucket)
+		}
+		delete(bm.left_buckets)
+		delete(bm.left_bucket_hash)
 		free(bm, s.allocator)
 	}
 	delete(s.beta_mems)

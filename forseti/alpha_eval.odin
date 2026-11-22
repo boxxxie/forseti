@@ -89,6 +89,8 @@ _activate_alpha_terminal :: proc(s: ^Session, fid: Fact_Id, tid: u32) {
 	idx := len(am.fact_ids)
 	append(&am.fact_ids, fid)
 	am.fact_pos[fid] = idx
+	am.recent_inserts[am.insert_epoch % MAX_ALPHA_DELTA_LOG] = fid
+	am.insert_epoch += 1
 	am.version += 1
 
 	list, had_list := &s.fact_alpha_mems[fid]
@@ -107,6 +109,7 @@ _activate_alpha_terminal :: proc(s: ^Session, fid: Fact_Id, tid: u32) {
 		sdef := s.rb.segments[sub.seg_id]
 		if sub.notify_only {
 			if sm.was_linked {
+				sm.subnetwork_dirty = true
 				_mark_segment_dirty(s, sm)
 			}
 			continue
@@ -209,6 +212,7 @@ alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
 		}
 		pop(&am.fact_ids)
 		delete_key(&am.fact_pos, fid)
+		am.recent_retracts[am.retract_epoch % MAX_ALPHA_DELTA_LOG] = fid
 		am.version += 1
 		am.retract_epoch += 1
 
@@ -221,6 +225,7 @@ alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
 			}
 			if sub.notify_only {
 				if sm.was_linked {
+					sm.subnetwork_dirty = true
 					_mark_segment_dirty(s, sm)
 				}
 				continue
@@ -229,7 +234,9 @@ alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
 				was := sm.was_linked
 				sm.linked_mask &= ~sub.input_bit
 				sm.was_linked = false
+				sm.subnetwork_dirty = false
 				sm.last_lia_epoch = max(u64)
+				sm.last_lia_insert_epoch = 0
 				sm.last_lia_len = 0
 				if was {
 					sdef := s.rb.segments[sub.seg_id]

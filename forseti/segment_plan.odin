@@ -49,6 +49,8 @@ Segment_Def :: struct {
 	node_count:      u32,
 	rule_id:         u32,
 	pure_single_lia: bool,
+	delta_outer_ok:  bool,
+	pure_two_join:   bool,
 }
 
 @(private)
@@ -525,25 +527,65 @@ build_compiled_rule :: proc(
 		append(&ctx.zero_input_segs, seg_id)
 	}
 	is_pure_lia := pat_idx == 1
+	is_delta_outer := pat_idx == 1
 	if is_pure_lia {
 		for ni := node_start; ni < u32(len(ctx.beta_nodes)); ni += 1 {
 			k := ctx.beta_nodes[ni].kind
 			if k == .Join || k == .Not || k == .Exists || k == .Accum {
 				is_pure_lia = false
-				break
+				if k == .Join || k == .Accum {
+					is_delta_outer = false
+					break
+				}
 			}
 		}
 	}
+
+	is_pure_two_join := false
+	node_count := u32(len(ctx.beta_nodes)) - node_start
+	if pat_idx == 2 && node_count >= 3 {
+		bn0 := ctx.beta_nodes[node_start]
+		bn1 := ctx.beta_nodes[node_start + 1]
+		if bn0.kind == .Left_Input_Adapter && bn1.kind == .Join && len(bn1.join_keys) > 0 {
+			all_ok := true
+			for jk in bn1.join_keys {
+				found_bind := false
+				for fb in bn0.field_binds {
+					if fb.var_slot == jk.left_var_slot {
+						found_bind = true
+						break
+					}
+				}
+				if !found_bind {
+					all_ok = false
+					break
+				}
+			}
+			if all_ok {
+				for ni := node_start + 2; ni < u32(len(ctx.beta_nodes)); ni += 1 {
+					k := ctx.beta_nodes[ni].kind
+					if k == .Join || k == .Not || k == .Exists || k == .Accum {
+						all_ok = false
+						break
+					}
+				}
+			}
+			is_pure_two_join = all_ok
+		}
+	}
+
 	links := make([]Segment_Input_Link, len(input_links^), ctx.alloc)
 	copy(links, input_links^[:])
 	append(&ctx.segments, Segment_Def{
 		id              = seg_id,
 		node_start      = node_start,
-		node_count      = u32(len(ctx.beta_nodes)) - node_start,
+		node_count      = node_count,
 		inputs          = links,
 		all_linked_mask = all_mask,
 		rule_id         = rule_id,
 		pure_single_lia = is_pure_lia,
+		delta_outer_ok  = is_delta_outer,
+		pure_two_join   = is_pure_two_join,
 	})
 
 	seg_ids := make([]u32, 1, ctx.alloc)
