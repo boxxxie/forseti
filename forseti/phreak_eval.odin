@@ -318,7 +318,7 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 						for wi := 0; wi < len(frame.tokens); wi += 1 {
 							tok := frame.tokens[wi]
 							base := len(s.eval_decide_pool)
-							resize(&s.eval_decide_pool, base + need)
+							_grow_resize(&s.eval_decide_pool, base + need)
 							dec_slice := s.eval_decide_pool[base : base + need]
 							if tok.decide_count > 0 {
 								src_n := min(int(tok.decide_count), need)

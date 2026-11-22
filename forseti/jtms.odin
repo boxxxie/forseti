@@ -226,10 +226,10 @@ _jtms_recycle_dead_justs :: proc(s: ^Session, dead_ids: []u32) {
 	j_state := &s.jtms
 	need := len(s.facts)
 	if len(j_state.scratch_sweep_gen) < need {
-		resize(&j_state.scratch_sweep_gen, need)
+		_grow_resize(&j_state.scratch_sweep_gen, need)
 	}
 	if len(j_state.scratch_sweep_fact_gen) < need {
-		resize(&j_state.scratch_sweep_fact_gen, need)
+		_grow_resize(&j_state.scratch_sweep_fact_gen, need)
 	}
 	j_state.sweep_gen += 1
 	if j_state.sweep_gen == 0 {
@@ -737,16 +737,16 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 	if top_level {
 		j_state := &s.jtms
 		if len(j_state.scratch_cone_gen) < need {
-			resize(&j_state.scratch_cone_gen, need)
+			_grow_resize(&j_state.scratch_cone_gen, need)
 		}
 		if len(j_state.scratch_ground_gen) < need {
-			resize(&j_state.scratch_ground_gen, need)
+			_grow_resize(&j_state.scratch_ground_gen, need)
 		}
 		if len(j_state.scratch_best_h) < need {
-			resize(&j_state.scratch_best_h, need)
+			_grow_resize(&j_state.scratch_best_h, need)
 		}
 		if len(j_state.scratch_best_deriv) < need {
-			resize(&j_state.scratch_best_deriv, need)
+			_grow_resize(&j_state.scratch_best_deriv, need)
 		}
 		j_state.scratch_gen += 1
 		if j_state.scratch_gen == 0 {

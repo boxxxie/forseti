@@ -16,7 +16,8 @@ Activation :: struct {
 	salience:     i32,
 	gen:          u32,
 	rule_q_idx:   u32,
-	decide_block: i32,
+	decide_start: u32,
+	decide_count: u8,
 	token:        Beta_Token,
 	alive:        bool,
 }
@@ -58,8 +59,8 @@ Agenda :: struct {
 	fact_act_head:      [dynamic]i32,
 	fact_act_edges:     [dynamic]Fact_Act_Edge,
 	free_fact_act_edges:[dynamic]i32,
-	decide_blocks:      [dynamic][dynamic]Decision_Result,
-	free_decide_blocks: [dynamic]i32,
+	decide_pool:        [dynamic]Decision_Result,
+	live_decide_elems:  int,
 	phases:             [dynamic]String_Id,
 	allocator:          mem.Allocator,
 }
@@ -80,18 +81,13 @@ agenda_init :: proc(ag: ^Agenda, allocator: mem.Allocator) {
 	ag.fact_act_head[0] = -1
 	ag.fact_act_edges = make([dynamic]Fact_Act_Edge, 0, 16, allocator)
 	ag.free_fact_act_edges = make([dynamic]i32, 0, 16, allocator)
-	ag.decide_blocks = make([dynamic][dynamic]Decision_Result, 0, 8, allocator)
-	ag.free_decide_blocks = make([dynamic]i32, 0, 8, allocator)
+	ag.decide_pool = make([dynamic]Decision_Result, 0, 16, allocator)
 	ag.phases = make([dynamic]String_Id, 0, 8, allocator)
 }
 
 @(private)
 agenda_destroy :: proc(ag: ^Agenda) {
-	for blk in ag.decide_blocks {
-		delete(blk)
-	}
-	delete(ag.decide_blocks)
-	delete(ag.free_decide_blocks)
+	delete(ag.decide_pool)
 	delete(ag.free_fact_act_edges)
 	delete(ag.fact_act_edges)
 	delete(ag.fact_act_head)
@@ -211,9 +207,14 @@ _agenda_kill_slot :: proc(ag: ^Agenda, slot_idx: u32) {
 		}
 	}
 	delete_key(&ag.queued, ak)
-	if slot.decide_block >= 0 {
-		append(&ag.free_decide_blocks, slot.decide_block)
-		slot.decide_block = -1
+	if slot.decide_count > 0 {
+		ag.live_decide_elems -= int(slot.decide_count)
+		slot.decide_count = 0
+		slot.decide_start = 0
+		if ag.live_decide_elems <= 0 {
+			ag.live_decide_elems = 0
+			clear(&ag.decide_pool)
+		}
 	}
 	append(&ag.free_slots, slot_idx)
 }
@@ -342,18 +343,33 @@ agenda_stage_activation :: proc(s: ^Session, rule_id: u32, tok: ^Beta_Token) {
 	rule_q_idx := u32(len(rq^))
 	append(rq, ak)
 
-	dec_blk := i32(-1)
+	dec_start := u32(0)
+	dec_cnt := u8(0)
 	if tok.decide_count > 0 {
 		src := _token_decide_slice(s, tok)
 		if len(src) > 0 {
-			if len(ag.free_decide_blocks) > 0 {
-				dec_blk = pop(&ag.free_decide_blocks)
-			} else {
-				dec_blk = i32(len(ag.decide_blocks))
-				append(&ag.decide_blocks, make([dynamic]Decision_Result, 0, len(src), ag.allocator))
+			if ag.live_decide_elems > 0 && len(ag.decide_pool) > ag.live_decide_elems * 2 + 1024 {
+				tmp := make([dynamic]Decision_Result, 0, ag.live_decide_elems, context.temp_allocator)
+				for &sl in ag.slots {
+					if sl.alive && sl.decide_count > 0 {
+						ns := u32(len(tmp))
+						oe := int(sl.decide_start) + int(sl.decide_count)
+						for x in ag.decide_pool[sl.decide_start:oe] {
+							append(&tmp, x)
+						}
+						sl.decide_start = ns
+					}
+				}
+				clear(&ag.decide_pool)
+				_grow_resize(&ag.decide_pool, len(tmp))
+				copy(ag.decide_pool[:], tmp[:])
 			}
-			resize(&ag.decide_blocks[dec_blk], len(src))
-			copy(ag.decide_blocks[dec_blk][:], src)
+			base := len(ag.decide_pool)
+			_grow_resize(&ag.decide_pool, base + len(src))
+			copy(ag.decide_pool[base : base + len(src)], src)
+			dec_start = u32(base)
+			dec_cnt = u8(len(src))
+			ag.live_decide_elems += len(src)
 		}
 	}
 
@@ -364,7 +380,8 @@ agenda_stage_activation :: proc(s: ^Session, rule_id: u32, tok: ^Beta_Token) {
 		salience     = rule.salience,
 		gen          = gen,
 		rule_q_idx   = rule_q_idx,
-		decide_block = dec_blk,
+		decide_start = dec_start,
+		decide_count = dec_cnt,
 		token        = tok^,
 		alive        = true,
 	}
@@ -521,10 +538,10 @@ _agenda_pop_live_from_heap :: proc(
 		if !slot.alive || slot.gen != entry.gen {
 			continue
 		}
-		if slot.decide_block >= 0 {
-			src := ag.decide_blocks[slot.decide_block]
-			resize(decide_out, len(src))
-			copy(decide_out^[:], src[:])
+		if slot.decide_count > 0 {
+			src := ag.decide_pool[slot.decide_start : slot.decide_start + u32(slot.decide_count)]
+			_grow_resize(decide_out, len(src))
+			copy(decide_out^[:], src)
 		} else {
 			clear(decide_out)
 		}
@@ -785,16 +802,17 @@ session_sync_and_fire :: proc(
 	if len(sr.deltas) > 64 {
 		need_cap := len(s.facts) + len(sr.deltas)
 		if cap(s.facts) < need_cap {
-			reserve(&s.facts, need_cap)
+			reserve(&s.facts, max(cap(s.facts) * 2, need_cap))
 		}
 		if len(s.facts_by_key) + len(sr.deltas) > cap(s.facts_by_key) {
 			reserve(&s.facts_by_key, len(s.facts_by_key) + len(sr.deltas))
 		}
 		if cap(s.fact_alpha_head) < need_cap {
-			reserve(&s.fact_alpha_head, need_cap)
+			reserve(&s.fact_alpha_head, max(cap(s.fact_alpha_head) * 2, need_cap))
 		}
-		if cap(s.fact_alpha_edges) < len(s.fact_alpha_edges) + len(sr.deltas) {
-			reserve(&s.fact_alpha_edges, len(s.fact_alpha_edges) + len(sr.deltas))
+		edge_need := len(s.fact_alpha_edges) + len(sr.deltas)
+		if cap(s.fact_alpha_edges) < edge_need {
+			reserve(&s.fact_alpha_edges, max(cap(s.fact_alpha_edges) * 2, edge_need))
 		}
 	}
 

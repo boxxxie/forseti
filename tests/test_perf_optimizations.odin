@@ -1453,3 +1453,127 @@ rule join3 {
 	delta_allocs := after_allocs - before_allocs
 	testing.expectf(t, delta_allocs <= 4, "expected steady-state 3-way flat-pool allocs <= 4 across 10 modify cycles, got %d", delta_allocs)
 }
+
+@(test)
+test_audit_full_geometric_growth_alloc_budget :: proc(t: ^testing.T) {
+	// 1. Audit_Full 3-stage Root -> Mid -> Leaf with decide table over 2,000 roots (4,000 derived facts)
+	//    + full retraction cascade must grow geometrically (O(log N) slice reallocs, not O(N)).
+	chain_src := `module audit_geom version "1.0"
+schema Root { id: string, emp: i64 }
+schema Mid { id: string, tier: string }
+schema Leaf { id: string, tier: string }
+source Root : Root at .groot[?id]
+derived Mid : Mid at .gmid[?id]
+derived Leaf : Leaf at .gleaf[?id]
+
+table tier_tbl version "1.0" hit First {
+  inputs { emp: i64 cost 1 }
+  outputs { tier: string }
+  rows { r1: >= 50 || "ok"; r2: - || "low"; }
+}
+
+rule r_mid {
+  when {
+    ?_r := Root(id: ?id, emp: ?e)
+    ?t := decide tier_tbl(emp: ?e)
+    where ?t.tier == "ok"
+  }
+  then { assert Mid(id: ?id, tier: ?t.tier) }
+}
+rule r_leaf {
+  when { ?_m := Mid(id: ?id, tier: ?t) }
+  then { assert Leaf(id: ?id, tier: ?t) }
+}`
+
+	rb1 := _compile_test_rb(t, chain_src, "audit_geom.forseti")
+	defer forseti.rulebase_destroy(&rb1)
+
+	track1: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track1, context.allocator)
+	defer mem.tracking_allocator_destroy(&track1)
+	ta1 := mem.tracking_allocator(&track1)
+
+	s1 := new(forseti.Session, ta1)
+	testing.expect_value(t, forseti.session_init(s1, &rb1, forseti.Session_Config{provenance_mode = .Audit_Full}, nil, ta1), forseti.Session_Error.None)
+	{
+		defer {
+			forseti.session_destroy(s1)
+			free(s1, ta1)
+		}
+		n :: 2_000
+		kbuf: [24]u8 = ---
+		for i := 0; i < n; i += 1 {
+			key := fmt.bprintf(kbuf[:], "r:%04d", i)
+			ks, _ := forseti.intern_session_string(&rb1.interner, &s1.interner, key)
+			_, _ = forseti.session_insert_fact(s1, "Root", key, {ks, i64(100)})
+		}
+		_, fe1 := forseti.session_fire(s1)
+		testing.expect_value(t, fe1, forseti.Session_Error.None)
+		testing.expect_value(t, _count_alive_binding(s1, "Leaf"), n)
+
+		for i := 0; i < n; i += 1 {
+			key := fmt.bprintf(kbuf[:], "r:%04d", i)
+			_ = forseti.session_retract_fact_by_key(s1, "Root", key)
+		}
+		_, fe2 := forseti.session_fire(s1)
+		testing.expect_value(t, fe2, forseti.Session_Error.None)
+		testing.expect_value(t, _count_alive_binding(s1, "Leaf"), 0)
+	}
+	// Previously > 8,000 due to exact-cap resize(&p.fact_deriv_lists), jtms scratch arrays, and per-activation decide_blocks.
+	testing.expectf(t, track1.total_allocation_count <= 700, "expected Audit_Full 2k cascade allocs <= 700, got %d", track1.total_allocation_count)
+
+	// 2. Steady-state Audit_Full single-item modify over grouped sum accumulator must not reallocate scratch/deriv lists on every edit.
+	acc_src := `module audit_acc_geom version "1.0"
+schema Bucket { grp: string }
+schema Item { grp: string, amt: i64 }
+schema Out { grp: string, total: i64 }
+source Bucket : Bucket at .ab[?id]
+source Item : Item at .ai[?id]
+derived Out : Out at .ao[?id]
+
+rule sum_grp {
+  when {
+    ?_b := Bucket(grp: ?g)
+    ?s := sum(?a) from Item(grp: ?g, amt: ?a)
+  }
+  then { assert Out(grp: ?g, total: ?s) }
+}`
+
+	rb2 := _compile_test_rb(t, acc_src, "audit_acc_geom.forseti")
+	defer forseti.rulebase_destroy(&rb2)
+
+	track2: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track2, context.allocator)
+	defer mem.tracking_allocator_destroy(&track2)
+	ta2 := mem.tracking_allocator(&track2)
+
+	s2 := new(forseti.Session, ta2)
+	testing.expect_value(t, forseti.session_init(s2, &rb2, forseti.Session_Config{provenance_mode = .Audit_Full}, nil, ta2), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(s2)
+		free(s2, ta2)
+	}
+	grp_s, _ := forseti.intern_session_string(&rb2.interner, &s2.interner, "g0")
+	_, _ = forseti.session_insert_fact(s2, "Bucket", "g0", {grp_s})
+	ibuf: [24]u8 = ---
+	for i := 0; i < 500; i += 1 {
+		key := fmt.bprintf(ibuf[:], "it:%04d", i)
+		_, _ = forseti.session_insert_fact(s2, "Item", key, {grp_s, i64(i + 1)})
+	}
+	_, _ = forseti.session_fire(s2)
+	for tv in ([2]i64{10, 20}) {
+		_ = forseti.session_modify_fact_by_key(s2, "Item", "it:0000", {grp_s, tv})
+		_, _ = forseti.session_fire(s2)
+	}
+	free_all(context.temp_allocator)
+
+	before := track2.total_allocation_count
+	for i := 0; i < 500; i += 1 {
+		v := i64(10 if i % 2 == 0 else 20)
+		_ = forseti.session_modify_fact_by_key(s2, "Item", "it:0000", {grp_s, v})
+		_, _ = forseti.session_fire(s2)
+		free_all(context.temp_allocator)
+	}
+	delta := track2.total_allocation_count - before
+	testing.expectf(t, delta <= 120, "expected Audit_Full warm accum modify O(log N) allocs <= 120 across 500 cycles, got %d", delta)
+}

@@ -147,7 +147,7 @@ provenance_record :: proc(
 	append(&p.deriv_next_for_fact, INVALID_DERIVATION)
 	if derived_fact != INVALID_FACT {
 		if int(derived_fact) >= len(p.fact_deriv_lists) {
-			resize(&p.fact_deriv_lists, int(derived_fact) + 1)
+			_grow_resize(&p.fact_deriv_lists, int(derived_fact) + 1)
 		}
 		lst := &p.fact_deriv_lists[derived_fact]
 		if lst.head == INVALID_DERIVATION {

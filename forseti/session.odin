@@ -164,6 +164,22 @@ Session :: struct {
 	allocator:              mem.Allocator,
 }
 
+@(private)
+_grow_resize :: proc(arr: ^[dynamic]$E, new_len: int) {
+	if new_len > cap(arr^) {
+		next_cap := max(cap(arr^) * 2, 16)
+		for next_cap < new_len {
+			if next_cap > max(int) / 2 {
+				next_cap = new_len
+				break
+			}
+			next_cap *= 2
+		}
+		reserve(arr, next_cap)
+	}
+	resize(arr, new_len)
+}
+
 @(require_results)
 session_init :: proc(
 	s: ^Session,
