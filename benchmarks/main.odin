@@ -142,11 +142,15 @@ main :: proc() {
 	}
 
 	register_table_benchmarks(&suite)
+	register_frontend_benchmarks(&suite)
+	register_vm_benchmarks(&suite)
 	register_xitdb_benchmarks(&suite)
 	register_scale_rule_benchmarks(&suite)
+	register_scale_join_benchmarks(&suite)
 	register_join_benchmarks(&suite)
 	register_jtms_benchmarks(&suite)
 	register_recursive_benchmarks(&suite)
+	register_provenance_replay_benchmarks(&suite)
 	register_mdm_e2e_benchmarks(&suite)
 
 	if !hugi.suite_run(&suite) {

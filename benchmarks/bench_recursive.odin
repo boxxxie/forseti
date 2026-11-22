@@ -48,8 +48,107 @@ _bench_seminaive_dag_closure :: proc(b: ^hugi.Bencher) {
 	}
 }
 
+@(private = "file")
+_bench_cyclic_scc_closure_audit_full :: proc(b: ^hugi.Bencher) {
+	n := max(hugi.param(b), 10)
+	rb, ok := compile_benchmark_source(BENCH_RECURSIVE_POLICY_SRC, "bench_recursive.forseti")
+	if !ok {
+		return
+	}
+	defer {
+		forseti.rulebase_destroy(rb)
+		free(rb)
+	}
+
+	// Build N/4 disjoint 4-node directed cycles (A->B->C->D->A) so SCC closure stays O(N).
+	cycles := max(n / 4, 2)
+	edge_count := cycles * 4
+	edge_keys := make([]string, edge_count, context.temp_allocator)
+	src_names := make([]string, edge_count, context.temp_allocator)
+	dst_names := make([]string, edge_count, context.temp_allocator)
+	for c := 0; c < cycles; c += 1 {
+		base := c * 4
+		for step := 0; step < 4; step += 1 {
+			idx := base + step
+			edge_keys[idx] = fmt.tprintf("ce%d", idx)
+			src_names[idx] = fmt.tprintf("cn%d", base + step)
+			dst_names[idx] = fmt.tprintf("cn%d", base + ((step + 1) % 4))
+		}
+	}
+	defer free_all(context.temp_allocator)
+
+	hugi.set_items(b, u64(edge_count))
+	for hugi.step(b) {
+		s := new(forseti.Session)
+		_ = forseti.session_init(s, rb, forseti.Session_Config{provenance_mode = .Audit_Full})
+		for i := 0; i < edge_count; i += 1 {
+			usid := bench_intern(s, src_names[i])
+			vsid := bench_intern(s, dst_names[i])
+			vals := [2]forseti.Value{usid, vsid}
+			_, _ = forseti.session_insert_fact(s, "Edge", edge_keys[i], vals[:])
+		}
+		fired, _ := forseti.session_fire(s)
+		_ = hugi.black_box(fired)
+		forseti.session_destroy(s)
+		free(s)
+	}
+}
+
+@(private = "file")
+_bench_incremental_cycle_break_and_readd :: proc(b: ^hugi.Bencher) {
+	n := max(hugi.param(b), 10)
+	rb, ok := compile_benchmark_source(BENCH_RECURSIVE_POLICY_SRC, "bench_recursive.forseti")
+	if !ok {
+		return
+	}
+	defer {
+		forseti.rulebase_destroy(rb)
+		free(rb)
+	}
+
+	s := new(forseti.Session)
+	_ = forseti.session_init(s, rb, forseti.Session_Config{provenance_mode = .Audit_Full})
+	defer {
+		forseti.session_destroy(s)
+		free(s)
+	}
+
+	cycles := max(n / 4, 2)
+	for c := 0; c < cycles; c += 1 {
+		base := c * 4
+		for step := 0; step < 4; step += 1 {
+			idx := base + step
+			ek := fmt.tprintf("ce%d", idx)
+			u := fmt.tprintf("cn%d", base + step)
+			v := fmt.tprintf("cn%d", base + ((step + 1) % 4))
+			usid := bench_intern(s, u)
+			vsid := bench_intern(s, v)
+			vals := [2]forseti.Value{usid, vsid}
+			_, _ = forseti.session_insert_fact(s, "Edge", ek, vals[:])
+		}
+	}
+	_, _ = forseti.session_fire(s)
+	free_all(context.temp_allocator)
+
+	// Toggle closing edge ce3 (cn3 -> cn0) of cycle 0 while keeping N-1 edges steady.
+	u_close := bench_intern(s, "cn3")
+	v_close := bench_intern(s, "cn0")
+	close_vals := [2]forseti.Value{u_close, v_close}
+
+	hugi.set_items(b, 2)
+	for hugi.step(b) {
+		_ = forseti.session_retract_fact_by_key(s, "Edge", "ce3")
+		f1, _ := forseti.session_fire(s)
+		_, _ = forseti.session_insert_fact(s, "Edge", "ce3", close_vals[:])
+		f2, _ := forseti.session_fire(s)
+		_ = hugi.black_box(f1 + f2)
+	}
+}
+
 register_recursive_benchmarks :: proc(suite: ^hugi.Suite) {
 	g := hugi.group_add(suite, "recursive_strata")
 	hugi.group_params(g, []int{10, 100, 1_000, 5_000})
 	hugi.group_bench(g, "seminaive_dag_closure", _bench_seminaive_dag_closure)
+	hugi.group_bench(g, "cyclic_scc_closure_audit_full", _bench_cyclic_scc_closure_audit_full)
+	hugi.group_bench(g, "incremental_cycle_break_and_readd", _bench_incremental_cycle_break_and_readd)
 }

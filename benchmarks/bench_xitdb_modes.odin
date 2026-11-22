@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:os"
 import vmem "core:mem/virtual"
 import hugi "hugi:."
 import xitdb "xitdb:."
@@ -382,6 +383,159 @@ _bench_single_write_1k_separate_tx_safe_v2 :: proc(b: ^hugi.Bencher) {
 	_run_batch_vs_separate_1k(b, single_tx = false)
 }
 
+@(private = "file")
+_bench_file_buffered_write_1k_single_tx_safe_v2 :: proc(b: ^hugi.Bencher) {
+	n :: 1_000
+	dir, d_err := os.make_directory_temp("", "forseti_xit_w1k_*", context.allocator)
+	if d_err != nil {
+		return
+	}
+	defer {
+		_ = os.remove_all(dir)
+		delete(dir)
+	}
+
+	pbuf: [256]u8 = ---
+	hugi.set_items(b, u64(n))
+	iter := 0
+	for hugi.step(b) {
+		iter += 1
+		db_path := fmt.bprintf(pbuf[:], "%s/w_%d.xit", dir, iter)
+		sb := new(forseti.Store_Bridge)
+		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+			free(sb)
+			break
+		}
+		cnt := n
+		_, _ = forseti.store_bridge_commit_moment(sb, _bench_batch_1k_cb, &cnt)
+		_ = hugi.black_box(sb.db.header.file_id)
+		forseti.store_bridge_destroy(sb)
+		free(sb)
+		_ = os.remove(db_path)
+	}
+}
+
+@(private = "file")
+_bench_file_buffered_commit_cycle_safe_v2 :: proc(b: ^hugi.Bencher) {
+	dir, d_err := os.make_directory_temp("", "forseti_xit_cyc_*", context.allocator)
+	if d_err != nil {
+		return
+	}
+	defer {
+		_ = os.remove_all(dir)
+		delete(dir)
+	}
+
+	pbuf: [256]u8 = ---
+	db_path := fmt.bprintf(pbuf[:], "%s/cycle.xit", dir)
+	sb := new(forseti.Store_Bridge)
+	if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+		free(sb)
+		return
+	}
+	defer {
+		forseti.store_bridge_destroy(sb)
+		free(sb)
+	}
+
+	base := 1_000
+	_, _ = forseti.store_bridge_commit_moment(sb, _bench_seed_cb, &base)
+
+	hugi.set_items(b, 1)
+	seq: i64 = 0
+	for hugi.step(b) {
+		seq += 1
+		m_idx, _ := forseti.store_bridge_commit_moment(sb, _bench_single_put_cb, &seq)
+		_ = hugi.black_box(m_idx)
+	}
+}
+
+@(private = "file")
+_bench_file_reopen_hydrate_session_1k :: proc(b: ^hugi.Bencher) {
+	n :: 1_000
+	rb, ok := compile_benchmark_source(BENCH_MDM_E2E_POLICY_SRC, "bench_hydrate.forseti")
+	if !ok {
+		return
+	}
+	defer {
+		forseti.rulebase_destroy(rb)
+		free(rb)
+	}
+
+	dir, d_err := os.make_directory_temp("", "forseti_xit_hyd_*", context.allocator)
+	if d_err != nil {
+		return
+	}
+	defer {
+		_ = os.remove_all(dir)
+		delete(dir)
+	}
+
+	pbuf: [256]u8 = ---
+	db_path := fmt.bprintf(pbuf[:], "%s/hydrate.xit", dir)
+	{
+		sb := new(forseti.Store_Bridge)
+		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+			free(sb)
+			return
+		}
+		seed_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+			cnt := (^int)(user_data)^
+			m, err := forseti.store_write_path_ensure_map(moment_wc, ".orgs.raw")
+			if err != nil {
+				return .Write_Failed
+			}
+			k_name := forseti.prehashed_key_make("name")
+			k_ctry := forseti.prehashed_key_make("country")
+			k_dom := forseti.prehashed_key_make("domain")
+			k_emp := forseti.prehashed_key_make("employees")
+			k_act := forseti.prehashed_key_make("active")
+			kbuf: [32]u8 = ---
+			dbuf: [32]u8 = ---
+			for i := 0; i < cnt; i += 1 {
+				key := fmt.bprintf(kbuf[:], "org:%06d", i)
+				dom := fmt.bprintf(dbuf[:], "dom%04d.com", i % 50)
+				rwc := xitdb.hash_map_put_cursor(&m, key) or_return
+				rm := xitdb.write_hash_map_init(rwc) or_return
+				forseti.hash_map_put_prehashed(&rm, &k_name, key) or_return
+				forseti.hash_map_put_prehashed(&rm, &k_ctry, "US") or_return
+				forseti.hash_map_put_prehashed(&rm, &k_dom, dom) or_return
+				forseti.hash_map_put_prehashed(&rm, &k_emp, i64(150 + (i % 100))) or_return
+				if forseti.write_bool_to_hash_map_prehashed(&rm, &k_act, true) != nil {
+					return .Write_Failed
+				}
+			}
+			return nil
+		}
+		cnt := n
+		_, _ = forseti.store_bridge_commit_moment(sb, seed_cb, &cnt)
+		forseti.store_bridge_destroy(sb)
+		free(sb)
+	}
+
+	hugi.set_items(b, u64(n))
+	for hugi.step(b) {
+		sb := new(forseti.Store_Bridge)
+		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+			free(sb)
+			break
+		}
+		syncer := new(forseti.Delta_Syncer)
+		_ = forseti.delta_syncer_init(syncer)
+		_ = forseti.delta_syncer_watch(syncer, ".orgs.raw")
+		s := new(forseti.Session)
+		_ = forseti.session_init(s, rb, forseti.Session_Config{provenance_mode = .Audit_Full})
+		fired, _ := forseti.session_sync_and_fire(s, sb, syncer, commit_derived = false)
+		_ = hugi.black_box(fired)
+		forseti.session_destroy(s)
+		free(s)
+		forseti.delta_syncer_destroy(syncer)
+		free(syncer)
+		forseti.store_bridge_destroy(sb)
+		free(sb)
+	}
+}
+
 register_xitdb_benchmarks :: proc(suite: ^hugi.Suite) {
 	g := hugi.group_add(suite, "xitdb_modes")
 	hugi.group_bench(g, "insert_10k_safe_v2", _bench_insert_safe_v2)
@@ -397,4 +551,7 @@ register_xitdb_benchmarks :: proc(suite: ^hugi.Suite) {
 	hugi.group_bench(g, "commit_cycle_fast_memory", _bench_commit_fast_memory)
 	hugi.group_bench(g, "batch_write_1k_single_tx_safe_v2", _bench_batch_write_1k_single_tx_safe_v2)
 	hugi.group_bench(g, "single_write_1k_separate_tx_safe_v2", _bench_single_write_1k_separate_tx_safe_v2)
+	hugi.group_bench(g, "file_buffered_write_1k_single_tx_safe_v2", _bench_file_buffered_write_1k_single_tx_safe_v2)
+	hugi.group_bench(g, "file_buffered_commit_cycle_safe_v2", _bench_file_buffered_commit_cycle_safe_v2)
+	hugi.group_bench(g, "file_reopen_hydrate_session_1k", _bench_file_reopen_hydrate_session_1k)
 }
