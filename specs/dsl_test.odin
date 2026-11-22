@@ -79,6 +79,7 @@ World :: struct {
 	query_runs:         map[string]forseti.Query_Result,
 	fire_counts:        map[string]u64,
 	explain_texts:      map[string]string,
+	graph_exports:      map[string]string,
 	impacts:            map[string]forseti.Impact_Report,
 	semiring_runs:      map[string]forseti.Semiring_Result,
 	diff_reports:       map[string]forseti.Diff_Replay_Report,
@@ -110,6 +111,7 @@ world_init :: proc(w: ^World, t: ^testing.T, loc := #caller_location) {
 	w.query_runs = make(map[string]forseti.Query_Result, 8)
 	w.fire_counts = make(map[string]u64, 8)
 	w.explain_texts = make(map[string]string, 8)
+	w.graph_exports = make(map[string]string, 8)
 	w.impacts = make(map[string]forseti.Impact_Report, 8)
 	w.semiring_runs = make(map[string]forseti.Semiring_Result, 8)
 	w.diff_reports = make(map[string]forseti.Diff_Replay_Report, 8)
@@ -135,6 +137,7 @@ world_destroy :: proc(w: ^World) {
 	}
 	delete(w.impacts)
 	delete(w.explain_texts)
+	delete(w.graph_exports)
 	for _, &qr in w.query_runs {
 		forseti.query_result_destroy(&qr)
 	}
@@ -561,6 +564,111 @@ then_cli_output_contains :: proc(w: ^World, run_label: string, needle: string, l
 	}
 	combined := strings.concatenate({res.stdout, "\n", res.stderr}, context.temp_allocator)
 	testing.expectf(w.t, strings.contains(combined, needle), "expected output to contain %q, got stdout=%q stderr=%q", needle, res.stdout, res.stderr, loc = loc)
+}
+
+then_cli_json_stdout_parses :: proc(
+	w: ^World,
+	run_label: string,
+	expected_keys: []string,
+	loc := #caller_location,
+) {
+	res, ok := w.cli_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown CLI run %q", run_label, loc = loc) {
+		return
+	}
+	val, p_err := json.parse_string(strings.trim_space(res.stdout), parse_integers = true)
+	if !testing.expectf(w.t, p_err == nil, "invalid CLI JSON err=%v stdout=%q", p_err, res.stdout, loc = loc) {
+		return
+	}
+	defer json.destroy_value(val)
+
+	obj, is_obj := val.(json.Object)
+	if !testing.expect(w.t, is_obj, loc = loc) {
+		return
+	}
+	for k in expected_keys {
+		testing.expectf(w.t, k in obj, "expected JSON key %q in %q", k, res.stdout, loc = loc)
+	}
+}
+
+then_cli_json_int_field_at_least :: proc(
+	w: ^World,
+	run_label: string,
+	field: string,
+	min_val: i64,
+	loc := #caller_location,
+) {
+	res, ok := w.cli_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown CLI run %q", run_label, loc = loc) {
+		return
+	}
+	val, p_err := json.parse_string(strings.trim_space(res.stdout), parse_integers = true)
+	if !testing.expectf(w.t, p_err == nil, "invalid CLI JSON err=%v stdout=%q", p_err, res.stdout, loc = loc) {
+		return
+	}
+	defer json.destroy_value(val)
+
+	obj, is_obj := val.(json.Object)
+	if !testing.expect(w.t, is_obj, loc = loc) {
+		return
+	}
+	fv, has := obj[field]
+	if !testing.expectf(w.t, has, "missing JSON field %q in %q", field, res.stdout, loc = loc) {
+		return
+	}
+	iv, is_int := fv.(json.Integer)
+	testing.expectf(w.t, is_int && i64(iv) >= min_val, "expected %s >= %d, got %v", field, min_val, fv, loc = loc)
+}
+
+then_cli_json_int_field_equals :: proc(
+	w: ^World,
+	run_label: string,
+	field: string,
+	expected: i64,
+	loc := #caller_location,
+) {
+	res, ok := w.cli_runs[run_label]
+	if !testing.expectf(w.t, ok, "unknown CLI run %q", run_label, loc = loc) {
+		return
+	}
+	val, p_err := json.parse_string(strings.trim_space(res.stdout), parse_integers = true)
+	if !testing.expectf(w.t, p_err == nil, "invalid CLI JSON err=%v stdout=%q", p_err, res.stdout, loc = loc) {
+		return
+	}
+	defer json.destroy_value(val)
+
+	obj, is_obj := val.(json.Object)
+	if !testing.expect(w.t, is_obj, loc = loc) {
+		return
+	}
+	fv, has := obj[field]
+	if !testing.expectf(w.t, has, "missing JSON field %q in %q", field, res.stdout, loc = loc) {
+		return
+	}
+	iv, is_int := fv.(json.Integer)
+	testing.expectf(w.t, is_int && i64(iv) == expected, "expected %s == %d, got %v", field, expected, fv, loc = loc)
+}
+
+then_workspace_file_contains :: proc(
+	w: ^World,
+	rel_path: string,
+	needles: []string,
+	loc := #caller_location,
+) {
+	if !testing.expect(w.t, len(w.cli_dir) > 0, loc = loc) {
+		return
+	}
+	full, j_err := filepath.join({w.cli_dir, rel_path}, context.temp_allocator)
+	if !testing.expect_value(w.t, j_err, nil, loc = loc) {
+		return
+	}
+	raw, read_ok := driver_read_file(full, context.temp_allocator)
+	if !testing.expectf(w.t, read_ok, "failed reading workspace file %q", rel_path, loc = loc) {
+		return
+	}
+	for n in needles {
+		testing.expectf(w.t, strings.contains(raw, n), "expected %q in file %q, got:\n%s", n, rel_path, raw, loc = loc)
+	}
 }
 
 then_cli_json_reports_diagnostic :: proc(
@@ -1647,6 +1755,218 @@ then_effect_batch_applied :: proc(
 	}
 	testing.expect_value(w.t, w.last_effect_jobs, expected_count, loc = loc)
 	testing.expect_value(w.t, len(applied), expected_count, loc = loc)
+}
+
+Graph_Export_Format :: enum u8 {
+	Dot,
+	Mermaid,
+}
+
+upon_exporting_rulebase_graph :: proc(
+	w: ^World,
+	rb_label: string,
+	fmt_kind: Graph_Export_Format,
+	graph_label: string,
+	loc := #caller_location,
+) {
+	rb, ok := w.rulebases[rb_label]
+	if !testing.expectf(w.t, ok, "unknown rulebase %q", rb_label, loc = loc) {
+		return
+	}
+	txt: string
+	alloc := vmem.arena_allocator(&w.arena)
+	if fmt_kind == .Dot {
+		dot_txt, d_err := forseti.export_rulebase_dot(rb, alloc)
+		testing.expect_value(w.t, d_err, nil, loc = loc)
+		txt = dot_txt
+	} else {
+		mmd_txt, m_err := forseti.export_rulebase_mermaid(rb, alloc)
+		testing.expect_value(w.t, m_err, nil, loc = loc)
+		txt = mmd_txt
+	}
+	w.graph_exports[graph_label] = txt
+}
+
+upon_exporting_derivation_graph :: proc(
+	w: ^World,
+	sess_label: string,
+	fmt_kind: Graph_Export_Format,
+	graph_label: string,
+	binding_name := "",
+	match_fields: []Table_Test_Arg = nil,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	focus := forseti.INVALID_FACT
+	if len(binding_name) > 0 {
+		fid, found := driver_session_find_matching_fact_id(sess, binding_name, match_fields)
+		if !testing.expectf(w.t, found, "cannot focus derivation graph on missing %q fact", binding_name, loc = loc) {
+			return
+		}
+		focus = fid
+	}
+	alloc := vmem.arena_allocator(&w.arena)
+	if fmt_kind == .Dot {
+		txt, d_err := forseti.export_derivations_dot(sess, focus, alloc)
+		testing.expect_value(w.t, d_err, nil, loc = loc)
+		w.graph_exports[graph_label] = txt
+	} else {
+		txt, m_err := forseti.export_derivations_mermaid(sess, focus, alloc)
+		testing.expect_value(w.t, m_err, nil, loc = loc)
+		w.graph_exports[graph_label] = txt
+	}
+}
+
+then_graph_export_contains :: proc(
+	w: ^World,
+	graph_label: string,
+	needles: []string,
+	loc := #caller_location,
+) {
+	txt, ok := w.graph_exports[graph_label]
+	if !testing.expectf(w.t, ok, "unknown graph export %q", graph_label, loc = loc) {
+		return
+	}
+	for n in needles {
+		testing.expectf(w.t, strings.contains(txt, n), "expected graph %q to contain %q, got:\n%s", graph_label, n, txt, loc = loc)
+	}
+}
+
+Entity_Audit_View :: struct {
+	w:            ^World,
+	sess_label:   string,
+	store_label:  string,
+	binding_name: string,
+	entity_key:   string,
+	found:        bool,
+	fid:          forseti.Fact_Id,
+}
+
+viewing_entity_audit :: proc(
+	w: ^World,
+	sess_label: string,
+	store_label: string,
+	binding_name: string,
+	match_fields: []Table_Test_Arg,
+	entity_key: string,
+	loc := #caller_location,
+) -> Entity_Audit_View {
+	sess, sok := w.sessions[sess_label]
+	_, st_ok := w.stores[store_label]
+	testing.expectf(w.t, sok && st_ok, "unknown session %q or store %q", sess_label, store_label, loc = loc)
+	fid := forseti.INVALID_FACT
+	found := false
+	resolved_key := entity_key
+	if sok {
+		fid, found = driver_session_find_matching_fact_id(sess, binding_name, match_fields)
+		if found && len(resolved_key) == 0 {
+			resolved_key = forseti.session_string(sess, sess.facts[fid].key)
+		}
+	}
+	return Entity_Audit_View{
+		w            = w,
+		sess_label   = sess_label,
+		store_label  = store_label,
+		binding_name = binding_name,
+		entity_key   = resolved_key,
+		found        = found,
+		fid          = fid,
+	}
+}
+
+view_has_proof_support :: proc(
+	v: Entity_Audit_View,
+	expected_origin: forseti.Fact_Origin,
+	expected_support: i32,
+	expected_height: u32,
+	loc := #caller_location,
+) {
+	if !testing.expectf(v.w.t, v.found, "expected alive %s fact in view", v.binding_name, loc = loc) {
+		return
+	}
+	sess, sok := v.w.sessions[v.sess_label]
+	if !testing.expectf(v.w.t, sok, "unknown session %q", v.sess_label, loc = loc) {
+		return
+	}
+	f := &sess.facts[v.fid]
+	testing.expect(v.w.t, f.alive, loc = loc)
+	testing.expect_value(v.w.t, f.origin, expected_origin, loc = loc)
+	testing.expect_value(v.w.t, f.support_count, expected_support, loc = loc)
+	testing.expect_value(v.w.t, f.proof_height, expected_height, loc = loc)
+}
+
+view_explanation_mentions :: proc(
+	v: Entity_Audit_View,
+	rule_name: string,
+	table_name := "",
+	table_row := "",
+	loc := #caller_location,
+) {
+	if !testing.expectf(v.w.t, v.found, "expected alive %s fact for explanation", v.binding_name, loc = loc) {
+		return
+	}
+	sess := v.w.sessions[v.sess_label]
+	tree := forseti.explain(sess, v.fid)
+	defer forseti.explain_tree_destroy(&tree)
+	testing.expect(v.w.t, tree.found, loc = loc)
+	txt := forseti.explain_format(&tree)
+	defer delete(txt)
+	testing.expectf(v.w.t, strings.contains(txt, rule_name), "expected rule %q in explanation:\n%s", rule_name, txt, loc = loc)
+	if len(table_name) > 0 {
+		testing.expectf(v.w.t, strings.contains(txt, table_name), "expected table %q in explanation:\n%s", table_name, txt, loc = loc)
+	}
+	if len(table_row) > 0 {
+		testing.expectf(v.w.t, strings.contains(txt, table_row), "expected row %q in explanation:\n%s", table_row, txt, loc = loc)
+	}
+}
+
+view_semiring_how_contains :: proc(
+	v: Entity_Audit_View,
+	needle: string,
+	loc := #caller_location,
+) {
+	if !testing.expectf(v.w.t, v.found, "expected alive %s fact for How semiring", v.binding_name, loc = loc) {
+		return
+	}
+	sess := v.w.sessions[v.sess_label]
+	sr := forseti.evaluate_semiring(sess, v.fid, .How)
+	defer forseti.semiring_result_destroy(&sr)
+	testing.expectf(v.w.t, strings.contains(sr.how_expr, needle), "expected %q in How expr %q", needle, sr.how_expr, loc = loc)
+}
+
+view_semiring_why_count_is :: proc(
+	v: Entity_Audit_View,
+	expected_count: int,
+	loc := #caller_location,
+) {
+	if !testing.expectf(v.w.t, v.found, "expected alive %s fact for Why semiring", v.binding_name, loc = loc) {
+		return
+	}
+	sess := v.w.sessions[v.sess_label]
+	sr := forseti.evaluate_semiring(sess, v.fid, .Why)
+	defer forseti.semiring_result_destroy(&sr)
+	testing.expect_value(v.w.t, len(sr.why_sets), expected_count, loc = loc)
+}
+
+view_store_audit_indexes_entity :: proc(
+	v: Entity_Audit_View,
+	expected_module, expected_rule: string,
+	expected_min_decisions: int,
+	loc := #caller_location,
+) {
+	sh, st_ok := v.w.stores[v.store_label]
+	if !testing.expectf(v.w.t, st_ok, "unknown store %q", v.store_label, loc = loc) {
+		return
+	}
+	ok, msg := driver_check_audit_moment_integrity(&sh.bridge, expected_module, expected_min_decisions, expected_rule, v.entity_key, &sh.interner)
+	testing.expectf(v.w.t, ok, "store audit index check failed: %s", msg, loc = loc)
+}
+
+view_is_retracted :: proc(v: Entity_Audit_View, loc := #caller_location) {
+	testing.expectf(v.w.t, !v.found, "expected %s fact to be retracted/absent", v.binding_name, loc = loc)
 }
 
 @(test)

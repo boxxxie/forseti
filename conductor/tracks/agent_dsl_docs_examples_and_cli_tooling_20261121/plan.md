@@ -9,12 +9,12 @@
 
 ## Phase 1: Full `cmd/forseti` CLI, Visual Exporters & E2E 4-Layer ATDD Expansion / Audit
 
-- [ ] Task: Complete `cmd/forseti` operational subcommands (`run`, `explain`, `impact`, `diff-replay`, `telemetry`, Mermaid/DOT export) (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 CLI behavioral scenarios in `specs/cli_spec_test.odin` covering JSON/human `explain`, `impact`, `diff-replay`, `telemetry`, and graph exports
-    - [ ] Implement remaining subcommands in `cmd/forseti/` and `forseti/viz_export.odin`
-- [ ] Task: Expand cross-track E2E MDM specs and run full 4-layer ATDD hygiene audit across `specs/` (Red-First ATDD)
-    - [ ] Implement cross-track E2E behavioral scenarios (`specs/mdm_e2e_spec_test.odin` with Pattern B `viewing_*` scoped entity audit blocks) integrating Tracks 1–6
-    - [ ] Audit all `specs/*_spec_test.odin`, `specs/dsl_test.odin`, and `specs/driver_test.odin` for zero DSL theater, complete `#caller_location` forwarding, SUT `@(private)` encapsulation, parallel safety, and `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
+- [x] Task: Complete `cmd/forseti` operational subcommands (`run`, `explain`, `impact`, `diff-replay`, `telemetry`, Mermaid/DOT export) (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 CLI behavioral scenarios in `specs/cli_spec_test.odin` covering JSON/human `explain`, `impact`, `diff-replay`, `telemetry`, and graph exports
+    - [x] Implement remaining subcommands in `cmd/forseti/` and `forseti/viz_export.odin`
+- [x] Task: Expand cross-track E2E MDM specs and run full 4-layer ATDD hygiene audit across `specs/` (Red-First ATDD)
+    - [x] Implement cross-track E2E behavioral scenarios (`specs/mdm_e2e_spec_test.odin` with Pattern B `viewing_*` scoped entity audit blocks) integrating Tracks 1–6
+    - [x] Audit all `specs/*_spec_test.odin`, `specs/dsl_test.odin`, and `specs/driver_test.odin` for zero DSL theater, complete `#caller_location` forwarding, SUT `@(private)` encapsulation, parallel safety, and `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Full CLI & E2E 4-Layer ATDD Audit' (Protocol in workflow.md)
 
 ---
