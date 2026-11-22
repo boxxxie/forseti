@@ -218,7 +218,91 @@ rule flag_enterprise {
 	then_cli_json_stdout_parses(&w, "run_json", {"fired", "derived_count", "derived", "committed_moment"})
 	then_cli_json_int_field_equals(&w, "run_json", "fired", 3)
 	then_cli_json_int_field_equals(&w, "run_json", "derived_count", 3)
+	then_cli_json_int_field_equals(&w, "run_json", "committed_moment", 1)
 	then_cli_output_contains(&w, "run_json", "enterprise")
+
+	upon_running_cli(&w, "explain_store", {"explain", "--store", "mdm.xit", "--binding", "Alert", "mdm.forseti"})
+	then_cli_exits_with(&w, "explain_store", 0)
+	then_cli_output_contains(&w, "explain_store", "via rule=flag_enterprise")
+
+	extra_facts_json := `[
+  {"binding": "Raw", "key": "org:3", "fields": {"org_id": "org:3", "employees": 500}}
+]`
+	cand_policy := `module mdm_cli version "2.1"
+schema RawOrg { org_id: string, employees: i64 }
+schema CanonOrg { org_id: string, tier: string }
+schema AlertOrg { org_id: string }
+
+source Raw : RawOrg at .orgs.raw[?id]
+derived Canon : CanonOrg at .orgs.canon[?id]
+derived Alert : AlertOrg at .orgs.alert[?id]
+
+table tier_gate version "1.0" hit First {
+  inputs { employees: i64 }
+  outputs { tier: string }
+  rows {
+    r_ent: >= 300 || "enterprise";
+    r_smb: -      || "smb";
+  }
+}
+
+rule canonicalize {
+  when {
+    ?_r := Raw(org_id: ?oid, employees: ?emp)
+    ?g := decide tier_gate(employees: ?emp)
+  }
+  then { assert Canon(org_id: ?oid, tier: ?g.tier) }
+}
+
+rule flag_enterprise {
+  when { ?_c := Canon(org_id: ?oid, tier: "enterprise") }
+  then { assert Alert(org_id: ?oid) }
+}`
+	given_workspace_file(&w, "extra_facts.json", extra_facts_json)
+	given_workspace_file(&w, "cand_mdm.forseti", cand_policy)
+
+	upon_running_cli(&w, "explain_store_facts", {"explain", "--store", "mdm.xit", "--facts", "extra_facts.json", "--binding", "Alert", "mdm.forseti"})
+	then_cli_exits_with(&w, "explain_store_facts", 0)
+	then_cli_output_contains(&w, "explain_store_facts", "org:3")
+
+	upon_running_cli(&w, "diff_store_ro", {"diff-replay", "--candidate", "cand_mdm.forseti", "--store", "mdm.xit", "--format=json", "mdm.forseti"})
+	then_cli_exits_with(&w, "diff_store_ro", 0)
+	then_cli_json_stdout_parses(&w, "diff_store_ro", {"parent_moments_before", "parent_moments_after", "removed_count"})
+	then_cli_json_int_field_equals(&w, "diff_store_ro", "parent_moments_before", 2)
+	then_cli_json_int_field_equals(&w, "diff_store_ro", "parent_moments_after", 2)
+	then_cli_json_int_field_equals(&w, "diff_store_ro", "removed_count", 2)
+
+	upon_running_cli(&w, "diff_store_facts_ro", {"diff-replay", "--candidate", "cand_mdm.forseti", "--store", "mdm.xit", "--facts", "extra_facts.json", "--format=json", "mdm.forseti"})
+	then_cli_exits_with(&w, "diff_store_facts_ro", 0)
+	then_cli_json_int_field_equals(&w, "diff_store_facts_ro", "parent_moments_before", 3)
+	then_cli_json_int_field_equals(&w, "diff_store_facts_ro", "parent_moments_after", 3)
+
+	upon_running_cli(&w, "diff_store_verify_ro", {"diff-replay", "--candidate", "cand_mdm.forseti", "--store", "mdm.xit", "--format=json", "mdm.forseti"})
+	then_cli_exits_with(&w, "diff_store_verify_ro", 0)
+	then_cli_json_int_field_equals(&w, "diff_store_verify_ro", "parent_moments_before", 2)
+	then_cli_json_int_field_equals(&w, "diff_store_verify_ro", "parent_moments_after", 2)
+
+	score_policy := `module score_f64 version "1.0"
+schema ScoreIn { id: string, weight: f64 }
+schema ScoreOut { id: string, weight: f64 }
+source ScoreSrc : ScoreIn at .scores.raw[?id]
+derived ScorePass : ScoreOut at .scores.out[?id]
+rule pass {
+  when { ?_s := ScoreSrc(id: ?id, weight: ?w); where ?w >= 50.0 }
+  then { assert ScorePass(id: ?id, weight: ?w) }
+}`
+	score_facts := `[{"binding": "ScoreSrc", "key": "s1", "fields": {"id": "s1", "weight": 100}}]`
+	given_workspace_file(&w, "score.forseti", score_policy)
+	given_workspace_file(&w, "score_facts.json", score_facts)
+
+	upon_running_cli(&w, "run_f64_store", {"run", "--facts", "score_facts.json", "--store", "score.xit", "--format=json", "score.forseti"})
+	then_cli_exits_with(&w, "run_f64_store", 0)
+	then_cli_json_int_field_equals(&w, "run_f64_store", "derived_count", 1)
+
+	upon_running_cli(&w, "bad_fmt_run", {"run", "--format=jsonl", "mdm.forseti"})
+	then_cli_exits_with(&w, "bad_fmt_run", 2)
+	upon_running_cli(&w, "bad_fmt_ast", {"ast", "--format=json", "mdm.forseti"})
+	then_cli_exits_with(&w, "bad_fmt_ast", 2)
 
 	upon_running_cli(&w, "explain_human", {"explain", "--facts", "facts.json", "--binding", "Alert", "mdm.forseti"})
 	then_cli_exits_with(&w, "explain_human", 0)

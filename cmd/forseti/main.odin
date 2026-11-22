@@ -55,8 +55,35 @@ Loaded_Facts_Bundle :: struct {
 }
 
 Seed_Store_Ctx :: struct {
-	rb:     ^forseti.Rulebase,
+	rbs:    []^forseti.Rulebase,
 	bundle: ^Loaded_Facts_Bundle,
+}
+
+Cli_Exec_Context :: struct {
+	sess:             ^forseti.Session,
+	bridge:           forseti.Store_Bridge,
+	has_bridge:       bool,
+	fork:             forseti.Fork_Handle,
+	fired_count:      u64,
+	committed_moment: i64,
+}
+
+cli_exec_destroy :: proc(exec: ^Cli_Exec_Context) {
+	if exec == nil {
+		return
+	}
+	if exec.sess != nil {
+		forseti.session_destroy(exec.sess)
+		free(exec.sess)
+		exec.sess = nil
+	}
+	if exec.fork.active {
+		forseti.fork_destroy(&exec.fork)
+	}
+	if exec.has_bridge {
+		forseti.store_bridge_destroy(&exec.bridge)
+		exec.has_bridge = false
+	}
 }
 
 print_usage :: proc() {
@@ -392,6 +419,9 @@ json_to_forseti_value :: proc(
 		if !is_s {
 			return nil, false
 		}
+		if s == nil {
+			return nil, true
+		}
 		sid, _ := forseti.intern_session_string(&s.rb.interner, &s.interner, string(sv))
 		return sid, true
 	case .Entity:
@@ -413,6 +443,9 @@ json_to_forseti_value :: proc(
 		case json.Float:
 			return f64(v), true
 		case json.String:
+			if s == nil {
+				return nil, true
+			}
 			sid, _ := forseti.intern_session_string(&s.rb.interner, &s.interner, string(v))
 			return sid, true
 		case json.Null, json.Array, json.Object:
@@ -422,19 +455,65 @@ json_to_forseti_value :: proc(
 	return nil, false
 }
 
+find_binding_in_rbs :: proc(rbs: []^forseti.Rulebase, name: string) -> (rb: ^forseti.Rulebase, bidx: u16, ok: bool) {
+	for candidate in rbs {
+		if candidate == nil {
+			continue
+		}
+		if bi, found := forseti.rulebase_find_binding(candidate, name); found {
+			return candidate, bi, true
+		}
+	}
+	return nil, 0, false
+}
+
+validate_facts_bundle_for_store :: proc(rbs: []^forseti.Rulebase, bundle: ^Loaded_Facts_Bundle) -> bool {
+	path_buf: [256]u8 = ---
+	for item in bundle.items {
+		rb, bidx, has_b := find_binding_in_rbs(rbs, item.binding)
+		if !has_b {
+			fmt.eprintfln("error: unknown binding %q in facts file", item.binding)
+			return false
+		}
+		dot_path := forseti.rulebase_binding_dot_path(rb, bidx, path_buf[:])
+		if len(dot_path) == 0 {
+			fmt.eprintfln("error: binding %q has no store selector path", item.binding)
+			return false
+		}
+		bdef := rb.bindings[bidx]
+		schema := rb.schemas[bdef.schema_id]
+		for sf in schema.fields {
+			fname := forseti.interner_get(&rb.interner, sf.name)
+			jv, has_f := item.fields[fname]
+			if !has_f {
+				continue
+			}
+			if sf.type.kind == .Unknown || sf.type.kind == .Fact || sf.type.kind == .Table_Result {
+				fmt.eprintfln("error: unsupported store schema field type %v for %s.%s", sf.type.kind, item.binding, fname)
+				return false
+			}
+			if _, valid := json_to_forseti_value(nil, sf.type.kind, jv); !valid {
+				fmt.eprintfln("error: invalid value for %s.%s in key %q", item.binding, fname, item.key)
+				return false
+			}
+		}
+	}
+	return true
+}
+
 seed_facts_tx_cb :: proc(wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
 	ctx := (^Seed_Store_Ctx)(user_data)
 	path_buf: [256]u8 = ---
 	for item in ctx.bundle.items {
-		bidx, has_b := forseti.rulebase_find_binding(ctx.rb, item.binding)
+		rb, bidx, has_b := find_binding_in_rbs(ctx.rbs, item.binding)
 		if !has_b {
-			continue
+			return xitdb.Xitdb_Error.Write_Failed
 		}
-		bdef := ctx.rb.bindings[bidx]
-		schema := ctx.rb.schemas[bdef.schema_id]
-		dot_path := forseti.rulebase_binding_dot_path(ctx.rb, bidx, path_buf[:])
+		bdef := rb.bindings[bidx]
+		schema := rb.schemas[bdef.schema_id]
+		dot_path := forseti.rulebase_binding_dot_path(rb, bidx, path_buf[:])
 		if len(dot_path) == 0 {
-			continue
+			return xitdb.Xitdb_Error.Write_Failed
 		}
 		col_map, cm_err := forseti.store_write_path_ensure_map(wc, dot_path)
 		if cm_err != nil {
@@ -443,26 +522,54 @@ seed_facts_tx_cb :: proc(wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Er
 		rec_wc := xitdb.hash_map_put_cursor(&col_map, item.key) or_return
 		rec_m := xitdb.write_hash_map_init(rec_wc) or_return
 		for sf in schema.fields {
-			fname := forseti.interner_get(&ctx.rb.interner, sf.name)
+			fname := forseti.interner_get(&rb.interner, sf.name)
 			jv, has_f := item.fields[fname]
 			if !has_f {
 				continue
 			}
-			#partial switch v in jv {
-			case json.Boolean:
-				if werr := forseti.write_bool_to_hash_map(&rec_m, fname, bool(v)); werr != nil {
+			switch sf.type.kind {
+			case .Bool:
+				bv, is_b := jv.(json.Boolean)
+				if !is_b {
 					return xitdb.Xitdb_Error.Write_Failed
 				}
-			case json.Integer:
-				if sf.type.kind == .Entity && v >= 0 {
-					xitdb.hash_map_put(&rec_m, fname, u64(v)) or_return
-				} else {
-					xitdb.hash_map_put(&rec_m, fname, i64(v)) or_return
+				if werr := forseti.write_bool_to_hash_map(&rec_m, fname, bool(bv)); werr != nil {
+					return xitdb.Xitdb_Error.Write_Failed
 				}
-			case json.Float:
-				xitdb.hash_map_put(&rec_m, fname, f64(v)) or_return
-			case json.String:
-				xitdb.hash_map_put(&rec_m, fname, string(v)) or_return
+			case .I32:
+				iv, is_i := jv.(json.Integer)
+				if !is_i || i64(iv) < i64(min(i32)) || i64(iv) > i64(max(i32)) {
+					return xitdb.Xitdb_Error.Write_Failed
+				}
+				xitdb.hash_map_put(&rec_m, fname, i64(iv)) or_return
+			case .I64, .Time:
+				iv, is_i := jv.(json.Integer)
+				if !is_i {
+					return xitdb.Xitdb_Error.Write_Failed
+				}
+				xitdb.hash_map_put(&rec_m, fname, i64(iv)) or_return
+			case .F64:
+				if fv, is_f := jv.(json.Float); is_f {
+					xitdb.hash_map_put(&rec_m, fname, f64(fv)) or_return
+				} else if iv, is_i := jv.(json.Integer); is_i {
+					xitdb.hash_map_put(&rec_m, fname, f64(iv)) or_return
+				} else {
+					return xitdb.Xitdb_Error.Write_Failed
+				}
+			case .String, .Enum:
+				sv, is_s := jv.(json.String)
+				if !is_s {
+					return xitdb.Xitdb_Error.Write_Failed
+				}
+				xitdb.hash_map_put(&rec_m, fname, string(sv)) or_return
+			case .Entity:
+				iv, is_i := jv.(json.Integer)
+				if !is_i || iv < 0 {
+					return xitdb.Xitdb_Error.Write_Failed
+				}
+				xitdb.hash_map_put(&rec_m, fname, u64(iv)) or_return
+			case .Unknown, .Fact, .Table_Result:
+				return xitdb.Xitdb_Error.Write_Failed
 			}
 		}
 	}
@@ -556,6 +663,7 @@ watch_source_paths :: proc(syncer: ^forseti.Delta_Syncer, rbs: []^forseti.Ruleba
 }
 
 execute_session_with_inputs :: proc(
+	exec: ^Cli_Exec_Context,
 	rb: ^forseti.Rulebase,
 	bundle: ^Loaded_Facts_Bundle,
 	store_path: string,
@@ -563,90 +671,92 @@ execute_session_with_inputs :: proc(
 	telemetry: ^forseti.Telemetry_Sink,
 	commit_to_store: bool,
 ) -> (
-	sess: ^forseti.Session,
-	fired_count: u64,
-	committed_moment: i64,
-	has_store: bool,
 	exit_code: int,
 	ok: bool,
 ) {
-	committed_moment = -1
-	sess = new(forseti.Session)
-	s_err := forseti.session_init(sess, rb, forseti.Session_Config{provenance_mode = prov_mode}, telemetry, context.allocator)
+	exec^ = {committed_moment = -1}
+	exec.sess = new(forseti.Session)
+	s_err := forseti.session_init(exec.sess, rb, forseti.Session_Config{provenance_mode = prov_mode}, telemetry, context.allocator)
 	if s_err != .None {
-		forseti.session_destroy(sess)
-		free(sess)
+		cli_exec_destroy(exec)
 		fmt.eprintfln("error: session_init failed: %v", s_err)
-		return nil, 0, -1, false, 2, false
+		return 2, false
 	}
 
 	if len(store_path) > 0 {
-		bridge: forseti.Store_Bridge
-		if b_err := forseti.store_bridge_open_file(&bridge, store_path, forseti.Xitdb_Config{mode = .Safe_V2}, telemetry, context.allocator); b_err != nil {
-			forseti.session_destroy(sess)
-			free(sess)
+		if b_err := forseti.store_bridge_open_file(&exec.bridge, store_path, forseti.Xitdb_Config{mode = .Safe_V2}, telemetry, context.allocator); b_err != nil {
+			cli_exec_destroy(exec)
 			fmt.eprintfln("error: failed opening store %q: %v", store_path, b_err)
-			return nil, 0, -1, false, 2, false
+			return 2, false
 		}
-		defer forseti.store_bridge_destroy(&bridge)
+		exec.has_bridge = true
 
+		rbs := [1]^forseti.Rulebase{rb}
+		active_bridge := &exec.bridge
 		if len(bundle.items) > 0 {
-			seed_ctx := Seed_Store_Ctx{rb = rb, bundle = bundle}
-			if _, m_err := forseti.store_bridge_commit_moment(&bridge, seed_facts_tx_cb, &seed_ctx); m_err != nil {
-				forseti.session_destroy(sess)
-				free(sess)
+			if !validate_facts_bundle_for_store(rbs[:], bundle) {
+				cli_exec_destroy(exec)
+				return 1, false
+			}
+			if !commit_to_store {
+				if fk_err := forseti.fork_create(&exec.fork, &exec.bridge, context.allocator); fk_err != nil {
+					cli_exec_destroy(exec)
+					fmt.eprintfln("error: failed forking store %q: %v", store_path, fk_err)
+					return 2, false
+				}
+				active_bridge = &exec.fork.bridge
+			}
+			seed_ctx := Seed_Store_Ctx{rbs = rbs[:], bundle = bundle}
+			if _, m_err := forseti.store_bridge_commit_moment(active_bridge, seed_facts_tx_cb, &seed_ctx); m_err != nil {
+				cli_exec_destroy(exec)
 				fmt.eprintfln("error: failed seeding store %q: %v", store_path, m_err)
-				return nil, 0, -1, false, 2, false
+				return 2, false
 			}
 		}
 
 		syncer: forseti.Delta_Syncer
 		if d_err := forseti.delta_syncer_init(&syncer, telemetry, context.allocator); d_err != nil {
-			forseti.session_destroy(sess)
-			free(sess)
+			cli_exec_destroy(exec)
 			fmt.eprintfln("error: delta_syncer_init failed: %v", d_err)
-			return nil, 0, -1, false, 2, false
+			return 2, false
 		}
 		defer forseti.delta_syncer_destroy(&syncer)
 
-		rbs := [1]^forseti.Rulebase{rb}
 		if !watch_source_paths(&syncer, rbs[:]) {
-			forseti.session_destroy(sess)
-			free(sess)
-			return nil, 0, -1, false, 2, false
+			cli_exec_destroy(exec)
+			return 2, false
 		}
 
-		cnt, f_err := forseti.session_sync_and_fire(sess, &bridge, &syncer, commit_derived = commit_to_store)
+		cnt, f_err := forseti.session_sync_and_fire(exec.sess, active_bridge, &syncer, commit_derived = commit_to_store)
 		if f_err != nil {
-			forseti.session_destroy(sess)
-			free(sess)
+			cli_exec_destroy(exec)
 			fmt.eprintfln("error: sync/fire failed: %v", f_err)
-			return nil, 0, -1, false, 2, false
+			return 2, false
 		}
-		fired_count = cnt
-		has_store = true
-		mc, mc_err := forseti.store_bridge_moment_count(&bridge)
-		if mc_err == nil && mc > 0 {
-			committed_moment = mc - 1
+		exec.fired_count = cnt
+		if commit_to_store {
+			mc, mc_err := forseti.store_bridge_moment_count(active_bridge)
+			if mc_err == nil && mc > 0 {
+				exec.committed_moment = mc - 1
+			}
 		}
-		return sess, fired_count, committed_moment, has_store, 0, true
+		return 0, true
 	}
 
 	if len(bundle.items) > 0 {
-		if !insert_loaded_facts_direct(sess, bundle) {
-			forseti.session_destroy(sess)
-			free(sess)
-			return nil, 0, -1, false, 1, false
+		if !insert_loaded_facts_direct(exec.sess, bundle) {
+			cli_exec_destroy(exec)
+			return 1, false
 		}
 	}
-	cnt, f_err := forseti.session_fire(sess)
+	cnt, f_err := forseti.session_fire(exec.sess)
 	if f_err != .None {
-		forseti.session_destroy(sess)
-		free(sess)
+		cli_exec_destroy(exec)
 		fmt.eprintfln("error: session_fire failed: %v", f_err)
-		return nil, 0, -1, false, 2, false
+		return 2, false
 	}
-	return sess, cnt, -1, false, 0, true
+	exec.fired_count = cnt
+	return 0, true
 }
 
 select_matching_fact_ids :: proc(s: ^forseti.Session, opts: Cli_Options) -> []forseti.Fact_Id {
@@ -772,9 +882,24 @@ run_cmd_diff_replay :: proc(
 	}
 	defer forseti.store_bridge_destroy(&bridge)
 
+	rbs := [2]^forseti.Rulebase{&base_rb, &cand_rb}
+	seed_fork: forseti.Fork_Handle
+	defer forseti.fork_destroy(&seed_fork)
+	replay_bridge := &bridge
+
 	if len(bundle.items) > 0 {
-		seed_ctx := Seed_Store_Ctx{rb = &base_rb, bundle = &bundle}
-		if _, m_err := forseti.store_bridge_commit_moment(&bridge, seed_facts_tx_cb, &seed_ctx); m_err != nil {
+		if !validate_facts_bundle_for_store(rbs[:], &bundle) {
+			return 1
+		}
+		if len(opts.store_path) > 0 {
+			if fk_err := forseti.fork_create(&seed_fork, &bridge, context.allocator); fk_err != nil {
+				fmt.eprintfln("error: failed forking store %q: %v", opts.store_path, fk_err)
+				return 2
+			}
+			replay_bridge = &seed_fork.bridge
+		}
+		seed_ctx := Seed_Store_Ctx{rbs = rbs[:], bundle = &bundle}
+		if _, m_err := forseti.store_bridge_commit_moment(replay_bridge, seed_facts_tx_cb, &seed_ctx); m_err != nil {
 			fmt.eprintfln("error: failed seeding facts into store: %v", m_err)
 			return 2
 		}
@@ -783,7 +908,6 @@ run_cmd_diff_replay :: proc(
 	watch_set := make(map[string]bool, 8, context.temp_allocator)
 	watch_paths := make([dynamic]string, 0, 8, context.temp_allocator)
 	path_buf: [256]u8 = ---
-	rbs := [2]^forseti.Rulebase{&base_rb, &cand_rb}
 	for rbp in rbs {
 		for bdef, bi in rbp.bindings {
 			if bdef.kind != .Source {
@@ -798,7 +922,7 @@ run_cmd_diff_replay :: proc(
 		}
 	}
 
-	rep, d_err := forseti.diff_replay(&bridge, &base_rb, &cand_rb, watch_paths[:], telemetry, context.allocator)
+	rep, d_err := forseti.diff_replay(replay_bridge, &base_rb, &cand_rb, watch_paths[:], telemetry, context.allocator)
 	if d_err != nil {
 		fmt.eprintfln("error: diff-replay failed: %v", d_err)
 		return 2
@@ -862,6 +986,19 @@ run_cli :: proc() -> int {
 		return 2
 	}
 	defer forseti.telemetry_destroy(&telemetry)
+
+	switch opts.subcmd {
+	case "check", "verify-tables", "run", "explain", "impact", "diff-replay":
+		if opts.format != .Human && opts.format != .Json {
+			fmt.eprintfln("error: command %q only supports --format=human or --format=json", opts.subcmd)
+			return 2
+		}
+	case "ast", "ir", "gen", "export-dot", "export-mermaid":
+		if opts.format != .Human {
+			fmt.eprintfln("error: command %q does not support --format", opts.subcmd)
+			return 2
+		}
+	}
 
 	switch opts.subcmd {
 	case "check", "verify-tables":
@@ -1000,7 +1137,10 @@ run_cli :: proc() -> int {
 		}
 		defer forseti.rulebase_destroy(&rb)
 
-		sess, fired, committed_moment, _, run_code, run_ok := execute_session_with_inputs(
+		exec: Cli_Exec_Context
+		defer cli_exec_destroy(&exec)
+		run_code, run_ok := execute_session_with_inputs(
+			&exec,
 			&rb,
 			&bundle,
 			opts.store_path,
@@ -1011,12 +1151,8 @@ run_cli :: proc() -> int {
 		if !run_ok {
 			return run_code
 		}
-		defer {
-			forseti.session_destroy(sess)
-			free(sess)
-		}
 
-		out_txt, fmt_err := forseti.session_format_run_output(sess, fired, committed_moment, opts.format == .Json, context.allocator)
+		out_txt, fmt_err := forseti.session_format_run_output(exec.sess, exec.fired_count, exec.committed_moment, opts.format == .Json, context.allocator)
 		if fmt_err != nil {
 			fmt.eprintfln("error: failed formatting run output: %v", fmt_err)
 			return 2
@@ -1043,7 +1179,10 @@ run_cli :: proc() -> int {
 		}
 		defer forseti.rulebase_destroy(&rb)
 
-		sess, _, _, _, run_code, run_ok := execute_session_with_inputs(
+		exec: Cli_Exec_Context
+		defer cli_exec_destroy(&exec)
+		run_code, run_ok := execute_session_with_inputs(
+			&exec,
 			&rb,
 			&bundle,
 			opts.store_path,
@@ -1054,12 +1193,8 @@ run_cli :: proc() -> int {
 		if !run_ok {
 			return run_code
 		}
-		defer {
-			forseti.session_destroy(sess)
-			free(sess)
-		}
 
-		fids := select_matching_fact_ids(sess, opts)
+		fids := select_matching_fact_ids(exec.sess, opts)
 		has_filter := opts.has_fact_id || len(opts.binding_name) > 0 || len(opts.fact_key) > 0
 		if has_filter && len(fids) == 0 {
 			fmt.eprintln("error: no matching alive fact found to explain")
@@ -1079,7 +1214,7 @@ run_cli :: proc() -> int {
 				if i > 0 {
 					strings.write_byte(&b, ',')
 				}
-				tree := forseti.explain(sess, fid, context.allocator)
+				tree := forseti.explain(exec.sess, fid, context.allocator)
 				j_txt, j_err := forseti.explain_format_json(&tree, context.allocator)
 				forseti.explain_tree_destroy(&tree)
 				if j_err != nil {
@@ -1095,7 +1230,7 @@ run_cli :: proc() -> int {
 				strings.write_string(&b, "<no explanations>\n")
 			} else {
 				for fid in fids {
-					tree := forseti.explain(sess, fid, context.allocator)
+					tree := forseti.explain(exec.sess, fid, context.allocator)
 					txt := forseti.explain_format(&tree, context.allocator)
 					forseti.explain_tree_destroy(&tree)
 					strings.write_string(&b, txt)
@@ -1129,7 +1264,10 @@ run_cli :: proc() -> int {
 		}
 		defer forseti.rulebase_destroy(&rb)
 
-		sess, _, _, _, run_code, run_ok := execute_session_with_inputs(
+		exec: Cli_Exec_Context
+		defer cli_exec_destroy(&exec)
+		run_code, run_ok := execute_session_with_inputs(
+			&exec,
 			&rb,
 			&bundle,
 			opts.store_path,
@@ -1139,10 +1277,6 @@ run_cli :: proc() -> int {
 		)
 		if !run_ok {
 			return run_code
-		}
-		defer {
-			forseti.session_destroy(sess)
-			free(sess)
 		}
 
 		rid := max(u32)
@@ -1157,15 +1291,15 @@ run_cli :: proc() -> int {
 			return 1
 		}
 
-		rep := forseti.impact(sess, rid, opts.rule_version, context.allocator)
+		rep := forseti.impact(exec.sess, rid, opts.rule_version, context.allocator)
 		defer forseti.impact_report_destroy(&rep)
 
 		out_txt: string
 		fmt_err: mem.Allocator_Error
 		if opts.format == .Json {
-			out_txt, fmt_err = forseti.impact_format_json(sess, &rep, context.allocator)
+			out_txt, fmt_err = forseti.impact_format_json(exec.sess, &rep, context.allocator)
 		} else {
-			out_txt, fmt_err = forseti.impact_format_human(sess, &rep, context.allocator)
+			out_txt, fmt_err = forseti.impact_format_human(exec.sess, &rep, context.allocator)
 		}
 		if fmt_err != nil {
 			fmt.eprintfln("error: failed formatting impact output: %v", fmt_err)
@@ -1200,7 +1334,10 @@ run_cli :: proc() -> int {
 		}
 		defer forseti.rulebase_destroy(&rb)
 
-		sess, _, _, _, run_code, run_ok := execute_session_with_inputs(
+		exec: Cli_Exec_Context
+		defer cli_exec_destroy(&exec)
+		run_code, run_ok := execute_session_with_inputs(
+			&exec,
 			&rb,
 			&bundle,
 			opts.store_path,
@@ -1210,10 +1347,6 @@ run_cli :: proc() -> int {
 		)
 		if !run_ok {
 			return run_code
-		}
-		defer {
-			forseti.session_destroy(sess)
-			free(sess)
 		}
 
 		out_txt: string
@@ -1260,7 +1393,10 @@ run_cli :: proc() -> int {
 			}
 			defer loaded_facts_destroy(&bundle)
 
-			sess, _, _, _, run_code, run_ok := execute_session_with_inputs(
+			exec: Cli_Exec_Context
+			defer cli_exec_destroy(&exec)
+			run_code, run_ok := execute_session_with_inputs(
+				&exec,
 				&rb,
 				&bundle,
 				opts.store_path,
@@ -1271,14 +1407,10 @@ run_cli :: proc() -> int {
 			if !run_ok {
 				return run_code
 			}
-			defer {
-				forseti.session_destroy(sess)
-				free(sess)
-			}
 
 			focus_fid := forseti.INVALID_FACT
 			if opts.has_fact_id || len(opts.binding_name) > 0 || len(opts.fact_key) > 0 {
-				matches := select_matching_fact_ids(sess, opts)
+				matches := select_matching_fact_ids(exec.sess, opts)
 				if len(matches) == 0 {
 					fmt.eprintln("error: no matching fact found for derivation export focus")
 					return 1
@@ -1286,9 +1418,9 @@ run_cli :: proc() -> int {
 				focus_fid = matches[0]
 			}
 			if is_dot {
-				out_txt, exp_err = forseti.export_derivations_dot(sess, focus_fid, context.allocator)
+				out_txt, exp_err = forseti.export_derivations_dot(exec.sess, focus_fid, context.allocator)
 			} else {
-				out_txt, exp_err = forseti.export_derivations_mermaid(sess, focus_fid, context.allocator)
+				out_txt, exp_err = forseti.export_derivations_mermaid(exec.sess, focus_fid, context.allocator)
 			}
 		} else {
 			if is_dot {
