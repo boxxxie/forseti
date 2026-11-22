@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, "track/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check-and-test:
+    name: Check & Test (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: forseti
+
+      # Sibling paths (../xitdb/xitdb, ../hugi/hugi, ../hugi/deps/obench/obench)
+      # match ols.json, tests/test_examples_verify.odin, and specs/driver_test.odin.
+      # Update ref to a release tag once boxxxie/odin-xitdb#10 lands.
+      - name: Checkout odin-xitdb
+        uses: actions/checkout@v4
+        with:
+          repository: boxxxie/odin-xitdb
+          ref: feat/collection-diff-stats-and-hash-id
+          path: xitdb
+          submodules: false
+          persist-credentials: false
+
+      - name: Checkout hugi v0.2.0 (runner only)
+        uses: actions/checkout@v4
+        with:
+          repository: boxxxie/hugi
+          ref: v0.2.0
+          path: hugi
+          submodules: false
+          persist-credentials: false
+
+      - name: Init hugi obench submodule
+        run: git -C hugi submodule update --init deps/obench
+
+      - name: Setup Odin compiler
+        uses: laytan/setup-odin@v2
+        with:
+          release: dev-2026-10
+          token: ${{ secrets.GITHUB_TOKEN }}
+          cache: false
+
+      - name: Odin compiler info
+        working-directory: forseti
+        run: odin report
+
+      - name: Run strict static checks
+        working-directory: forseti
+        run: |
+          # -disallow-do omitted because xitdb/lua.odin uses `do`
+          odin check forseti -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti
+          odin check cmd/forseti -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,main
+          odin check benchmarks -collection:xitdb=../xitdb/xitdb -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,main
+          odin check tests -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_tests
+          odin check specs -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_specs
+
+      - name: Run leak-checked unit, doc & example tests
+        working-directory: forseti
+        run: odin test tests -collection:xitdb=../xitdb/xitdb -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+
+      - name: Run leak-checked 4-layer ATDD specification suite
+        working-directory: forseti
+        run: odin test specs -collection:xitdb=../xitdb/xitdb -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+
+      - name: Verify package documentation generation
+        working-directory: forseti
+        run: odin doc forseti -collection:xitdb=../xitdb/xitdb > /dev/null
