@@ -2,6 +2,7 @@ package forseti_tests
 
 import "core:fmt"
 import "core:math"
+import vmem "core:mem/virtual"
 import "core:strings"
 import "core:testing"
 import xitdb "xitdb:."
@@ -1367,4 +1368,709 @@ test_reg_xitdb_delta_sync_atomic_on_error :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect(t, saw_col1_change)
+}
+
+@(test)
+test_reg_audit2_dsl_sema_and_query_compile :: proc(t: ^testing.T) {
+	// 1. BUG-002: let_clause and manual Clause_Spec(.Let/.Where) with lit_bool(false) keep concrete Expr_Id
+	{
+		b: forseti.Ir_Builder
+		testing.expect_value(t, forseti.ir_builder_init(&b, "let_false", "1.0"), nil)
+		defer forseti.ir_builder_destroy(&b)
+
+		_ = forseti.ir_schema(&b, "Item", {forseti.field("id", .String)})
+		_ = forseti.ir_source(&b, "ItemSrc", "Item", ".items[?id]")
+		_ = forseti.ir_rule(&b, forseti.Rule_Spec{
+			name = "keep_false_clauses",
+			when_clauses = {
+				forseti.pat("it", "ItemSrc", {forseti.field_bind("id", forseti.vref("id"))}),
+				forseti.let_clause("flag_helper", forseti.lit(false)),
+				forseti.Clause_Spec{kind = .Let, bind_var = "flag_manual", expr = forseti.lit(false)},
+				forseti.Clause_Spec{kind = .Where, expr = forseti.lit(false)},
+			},
+		})
+		diags: forseti.Diagnostic_List
+		testing.expect_value(t, forseti.diag_list_init(&diags), nil)
+		defer forseti.diag_list_destroy(&diags)
+		ir, b_err := forseti.ir_builder_build(&b, &diags)
+		testing.expect_value(t, b_err, nil)
+		defer forseti.ir_destroy(&ir)
+
+		testing.expect_value(t, len(ir.rules[0].when_clauses), 4)
+		for ci in 1 ..< 4 {
+			eid := ir.rules[0].when_clauses[ci].expr
+			testing.expect(t, eid != forseti.INVALID_EXPR)
+			testing.expect_value(t, ir.exprs[eid].kind, forseti.Expr_IR_Kind.Lit_Bool)
+			testing.expect_value(t, ir.exprs[eid].bool_val, false)
+		}
+	}
+
+	// 2. BUG-013 + BUG-014: sema handles .In_List, .Cell_Cmp, and .Range on .I32 pattern fields,
+	// rejects ordering .Cell_Cmp on .Bool with E2002, and checks e.lhs on .In_List for E2003
+	{
+		b: forseti.Ir_Builder
+		testing.expect_value(t, forseti.ir_builder_init(&b, "sema_pat", "1.0"), nil)
+		defer forseti.ir_builder_destroy(&b)
+
+		_ = forseti.ir_schema(&b, "Rec", {
+			forseti.field("id", .String),
+			forseti.field("n", .I32),
+			forseti.field("flag", .Bool),
+		})
+		_ = forseti.ir_schema(&b, "OutRec", {forseti.field("id", .String)})
+		_ = forseti.ir_source(&b, "RecSrc", "Rec", ".recs[?id]")
+		_ = forseti.ir_derived(&b, "OutD", "OutRec", ".out[?id]")
+
+		_ = forseti.ir_rule(&b, forseti.Rule_Spec{
+			name = "ok_i32_matchers",
+			when_clauses = {
+				forseti.pat("?_r", "RecSrc", {
+					forseti.field_bind("id", forseti.vref("?id")),
+					forseti.field_bind("n", forseti.cond(.Gt, i64(10))),
+				}),
+				forseti.pat("?_r2", "RecSrc", {
+					forseti.field_bind("id", forseti.vref("?id")),
+					forseti.field_bind("n", forseti.Expr_Spec{kind = .Range, inclusive = true, children = {forseti.lit(i64(1)), forseti.lit(i64(10))}}),
+				}),
+				forseti.pat("?_r3", "RecSrc", {
+					forseti.field_bind("id", forseti.vref("?id")),
+					forseti.field_bind("n", forseti.Expr_Spec{kind = .In_List, children = {forseti.lit(i64(1)), forseti.lit(i64(2))}}),
+				}),
+			},
+			then_actions = {
+				forseti.assert_fact("OutD", {forseti.field_bind("id", forseti.vref("?id"))}),
+			},
+		})
+		diags: forseti.Diagnostic_List
+		testing.expect_value(t, forseti.diag_list_init(&diags), nil)
+		defer forseti.diag_list_destroy(&diags)
+		ir, b_err := forseti.ir_builder_build(&b, nil)
+		testing.expect_value(t, b_err, nil)
+		defer forseti.ir_destroy(&ir)
+
+		testing.expect_value(t, forseti.analyze_ir(&ir, &diags), nil)
+		testing.expect_value(t, diags.error_count, 0)
+
+		// Ordering .Cell_Cmp on .Bool must emit E2002; .In_List with unbound e.lhs must emit E2003
+		b_bad: forseti.Ir_Builder
+		testing.expect_value(t, forseti.ir_builder_init(&b_bad, "sema_bad", "1.0"), nil)
+		defer forseti.ir_builder_destroy(&b_bad)
+		_ = forseti.ir_schema(&b_bad, "Rec", {forseti.field("id", .String), forseti.field("flag", .Bool)})
+		_ = forseti.ir_source(&b_bad, "RecSrc", "Rec", ".recs[?id]")
+		_ = forseti.ir_rule(&b_bad, forseti.Rule_Spec{
+			name = "bad_bool_ord_and_in_lhs",
+			when_clauses = {
+				forseti.pat("?_r", "RecSrc", {
+					forseti.field_bind("id", forseti.vref("?id")),
+					forseti.field_bind("flag", forseti.Expr_Spec{kind = .Cell_Cmp, binary_op = .Gt, children = {forseti.lit(true)}}),
+				}),
+				forseti.where_clause(forseti.vref("?unbound_in_lhs")),
+				forseti.where_clause(forseti.Expr_Spec{kind = .In_List, children = {forseti.lit(i64(1)), forseti.lit(i64(2))}}),
+			},
+		})
+		d_bad: forseti.Diagnostic_List
+		testing.expect_value(t, forseti.diag_list_init(&d_bad), nil)
+		defer forseti.diag_list_destroy(&d_bad)
+		ir_bad, bad_err := forseti.ir_builder_build(&b_bad, nil)
+		testing.expect_value(t, bad_err, nil)
+		defer forseti.ir_destroy(&ir_bad)
+
+		// Wire e.lhs of the In_List clause to the unbound var expression
+		lhs_eid := ir_bad.rules[0].when_clauses[1].expr
+		in_eid := ir_bad.rules[0].when_clauses[2].expr
+		ir_bad.exprs[in_eid].lhs = lhs_eid
+		ir_bad.rules[0].when_clauses[1].expr = forseti.INVALID_EXPR
+
+		testing.expect_value(t, forseti.analyze_ir(&ir_bad, &d_bad), nil)
+		testing.expect(t, _reg_has_diag_code(&d_bad, .E2002))
+		testing.expect(t, _reg_has_diag_code(&d_bad, .E2003))
+	}
+
+	// 3. BUG-005 + BUG-012: 256 decide clauses fails compile cleanly; unsupported query clause returns .Unsupported_Clause
+	{
+		b: forseti.Ir_Builder
+		testing.expect_value(t, forseti.ir_builder_init(&b, "limits", "1.0"), nil)
+		defer forseti.ir_builder_destroy(&b)
+
+		_ = forseti.ir_table(&b, forseti.Table_Spec{
+			name       = "tbl",
+			version    = "1.0",
+			hit_policy = .First,
+			inputs     = {{name = "x", type = .I64}},
+			outputs    = {{name = "y", type = .I64}},
+			rows       = {{id = "r1", cells = {forseti.wildcard()}, outputs = {forseti.lit(i64(1))}}},
+		})
+		clauses := make([]forseti.Clause_Spec, 256, context.temp_allocator)
+		dname_buf: [16]u8 = ---
+		for i in 0 ..< 256 {
+			vname := strings.clone(fmt.bprintf(dname_buf[:], "d%d", i), context.temp_allocator)
+			clauses[i] = forseti.decide_clause(vname, "tbl", {forseti.field_bind("x", forseti.lit(i64(1)))})
+		}
+		_ = forseti.ir_rule(&b, forseti.Rule_Spec{
+			name         = "too_many_decides",
+			when_clauses = clauses,
+		})
+		d: forseti.Diagnostic_List
+		testing.expect_value(t, forseti.diag_list_init(&d), nil)
+		defer forseti.diag_list_destroy(&d)
+		ir, b_err := forseti.ir_builder_build(&b, &d)
+		testing.expect_value(t, b_err, nil)
+		defer forseti.ir_destroy(&ir)
+
+		rb, comp_err := forseti.rulebase_compile(&ir)
+		defer forseti.rulebase_destroy(&rb)
+		testing.expect_value(t, comp_err, forseti.Compile_Error.Vm_Compile_Failed)
+	}
+	{
+		b: forseti.Ir_Builder
+		testing.expect_value(t, forseti.ir_builder_init(&b, "bad_q", "1.0"), nil)
+		defer forseti.ir_builder_destroy(&b)
+
+		_ = forseti.ir_schema(&b, "Item", {forseti.field("id", .String)})
+		_ = forseti.ir_source(&b, "ItemSrc", "Item", ".items[?id]")
+		_ = forseti.ir_query(&b, forseti.Query_Spec{
+			name = "q_unsup",
+			when_clauses = {
+				forseti.pat("it", "ItemSrc", {forseti.field_bind("id", forseti.vref("id"))}),
+				forseti.let_clause("k", forseti.lit(i64(1))),
+			},
+		})
+		d: forseti.Diagnostic_List
+		testing.expect_value(t, forseti.diag_list_init(&d), nil)
+		defer forseti.diag_list_destroy(&d)
+		ir, b_err := forseti.ir_builder_build(&b, &d)
+		testing.expect_value(t, b_err, nil)
+		defer forseti.ir_destroy(&ir)
+
+		rb, comp_err := forseti.rulebase_compile(&ir)
+		defer forseti.rulebase_destroy(&rb)
+		testing.expect_value(t, comp_err, forseti.Compile_Error.Unsupported_Clause)
+	}
+}
+
+@(test)
+test_reg_audit2_alpha_float_zero_i32_bounds_and_vm_decide :: proc(t: ^testing.T) {
+	// 1. BUG-010: f64(+0.0) alpha equality matches fact with f64(-0.0)
+	{
+		src := `module neg_zero version "1.0"
+schema Val { id: string, f: f64 }
+schema Hit { id: string }
+source ValSrc : Val at .vals[?id]
+derived HitD : Hit at .hits[?id]
+rule match_zero {
+  when { ?_v := ValSrc(id: ?id, f: 0.0) }
+  then { assert HitD(id: ?id) }
+}`
+		ir, diags, ok := _reg_compile_source(t, src, "neg_zero.forseti")
+		defer {
+			forseti.ir_destroy(&ir)
+			forseti.diag_list_destroy(&diags)
+		}
+		if !ok {
+			return
+		}
+		rb, sess, ok2 := _reg_build_session(t, &ir)
+		defer {
+			if sess != nil {
+				forseti.session_destroy(sess)
+				free(sess)
+			}
+			if rb != nil {
+				forseti.rulebase_destroy(rb)
+				free(rb)
+			}
+		}
+		if !ok2 {
+			return
+		}
+		neg_zero := math.copy_sign(f64(0.0), -1.0)
+		_, _ = forseti.session_insert_fact(sess, "ValSrc", "v1", {_reg_str(sess, "v1"), neg_zero})
+		fired, f_err := forseti.session_fire(sess)
+		testing.expect_value(t, f_err, forseti.Session_Error.None)
+		testing.expect_value(t, fired, u64(1))
+	}
+
+	// 2. BUG-011: pattern literals out of i32 bounds do not truncate/wrap to i32(0) or negative
+	{
+		b: forseti.Ir_Builder
+		testing.expect_value(t, forseti.ir_builder_init(&b, "i32_pat_oob", "1.0"), nil)
+		defer forseti.ir_builder_destroy(&b)
+
+		_ = forseti.ir_schema(&b, "Num", {forseti.field("id", .String), forseti.field("n", .I32)})
+		_ = forseti.ir_source(&b, "NumSrc", "Num", ".nums[?id]")
+		_ = forseti.ir_derived(&b, "HitD", "Num", ".hits[?id]")
+		_ = forseti.ir_rule(&b, forseti.Rule_Spec{
+			name = "eq_wrap",
+			when_clauses = {
+				forseti.pat("x", "NumSrc", {
+					forseti.field_bind("id", forseti.vref("id")),
+					forseti.field_bind("n", forseti.lit(i64(4294967296))),
+				}),
+			},
+			then_actions = {
+				forseti.assert_fact("HitD", {forseti.field_bind("id", forseti.vref("id")), forseti.field_bind("n", forseti.lit(i64(1)))}),
+			},
+		})
+		_ = forseti.ir_rule(&b, forseti.Rule_Spec{
+			name = "gt_wrap",
+			when_clauses = {
+				forseti.pat("x", "NumSrc", {
+					forseti.field_bind("id", forseti.vref("id")),
+					forseti.field_bind("n", forseti.cond(.Gt, i64(3000000000))),
+				}),
+			},
+			then_actions = {
+				forseti.assert_fact("HitD", {forseti.field_bind("id", forseti.vref("id")), forseti.field_bind("n", forseti.lit(i64(2)))}),
+			},
+		})
+		d: forseti.Diagnostic_List
+		testing.expect_value(t, forseti.diag_list_init(&d), nil)
+		defer forseti.diag_list_destroy(&d)
+		ir, b_err := forseti.ir_builder_build(&b, &d)
+		testing.expect_value(t, b_err, nil)
+		defer forseti.ir_destroy(&ir)
+
+		rb, sess, ok2 := _reg_build_session(t, &ir)
+		defer {
+			if sess != nil {
+				forseti.session_destroy(sess)
+				free(sess)
+			}
+			if rb != nil {
+				forseti.rulebase_destroy(rb)
+				free(rb)
+			}
+		}
+		if !ok2 {
+			return
+		}
+		_, _ = forseti.session_insert_fact(sess, "NumSrc", "n0", {_reg_str(sess, "n0"), i32(0)})
+		_, _ = forseti.session_insert_fact(sess, "NumSrc", "n1", {_reg_str(sess, "n1"), i32(10)})
+		fired, f_err := forseti.session_fire(sess)
+		testing.expect_value(t, f_err, forseti.Session_Error.None)
+		testing.expect_value(t, fired, u64(0))
+	}
+
+	// 3. BUG-018: Decide_Call keeps EMPTY_STRING vs String_Id(INVALID_ID) distinct
+	{
+		b: forseti.Ir_Builder
+		testing.expect_value(t, forseti.ir_builder_init(&b, "dec_emp", "1.0"), nil)
+		defer forseti.ir_builder_destroy(&b)
+
+		_ = forseti.ir_table(&b, forseti.Table_Spec{
+			name       = "str_tbl",
+			version    = "1.0",
+			hit_policy = .First,
+			inputs     = {{name = "s", type = .String, cost = 1}},
+			outputs    = {{name = "tag", type = .String}},
+			rows = {
+				{id = "r_emp", cells = {forseti.lit("")}, outputs = {forseti.lit("matched_empty")}},
+				{id = "r_wild", cells = {forseti.wildcard()}, outputs = {forseti.lit("matched_wild")}},
+			},
+		})
+		d: forseti.Diagnostic_List
+		testing.expect_value(t, forseti.diag_list_init(&d), nil)
+		defer forseti.diag_list_destroy(&d)
+		ir, b_err := forseti.ir_builder_build(&b, &d)
+		testing.expect_value(t, b_err, nil)
+		defer forseti.ir_destroy(&ir)
+
+		ct, c_err := forseti.compile_table(&ir, 0)
+		testing.expect_value(t, c_err, nil)
+		defer forseti.compiled_table_destroy(&ct)
+
+		vm_int, sess_int: forseti.String_Interner
+		testing.expect_value(t, forseti.interner_init(&vm_int), nil)
+		defer forseti.interner_destroy(&vm_int)
+		testing.expect_value(t, forseti.interner_init(&sess_int), nil)
+		defer forseti.interner_destroy(&sess_int)
+
+		_, _ = forseti.intern(&vm_int, "matched_empty")
+		_, _ = forseti.intern(&vm_int, "matched_wild")
+
+		dcalls := []forseti.Decide_Call_Desc{{
+			table_idx   = 0,
+			result_slot = 0,
+			args        = {{col_idx = 0, reg = 0}},
+		}}
+		code := []forseti.Instruction{
+			{op = .Load_Var, dst = 0, lhs = 0},
+			{op = .Decide_Call, dst = 1, lhs = 0, rhs = 0},
+			{op = .Load_Decide_Out, dst = 2, lhs = 0, rhs = 0},
+			{op = .Halt, dst = 2},
+		}
+		prog := forseti.Bytecode_Program{code = code, decide_calls = dcalls}
+		tables := []forseti.Compiled_Table{ct}
+
+		v_inv := []forseti.Value{forseti.String_Id(forseti.INVALID_ID)}
+		out_inv, err_inv := forseti.vm_eval(&prog, v_inv, nil, tables, &vm_int, nil, &sess_int)
+		testing.expect_value(t, err_inv, forseti.Vm_Error.None)
+		sid_inv, _ := out_inv.(forseti.String_Id)
+		testing.expect_value(t, forseti.resolve_runtime_string(&vm_int, &sess_int, sid_inv), "matched_wild")
+
+		v_emp := []forseti.Value{forseti.EMPTY_STRING}
+		out_emp, err_emp := forseti.vm_eval(&prog, v_emp, nil, tables, &vm_int, nil, &sess_int)
+		testing.expect_value(t, err_emp, forseti.Vm_Error.None)
+		sid_emp, _ := out_emp.(forseti.String_Id)
+		testing.expect_value(t, forseti.resolve_runtime_string(&vm_int, &sess_int, sid_emp), "matched_empty")
+	}
+}
+
+@(test)
+test_reg_audit2_table_verify_priority_w3003_and_half_open :: proc(t: ^testing.T) {
+	// 1. BUG-007: W3003 is not emitted for overlapping Collect_Sum rows or non-mergeable non-adjacent First rows
+	{
+		src := `module w3003_guard version "1.0"
+table sum_overlap version "1.0" hit Collect_Sum {
+  inputs { a: bool, b: bool }
+  outputs { pts: i64 }
+  rows {
+    r1: true | -    || 10;
+    r2: -    | true || 10;
+  }
+}
+table first_blocked version "1.0" hit First {
+  inputs { score: i64, flag: bool }
+  outputs { tag: string }
+  rows {
+    r1: 1..=5 | true || "A";
+    r2: 3..=4 | true || "B";
+    r3: 1..=5 | -    || "A";
+  }
+}`
+		ir, diags, ok := _reg_compile_source(t, src, "w3003.forseti")
+		defer {
+			forseti.ir_destroy(&ir)
+			forseti.diag_list_destroy(&diags)
+		}
+		if !ok {
+			return
+		}
+		testing.expect(t, !_reg_has_diag_code(&diags, .W3003))
+	}
+
+	// 2. BUG-016: Priority table with broad lower-priority row before high-priority row avoids false W3002/W3005
+	{
+		src := `module prio_order version "1.0"
+table prio version "1.0" hit Priority {
+  inputs { score: i64 }
+  outputs { tier: enum("high", "low") }
+  rows {
+    r_low:  -     || "low";
+    r_high: >= 50 || "high";
+  }
+}`
+		ir, diags, ok := _reg_compile_source(t, src, "prio.forseti")
+		defer {
+			forseti.ir_destroy(&ir)
+			forseti.diag_list_destroy(&diags)
+		}
+		if !ok {
+			return
+		}
+		testing.expect(t, !_reg_has_diag_code(&diags, .W3002))
+		testing.expect(t, !_reg_has_diag_code(&diags, .W3005))
+	}
+
+	// 3. BUG-023: half-open Float_Interval atoms [1.0, 2.0) and (2.0, 3.0] classify inclusive/exclusive endpoints accurately
+	{
+		ct: forseti.Compiled_Table
+		testing.expect_value(t, vmem.arena_init_growing(&ct.arena), nil)
+		testing.expect_value(t, forseti.interner_init(&ct.interner), nil)
+		defer forseti.compiled_table_destroy(&ct)
+
+		a := vmem.arena_allocator(&ct.arena)
+		tname, _ := forseti.intern(&ct.interner, "half_open")
+		r0_id, _ := forseti.intern(&ct.interner, "r0")
+		r1_id, _ := forseti.intern(&ct.interner, "r1")
+
+		ct.table_name = tname
+		ct.hit_policy = .First
+		ct.col_count = 1
+		ct.out_count = 1
+		ct.row_count = 2
+		ct.use_tree = true
+
+		ct.col_types = make([]forseti.Type_Ref, 1, a)
+		ct.col_types[0] = {kind = .F64}
+		ct.col_costs = make([]u32, 1, a)
+		ct.col_costs[0] = 1
+		ct.col_domains = make([]forseti.Column_Domain, 1, a)
+		atoms := make([]forseti.Domain_Atom, 2, a)
+		atoms[0] = {kind = .Float_Interval, float_lo = 1.0, float_hi = 2.0, lo_inc = true, hi_inc = false, float_rep = 1.5}
+		atoms[1] = {kind = .Float_Interval, float_lo = 2.0, float_hi = 3.0, lo_inc = false, hi_inc = true, float_rep = 2.5}
+		ct.col_domains[0] = {col_idx = 0, kind = .Float_Interval, atoms = atoms, word_count = 1}
+
+		ct.row_ids = make([]forseti.String_Id, 2, a)
+		ct.row_ids[0] = r0_id
+		ct.row_ids[1] = r1_id
+		ct.row_outputs = make([][]forseti.Value, 2, a)
+		ct.row_output_set = make([][]bool, 2, a)
+		ct.row_masks = make([][][]u64, 2, a)
+		for ri in 0 ..< 2 {
+			ct.row_outputs[ri] = make([]forseti.Value, 1, a)
+			ct.row_outputs[ri][0] = i64(ri + 1)
+			ct.row_output_set[ri] = make([]bool, 1, a)
+			ct.row_output_set[ri][0] = true
+			ct.row_masks[ri] = make([][]u64, 1, a)
+			ct.row_masks[ri][0] = make([]u64, 1, a)
+			ct.row_masks[ri][0][0] = u64(1) << u64(ri)
+		}
+		ct.eval_order = make([]u32, 2, a)
+		ct.eval_order[0] = 0
+		ct.eval_order[1] = 1
+
+		ct.dt_edges = make([]forseti.DT_Edge, 2, a)
+		ct.dt_edges[0] = {next_node = 1}
+		ct.dt_edges[1] = {next_node = 2}
+		ct.dt_nodes = make([]forseti.DT_Node, 3, a)
+		ct.dt_nodes[0] = {col_idx = 0, winning_row = -1, edge_start = 0, edge_count = 2}
+		ct.dt_nodes[1] = {col_idx = -1, winning_row = 0}
+		ct.dt_nodes[2] = {col_idx = -1, winning_row = 1}
+
+		r_lo := forseti.decide(&ct, {values = {f64(1.0)}})
+		testing.expect(t, r_lo.matched)
+		testing.expect_value(t, r_lo.outputs[0], forseti.Value(i64(1)))
+
+		r_mid := forseti.decide(&ct, {values = {f64(2.0)}})
+		testing.expect(t, !r_mid.matched)
+
+		r_hi := forseti.decide(&ct, {values = {f64(3.0)}})
+		testing.expect(t, r_hi.matched)
+		testing.expect_value(t, r_hi.outputs[0], forseti.Value(i64(2)))
+	}
+}
+
+@(test)
+test_reg_audit2_session_effects_jtms_and_xitdb :: proc(t: ^testing.T) {
+	// 1. BUG-004 + BUG-006 + BUG-021 + BUG-022:
+	// atomic effect validation, non-.Fast modify pre-validation, unmapped path hashes, and JTMS invalid/dead parent + active_firing cleanup
+	{
+		src := `module sess_eff_jtms version "1.0"
+schema Raw { id: string, age: i32 }
+schema Mid { id: string }
+schema Res { id: string }
+
+source RawSrc : Raw at .raw[?id]
+derived MidD : Mid at .mid[?id]
+derived ResD : Res at .res[?id]
+
+rule emit_eff {
+  when { ?_r := RawSrc(id: ?id) }
+  effect "lookup" { id: ?id }
+}
+
+rule hop1 {
+  when { ?_r := RawSrc(id: ?id) }
+  then { assert MidD(id: ?id) }
+}
+
+rule hop2 {
+  when { ?_m := MidD(id: ?id) }
+  then { assert ResD(id: ?id) }
+}`
+		ir, diags, ok := _reg_compile_source(t, src, "sej.forseti")
+		defer {
+			forseti.ir_destroy(&ir)
+			forseti.diag_list_destroy(&diags)
+		}
+		if !ok {
+			return
+		}
+		rb, sess, ok2 := _reg_build_session(t, &ir, {provenance_mode = .Audit_Full})
+		defer {
+			if sess != nil {
+				forseti.session_destroy(sess)
+				free(sess)
+			}
+			if rb != nil {
+				forseti.rulebase_destroy(rb)
+				free(rb)
+			}
+		}
+		if !ok2 {
+			return
+		}
+
+		fid_r1, ins_err := forseti.session_insert_fact(sess, "RawSrc", "r1", {_reg_str(sess, "r1"), i32(25)})
+		testing.expect_value(t, ins_err, forseti.Session_Error.None)
+		_, _ = forseti.session_fire(sess)
+
+		// BUG-006: default (.Audit_Full) modify with OOB .I32 fails without retracting existing fact
+		mod_err := forseti.session_modify_fact_by_key(sess, "RawSrc", "r1", {_reg_str(sess, "r1"), i64(max(i32)) + 1})
+		testing.expect_value(t, mod_err, forseti.Session_Error.Invalid_Arg)
+		testing.expect(t, sess.facts[fid_r1].alive)
+
+		// BUG-004: atomic effect validation leaves job_id intact and commits 0 facts on error, allowing clean retry
+		jobs := forseti.session_prepare_effects(sess)
+		defer forseti.effects_jobs_destroy(jobs)
+		testing.expect_value(t, len(jobs), 1)
+		jid := jobs[0].job_id
+
+		res_bidx, _ := forseti.session_find_binding(sess, "ResD")
+		count_res :: proc(s: ^forseti.Session, bidx: u16) -> int {
+			c := 0
+			for &f in s.facts {
+				if f.alive && f.binding_idx == bidx {
+					c += 1
+				}
+			}
+			return c
+		}
+		before_res := count_res(sess, res_bidx)
+
+		// Inject INVALID_FACT alongside valid parent in inflight_effects to also test BUG-022 parent filtering
+		if inf, has_inf := &sess.inflight_effects[jid]; has_inf {
+			old_pf := inf.parent_facts
+			new_pf := make([]forseti.Fact_Id, len(old_pf) + 1, inf.allocator)
+			copy(new_pf, old_pf)
+			new_pf[len(old_pf)] = forseti.INVALID_FACT
+			delete(old_pf, inf.allocator)
+			inf.parent_facts = new_pf
+		}
+
+		bad_applied, bad_err := forseti.session_apply_effects(sess, {{
+			job_id = jid,
+			facts  = {
+				{binding_name = "ResD", key = "eff_k1", fields = {_reg_str(sess, "eff_k1")}},
+				{binding_name = "NoSuchBinding", key = "eff_k2", fields = {_reg_str(sess, "eff_k2")}},
+			},
+		}})
+		testing.expect(t, bad_applied == nil)
+		testing.expect_value(t, bad_err, forseti.Session_Error.Unknown_Binding)
+		testing.expect_value(t, count_res(sess, res_bidx), before_res)
+		testing.expect(t, jid in sess.inflight_effects)
+
+		good_applied, good_err := forseti.session_apply_effects(sess, {{
+			job_id = jid,
+			facts  = {{binding_name = "ResD", key = "eff_k1", fields = {_reg_str(sess, "eff_k1")}}},
+		}})
+		defer delete(good_applied)
+		testing.expect_value(t, good_err, forseti.Session_Error.None)
+		testing.expect_value(t, len(good_applied), 1)
+		eff_fid := good_applied[0]
+		testing.expect(t, sess.facts[eff_fid].alive)
+
+		// Unrelated cascade (insert+retract second key) must not invalidate eff_fid due to INVALID_FACT parent
+		fid_r2, _ := forseti.session_insert_fact(sess, "RawSrc", "r2", {_reg_str(sess, "r2"), i32(30)})
+		_, _ = forseti.session_fire(sess)
+		testing.expect_value(t, forseti.session_retract_fact(sess, fid_r2), forseti.Session_Error.None)
+		testing.expect(t, sess.facts[eff_fid].alive)
+
+		// BUG-021: non-incremental commit with shorter binding_path_hashes slice does not panic OOB
+		bridge: forseti.Store_Bridge
+		testing.expect_value(t, forseti.store_bridge_init_standalone(&bridge), nil)
+		defer forseti.store_bridge_destroy(&bridge)
+		orig_hashes := rb.binding_path_hashes
+		rb.binding_path_hashes = nil
+		_, c_err := forseti.session_commit_derived_and_audit(sess, &bridge)
+		rb.binding_path_hashes = orig_hashes
+		testing.expect_value(t, c_err, nil)
+	}
+
+	// BUG-022 part 2: .Fast mode cascade retraction marks active_firings dead so re-assertion re-derives cleanly
+	{
+		src := `module fast_refire version "1.0"
+schema S { id: string }
+source Src : S at .src[?id]
+derived MidD : S at .mid[?id]
+derived LeafD : S at .leaf[?id]
+rule r1 { when { ?_s := Src(id: ?id) } then { assert MidD(id: ?id) } }
+rule r2 { when { ?_m := MidD(id: ?id) } then { assert LeafD(id: ?id) } }`
+		ir, diags, ok := _reg_compile_source(t, src, "fast_refire.forseti")
+		defer {
+			forseti.ir_destroy(&ir)
+			forseti.diag_list_destroy(&diags)
+		}
+		if !ok {
+			return
+		}
+		rb, sess, ok2 := _reg_build_session(t, &ir, {provenance_mode = .Fast})
+		defer {
+			if sess != nil {
+				forseti.session_destroy(sess)
+				free(sess)
+			}
+			if rb != nil {
+				forseti.rulebase_destroy(rb)
+				free(rb)
+			}
+		}
+		if !ok2 {
+			return
+		}
+
+		leaf_bidx, _ := forseti.session_find_binding(sess, "LeafD")
+		count_leaf :: proc(s: ^forseti.Session, bidx: u16) -> int {
+			c := 0
+			for &f in s.facts {
+				if f.alive && f.binding_idx == bidx {
+					c += 1
+				}
+			}
+			return c
+		}
+
+		f1, _ := forseti.session_insert_fact(sess, "Src", "k1", {_reg_str(sess, "k1")})
+		_, _ = forseti.session_fire(sess)
+		testing.expect_value(t, count_leaf(sess, leaf_bidx), 1)
+
+		testing.expect_value(t, forseti.session_retract_fact(sess, f1), forseti.Session_Error.None)
+		testing.expect_value(t, count_leaf(sess, leaf_bidx), 0)
+		for _, af in sess.jtms.active_firings {
+			testing.expect(t, !af.alive)
+		}
+
+		_, _ = forseti.session_insert_fact(sess, "Src", "k1", {_reg_str(sess, "k1")})
+		_, _ = forseti.session_fire(sess)
+		testing.expect_value(t, count_leaf(sess, leaf_bidx), 1)
+	}
+
+	// 2. BUG-019 + BUG-028: Delta_Syncer Fact_Delta.collection outlives delta_syncer_destroy,
+	// and syncing against a 0-moment bridge emits .Removed deltas and resets state
+	{
+		b1: forseti.Store_Bridge
+		testing.expect_value(t, forseti.store_bridge_init_standalone(&b1), nil)
+		defer forseti.store_bridge_destroy(&b1)
+
+		cb :: proc(wc: ^xitdb.Write_Cursor, _: rawptr) -> xitdb.Error {
+			root := xitdb.write_hash_map_init(wc^) or_return
+			c1_wc := xitdb.hash_map_put_cursor(&root, "col1") or_return
+			c1 := xitdb.write_hash_map_init(c1_wc) or_return
+			return xitdb.hash_map_put(&c1, "k1", "v1")
+		}
+		_, _ = forseti.store_bridge_commit_moment(&b1, cb)
+
+		syncer: forseti.Delta_Syncer
+		testing.expect_value(t, forseti.delta_syncer_init(&syncer), nil)
+		syncer_alive := true
+		defer if syncer_alive {
+			forseti.delta_syncer_destroy(&syncer)
+		}
+		testing.expect_value(t, forseti.delta_syncer_watch(&syncer, ".col1"), nil)
+
+		r0: forseti.Sync_Result
+		testing.expect_value(t, forseti.delta_syncer_sync(&syncer, &b1, &r0), nil)
+		testing.expect_value(t, len(r0.deltas), 1)
+
+		// Sync against a 0-moment bridge -> emits .Removed and resets syncer state (BUG-028)
+		b_empty: forseti.Store_Bridge
+		testing.expect_value(t, forseti.store_bridge_init_standalone(&b_empty), nil)
+		defer forseti.store_bridge_destroy(&b_empty)
+
+		r1: forseti.Sync_Result
+		testing.expect_value(t, forseti.delta_syncer_sync(&syncer, &b_empty, &r1), nil)
+		defer forseti.sync_result_destroy(&r1)
+		testing.expect(t, r1.was_compacted)
+		testing.expect_value(t, len(r1.deltas), 1)
+		testing.expect_value(t, r1.deltas[0].kind, forseti.Fact_Delta_Kind.Removed)
+		testing.expect_value(t, r1.deltas[0].key, "k1")
+		testing.expect(t, !syncer.has_synced)
+
+		// Destroy syncer BEFORE reading r0.deltas[0].collection and freeing r0 (BUG-019)
+		forseti.delta_syncer_destroy(&syncer)
+		syncer_alive = false
+		testing.expect_value(t, r0.deltas[0].collection, ".col1")
+		forseti.sync_result_destroy(&r0)
+	}
 }
