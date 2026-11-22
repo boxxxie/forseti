@@ -1,0 +1,13 @@
+{
+  "track_id": "c_abi_external_integration_and_dsl_v1_1_20261122",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-11-22T12:40:00Z",
+  "updated_at": "2026-11-22T12:40:00Z",
+  "dependencies": [
+    "agent_dsl_docs_examples_and_cli_tooling_20261121",
+    "cross_os_ci_hygiene_and_v0_1_0_release_20261122",
+    "sleipnir_actor_multithreaded_runtime_20261122"
+  ],
+  "description": "Stable C99 ABI (libforseti + forseti.h), Typed Odin Consumer Embeds, and .forseti DSL v1.1 (Multi-File import & Pure Built-In Functions)"
+}

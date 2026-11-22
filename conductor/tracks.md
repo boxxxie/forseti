@@ -36,3 +36,23 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 - [x] **Track 7: Agent-Proof DSL Reference (`docs/` & `usage-rules.md`), CI-Verified Examples, Full CLI (`cmd/forseti`), and E2E ATDD Audit** *(Priority: Step 7 — Depends on Tracks 1–6; docs & specs kept fresh incrementally)*
   *Link: [./tracks/agent_dsl_docs_examples_and_cli_tooling_20261121/](./tracks/agent_dsl_docs_examples_and_cli_tooling_20261121/)*
+
+---
+
+- [ ] **Track 8: Cross-OS CI Matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`), Repo/Actions Hygiene & `v0.1.0` Release Prep** *(Priority: Step 8 — Depends on Track 7)*
+  *Link: [./tracks/cross_os_ci_hygiene_and_v0_1_0_release_20261122/](./tracks/cross_os_ci_hygiene_and_v0_1_0_release_20261122/)*
+
+---
+
+- [ ] **Track 9: Sleipnir (`package actor`) Multi-Threaded Session Runtime, Partitioned Tenant Supervision & Parallel Async Effects** *(Priority: Step 9 — Depends on Tracks 3–6, 8)*
+  *Link: [./tracks/sleipnir_actor_multithreaded_runtime_20261122/](./tracks/sleipnir_actor_multithreaded_runtime_20261122/)*
+
+---
+
+- [ ] **Track 10: `.forseti` Language Server (LSP), Canonical Formatter (`forseti fmt`) & TextMate / Tree-sitter Editor Tooling** *(Priority: Step 10 — Depends on Tracks 1, 2, 7, 8)*
+  *Link: [./tracks/forseti_lsp_formatter_and_editor_tooling_20261122/](./tracks/forseti_lsp_formatter_and_editor_tooling_20261122/)*
+
+---
+
+- [ ] **Track 11: External Consumer Integration, Stable C99 ABI (`libforseti`) & DSL v1.1 Ergonomics (`import` & Pure Built-Ins)** *(Priority: Step 11 — Depends on Tracks 7, 8, 9)*
+  *Link: [./tracks/c_abi_external_integration_and_dsl_v1_1_20261122/](./tracks/c_abi_external_integration_and_dsl_v1_1_20261122/)*
