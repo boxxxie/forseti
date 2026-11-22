@@ -14,7 +14,7 @@
 - [x] Task: Implement zero-copy `.forseti` lexer with sticky `.EOF` and malformed UTF-8 progress safety (Pattern E + Pattern D `t.seed`)
     - [x] Write failing unit + Pattern D `t.seed` malformed-UTF-8 recovery tests covering all `.forseti` keywords, table pipe/separator tokens (`|`, `||`, `-`), comparisons, `?var` sigils, string escapes, comments, and line map offsets
     - [x] Implement `forseti/lexer.odin` (`@(private)` internals) with ASCII fast path and `utf8.decode_rune_in_string` fallback
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Lexer, String Interner, Telemetry & Specs Bootstrap' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Lexer, String Interner, Telemetry & Specs Bootstrap' (Protocol in workflow.md)
 
 ---
 
@@ -29,7 +29,7 @@
 - [x] Task: Implement canonical `Rulebase_IR`, AST->IR lowering, and Tier 2 Internal Odin DSL builders (Red-First 4-Layer ATDD + Unit)
     - [x] Write failing Layer 1 behavioral specs (`specs/compiler_diagnostics_spec_test.odin` verifying External `.forseti` vs Tier 2 Internal Odin DSL produce equivalent compiled IR via public APIs) and direct Pattern E lowering checks
     - [x] Implement `forseti/ir.odin`, `forseti/lower.odin`, and `forseti/dsl_odin.odin`
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Ast_Pool, Pratt Parser & Rulebase_IR' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Ast_Pool, Pratt Parser & Rulebase_IR' (Protocol in workflow.md)
 
 ---
 
@@ -41,4 +41,4 @@
 - [x] Task: Implement `cmd/forseti` CLI (`check`, `ast`, `ir`) and author initial `docs/dsl-reference.md` (Red-First ATDD + CLI)
     - [x] Write failing Layer 1 CLI behavioral specs (via `specs/` CLI driver) verifying exit codes (`0` clean, non-zero on error or `--warnings-as-errors`), `--format=json`, and `--telemetry` output
     - [x] Implement `cmd/forseti/main.odin`, document initial grammar + `E1xxx`/`E2xxx`/`W2xxx` codes in `docs/dsl-reference.md`, and run `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` + ASan
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Semantic Diagnostics, ATDD Specs, CLI & DSL Reference' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Semantic Diagnostics, ATDD Specs, CLI & DSL Reference' (Protocol in workflow.md)

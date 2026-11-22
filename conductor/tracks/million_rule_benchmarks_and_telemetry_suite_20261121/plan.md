@@ -15,7 +15,7 @@
 - [x] Task: Build JTMS churn, recursive strata, and E2E MDM mode comparison (`Audit_Full` vs `Fast`, `Safe_V2` vs `Fast_Memory`) benchmarks (TDD)
     - [x] Write smoke verification tests covering all 6 workloads and `@zero_alloc` hot-path checks
     - [x] Implement `benchmarks/bench_jtms.odin`, `benchmarks/bench_recursive.odin`, and `benchmarks/bench_mdm_e2e.odin`; execute baseline `hugi run`
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: 10–1M Rule Benchmark Baseline' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: 10–1M Rule Benchmark Baseline' (Protocol in workflow.md)
 
 ---
 
@@ -26,4 +26,4 @@
     - [x] Apply targeted data-oriented optimizations driven by telemetry/perf-counter evidence and record post-optimization `hugi run` deltas
 - [x] Task: Export longitudinal results and author `docs/benchmarks.md`
     - [x] Export tables/JSON from `benchmarks/history.hugidb` via `hugi` and document `10`..`1,000,000` rule latency, RAM/rule, telemetry breakdowns, and mode tradeoffs in `docs/benchmarks.md`
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Telemetry Optimization & Benchmark Report' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Telemetry Optimization & Benchmark Report' (Protocol in workflow.md)

@@ -15,7 +15,7 @@
 - [x] Task: Implement `Rulebase` compiler (Alpha sharing, hash splits, PHREAK segment decomposition) (Pattern E TDD)
     - [x] Write failing Pattern E tests verifying Alpha node sharing across rules, `O(1)` hash-split lookup tables, segment bitmask assignment (`BuildtimeSegmentUtilities` pattern), and compile telemetry on 1k–100k rule fixtures
     - [x] Implement `forseti/rulebase_compile.odin` and `forseti/segment_plan.odin`
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Rulebase Compiler & Guard VM' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Rulebase Compiler & Guard VM' (Protocol in workflow.md)
 
 ---
 
@@ -27,4 +27,4 @@
 - [x] Task: Implement Salience + Phase Focus Stack Agenda, Refraction, Queries & Matcher Telemetry (Red-First 4-Layer ATDD)
     - [x] Write failing Layer 1 ATDD scenarios in `specs/matcher_rules_spec_test.odin` for phase ordering, salience tie-breaking, refraction, parameterized `query` lookups, and `sync_and_fire` over `xitdb`
     - [x] Implement `forseti/agenda.odin`, `forseti/query_exec.odin`, wire per-stage telemetry counters, and run `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: PHREAK Matcher, Sparse Session & Agenda' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: PHREAK Matcher, Sparse Session & Agenda' (Protocol in workflow.md)

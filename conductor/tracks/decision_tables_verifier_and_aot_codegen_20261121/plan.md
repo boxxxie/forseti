@@ -15,7 +15,7 @@
 - [x] Task: Implement overlap, completeness gap, dead-rule, and witness generator (`E3001`, `W3001–W3006`) (Red-First 4-Layer ATDD)
     - [x] Write failing Layer 1 ATDD specs & `#caller_location` table matrices in `specs/decision_tables_spec_test.odin` modeling Connect policy tables (`survivorship_gate`, `identity_routing`, `career_consolidation`, `event_lifecycle`) intentionally injected with overlaps, gaps, and shadowed rows, asserting exact witness counterexamples
     - [x] Implement `forseti/table_verify.odin` and wire diagnostics into `sema.odin` and `forseti verify-tables`
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Static Decision Table Verifier' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Static Decision Table Verifier' (Protocol in workflow.md)
 
 ---
 
@@ -27,7 +27,7 @@
 - [x] Task: Implement ternary `u64` bitset matrix evaluator for multi-hit policies (`C`, `C+`, `C<`, `C>`, `C#`, `M`, `R`) (Red-First ATDD + Pattern D `t.seed`)
     - [x] Write failing Layer 1 multi-hit specs in `specs/decision_tables_spec_test.odin` plus Pattern D `t.seed` property invariants comparing bitset evaluation against oracle across 1–500-row randomized tables (`C`, `M`, `R`, aggregators)
     - [x] Implement `forseti/table_bitset.odin` with `intrinsics.count_trailing_zeros` hit extraction and `Decision_Trace` population
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Cost-Tree & Bitset Matrix Evaluators' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Cost-Tree & Bitset Matrix Evaluators' (Protocol in workflow.md)
 
 ---
 
@@ -39,4 +39,4 @@
 - [x] Task: Add initial `hugi`/`obench` decision-table scaling benchmarks (10..10,000 rows; lazy vs eager; runtime vs AOT) and update `docs/dsl-reference.md` (TDD)
     - [x] Write benchmark targets under `benchmarks/bench_tables.odin` with `@zero_alloc` check and register table diagnostics `E3xxx`/`W3xxx` in `docs/dsl-reference.md`
     - [x] Run `hugi run` baseline check and `odin test specs -all-packages ... -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` + ASan
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Tier 3 AOT Codegen & Benchmarks' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Tier 3 AOT Codegen & Benchmarks' (Protocol in workflow.md)

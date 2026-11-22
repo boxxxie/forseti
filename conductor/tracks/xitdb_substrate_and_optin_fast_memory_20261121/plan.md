@@ -15,7 +15,7 @@
 - [x] Task: Implement `diff_collection` Z-Set delta sync + compaction detection + `Core_Overlay` fork wrapper (Red-First 4-Layer ATDD)
     - [x] Write failing Layer 1 ATDD scenarios in `specs/xitdb_substrate_spec_test.odin` modifying 10 out of 100,000 records across moments and verifying exact `+1`/`-1` deltas, `slots_skipped` telemetry, post-compaction safe resync fallback, and isolated `Core_Overlay` forks
     - [x] Implement `forseti/xitdb_delta.odin` and `forseti/xitdb_overlay.odin`
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: xitdb Store Bridge & Incremental Delta Sync' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: xitdb Store Bridge & Incremental Delta Sync' (Protocol in workflow.md)
 
 ---
 
@@ -27,4 +27,4 @@
 - [x] Task: Benchmark safe v2 default vs opt-in `Fast_Memory` in `benchmarks/` and write `docs/xitdb-fast-mode.md` (TDD)
     - [x] Write comparative `hugi`/`obench` benchmarks (`insert`, `lookup`, `diff_collection`, `commit`) for safe v2 vs `Fast_Memory`
     - [x] Author `docs/xitdb-fast-mode.md` documenting exact options, known limitations, security/wire-compat boundaries, and observed benchmark numbers
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Opt-In Fast-Memory xitdb & Docs' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Opt-In Fast-Memory xitdb & Docs' (Protocol in workflow.md)

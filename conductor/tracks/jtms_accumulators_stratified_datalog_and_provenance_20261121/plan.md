@@ -15,7 +15,7 @@
 - [x] Task: Implement `not`/`exists` blocker counters & retractable accumulators (`count`, `sum`, `avg`, `min`, `max`, `distinct`, `collect`) (Red-First ATDD + Pattern D `t.seed`)
     - [x] Write failing Layer 1 ATDD specs in `specs/mdm_reasoning_and_audit_spec_test.odin` plus Pattern D `t.seed` property tests asserting accumulator outputs match brute-force recomputation across random insert/update/retract sequences (`min`/`max` ties and removals)
     - [x] Implement `forseti/beta_negation.odin` and `forseti/beta_accum.odin` using explicit `Eval_Stack` pause/resume
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Z-Set JTMS, Negation & Accumulators' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Z-Set JTMS, Negation & Accumulators' (Protocol in workflow.md)
 
 ---
 
@@ -27,7 +27,7 @@
 - [x] Task: Implement semi-naive delta evaluator with Soufflé-style `proof_height` tracking (Red-First 4-Layer ATDD)
     - [x] Write failing Layer 1 ATDD scenarios on cyclic org-parent and person-merge graphs proving guaranteed termination, minimal finite proof height, and clean JTMS retraction when cycle edges are removed
     - [x] Implement `forseti/seminaive.odin`
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Stratified Semi-Naive Recursion' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Stratified Semi-Naive Recursion' (Protocol in workflow.md)
 
 ---
 
@@ -39,4 +39,4 @@
 - [x] Task: Implement Runic-style 3-phase `Prepare -> Execute -> Apply` async effects and Pattern D `t.seed` differential brute-force oracle fuzz suite (Red-First ATDD + Pattern D)
     - [x] Write failing Layer 1 ATDD specs for parallel `Effect_Job` execution + causal parent ancestry AND `>= 10,000`-op Pattern D `prop_*` (`t.seed` + `testing.set_fail_timeout`) differential oracle fuzz tests under `-sanitize:address`
     - [x] Implement `forseti/effects.odin` and `tests/fuzz_oracle.odin`, verifying zero mismatches and zero leaks under `odin test specs -all-packages ...` and `tests`
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Provenance, Effects & Differential Oracle' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Provenance, Effects & Differential Oracle' (Protocol in workflow.md)
