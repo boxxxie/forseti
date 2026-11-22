@@ -38,7 +38,7 @@ flowchart LR
     VER -->|forseti gen| AOT["Tier 3: AOT Odin Codegen ('contextless')"]
     VER -->|rulebase_compile| RB["Immutable Rulebase (Alpha DAG + Tree/Bitsets + VM)"]
     RB --> SESS["Pinned Session (Lazy PHREAK + Z-Set JTMS + #soa DAG)"]
-    XIT["xitdb Store (Core_Memory / Buffered_File / Core_Overlay)"] <-->|O(delta) Sync & Atomic Commit| SESS
+    XIT["xitdb Store (Core_Memory / Buffered_File / Core_Overlay)"] <-->|"O(delta) Sync & Atomic Commit"| SESS
     SESS --> OUT["Explain / Impact / Semirings / diff_replay / Telemetry"]
 ```
 
