@@ -254,6 +254,10 @@ where_clause :: proc "contextless" (expr: Expr_Spec) -> Clause_Spec {
 	return Clause_Spec{kind = .Where, expr = expr, has_expr = true}
 }
 
+let_clause :: proc "contextless" (bind_var: string, expr: Expr_Spec) -> Clause_Spec {
+	return Clause_Spec{kind = .Let, bind_var = bind_var, expr = expr, has_expr = true}
+}
+
 assert_fact :: proc "contextless" (target: string, fields: []Field_Binding_Spec) -> Action_Spec {
 	return Action_Spec{kind = .Assert, target = target, fields = fields}
 }
@@ -580,7 +584,7 @@ lower_spec_clauses :: proc(
 	out = make([]Clause_IR, len(src), a) or_return
 	for c, i in src {
 		e_id := INVALID_EXPR
-		if c.has_expr || c.kind == .Eav || ((c.kind == .Where || c.kind == .Let || c.kind == .Accum) && (c.expr.kind != .Lit_Bool || c.expr.bool_val)) {
+		if c.has_expr || c.kind == .Eav || c.kind == .Where || c.kind == .Let || (c.kind == .Accum && (c.expr.kind != .Lit_Bool || c.expr.bool_val)) {
 			e_id = lower_spec_expr(ir, exprs, extra_exprs, c.expr) or_return
 		}
 		g_id := INVALID_EXPR
@@ -640,7 +644,7 @@ parse_selector_string :: proc(
 	if len(selector) == 0 {
 		return nil, nil
 	}
-	segs := make([dynamic]Selector_Segment, 0, 4, context.temp_allocator)
+	segs := make([dynamic]Selector_Segment, 0, 4, context.temp_allocator) or_return
 	i := 0
 	for i < len(selector) {
 		c := selector[i]
@@ -657,13 +661,13 @@ parse_selector_string :: proc(
 			inner := strings.trim_space(selector[i:i + close])
 			i = i + close + 1
 			if inner == "*" {
-				append(&segs, Selector_Segment{kind = .Wildcard})
+				append(&segs, Selector_Segment{kind = .Wildcard}) or_return
 			} else if len(inner) >= 2 && inner[0] == '"' && inner[len(inner) - 1] == '"' {
 				tid := intern(&ir.interner, inner[1:len(inner) - 1]) or_return
-				append(&segs, Selector_Segment{kind = .Lit_Key, text = tid})
+				append(&segs, Selector_Segment{kind = .Lit_Key, text = tid}) or_return
 			} else {
 				tid := intern(&ir.interner, inner) or_return
-				append(&segs, Selector_Segment{kind = .Var_Key, text = tid})
+				append(&segs, Selector_Segment{kind = .Var_Key, text = tid}) or_return
 			}
 		} else {
 			if c == '.' {
@@ -679,7 +683,7 @@ parse_selector_string :: proc(
 			}
 			if i > start {
 				tid := intern(&ir.interner, selector[start:i]) or_return
-				append(&segs, Selector_Segment{kind = .Field, text = tid})
+				append(&segs, Selector_Segment{kind = .Field, text = tid}) or_return
 			}
 		}
 	}

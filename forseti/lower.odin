@@ -5,12 +5,13 @@ import vmem "core:mem/virtual"
 
 @(private)
 Lower_Ctx :: struct {
-	pool:        ^Ast_Pool,
-	src_int:     ^String_Interner,
-	ir:          ^Rulebase_IR,
-	enums:       [dynamic]Enum_Def,
-	exprs:       [dynamic]Expr_IR,
-	extra_exprs: [dynamic]Expr_Id,
+	pool:          ^Ast_Pool,
+	src_int:       ^String_Interner,
+	ir:            ^Rulebase_IR,
+	scratch_alloc: mem.Allocator,
+	enums:         [dynamic]Enum_Def,
+	exprs:         [dynamic]Expr_IR,
+	extra_exprs:   [dynamic]Expr_Id,
 }
 
 @(private)
@@ -35,6 +36,30 @@ lower_type_spec :: proc(ctx: ^Lower_Ctx, owner_name: String_Id, ts: Ast_Type_Spe
 		tr.ref_id = eid
 	}
 	return tr, nil
+}
+
+@(private)
+_lower_extra_expr_span :: proc(ctx: ^Lower_Ctx, span: Node_Span) -> (out_span: Node_Span, err: mem.Allocator_Error) {
+	cnt := int(span.count)
+	if cnt == 0 {
+		return Node_Span{start = u32(len(ctx.extra_exprs)), count = 0}, nil
+	}
+	stack_buf: [16]Expr_Id
+	heap_buf: []Expr_Id
+	defer delete(heap_buf, ctx.scratch_alloc)
+	staged: []Expr_Id
+	if cnt <= len(stack_buf) {
+		staged = stack_buf[:cnt]
+	} else {
+		heap_buf = make([]Expr_Id, cnt, ctx.scratch_alloc) or_return
+		staged = heap_buf
+	}
+	for i in 0 ..< span.count {
+		staged[i] = lower_expr(ctx, ctx.pool.extra_children[span.start + i]) or_return
+	}
+	start := u32(len(ctx.extra_exprs))
+	append(&ctx.extra_exprs, ..staged) or_return
+	return Node_Span{start = start, count = span.count}, nil
 }
 
 @(private)
@@ -90,23 +115,11 @@ lower_expr :: proc(ctx: ^Lower_Ctx, nid: Node_Id) -> (eid: Expr_Id, err: mem.All
 		ir_e.rhs = lower_expr(ctx, p.rhs) or_return
 	case Ast_In_List:
 		ir_e.kind = .In_List
-		staged := make([]Expr_Id, p.items.count, context.temp_allocator) or_return
-		for i in 0 ..< p.items.count {
-			staged[i] = lower_expr(ctx, ctx.pool.extra_children[p.items.start + i]) or_return
-		}
-		start := u32(len(ctx.extra_exprs))
-		append(&ctx.extra_exprs, ..staged) or_return
-		ir_e.extra_span = Node_Span{start = start, count = p.items.count}
+		ir_e.extra_span = _lower_extra_expr_span(ctx, p.items) or_return
 	case Ast_Call:
 		ir_e.kind = .Call
 		ir_e.str_id = lower_intern(ctx, p.callee) or_return
-		staged := make([]Expr_Id, p.args.count, context.temp_allocator) or_return
-		for i in 0 ..< p.args.count {
-			staged[i] = lower_expr(ctx, ctx.pool.extra_children[p.args.start + i]) or_return
-		}
-		start := u32(len(ctx.extra_exprs))
-		append(&ctx.extra_exprs, ..staged) or_return
-		ir_e.extra_span = Node_Span{start = start, count = p.args.count}
+		ir_e.extra_span = _lower_extra_expr_span(ctx, p.args) or_return
 	case Ast_Error:
 		ir_e.kind = .Invalid
 	}
@@ -139,8 +152,18 @@ lower_clauses :: proc(ctx: ^Lower_Ctx, span: Node_Span) -> (out: []Clause_IR, er
 	if span.count == 0 {
 		return nil, nil
 	}
+	valid_count := 0
+	for i in 0 ..< span.count {
+		if ctx.pool.clauses[span.start + i].kind != .Error {
+			valid_count += 1
+		}
+	}
+	if valid_count == 0 {
+		return nil, nil
+	}
 	alloc := vmem.arena_allocator(&ctx.ir.arena)
-	staged := make([dynamic]Clause_IR, 0, int(span.count), context.temp_allocator) or_return
+	out = make([]Clause_IR, valid_count, alloc) or_return
+	out_idx := 0
 	for i in 0 ..< span.count {
 		cl := ctx.pool.clauses[span.start + i]
 		if cl.kind == .Error {
@@ -167,7 +190,7 @@ lower_clauses :: proc(ctx: ^Lower_Ctx, span: Node_Span) -> (out: []Clause_IR, er
 		case .Error:
 			continue
 		}
-		append(&staged, Clause_IR{
+		out[out_idx] = Clause_IR{
 			kind       = kind_ir,
 			bind_var   = lower_intern(ctx, cl.bind_var) or_return,
 			target     = lower_intern(ctx, cl.target) or_return,
@@ -179,13 +202,9 @@ lower_clauses :: proc(ctx: ^Lower_Ctx, span: Node_Span) -> (out: []Clause_IR, er
 			accum_op   = cl.accum_op,
 			inner_pat  = lower_clauses(ctx, cl.inner_pat) or_return,
 			span       = cl.span,
-		}) or_return
+		}
+		out_idx += 1
 	}
-	if len(staged) == 0 {
-		return nil, nil
-	}
-	out = make([]Clause_IR, len(staged), alloc) or_return
-	copy(out, staged[:])
 	return out, nil
 }
 
@@ -213,13 +232,19 @@ lower_ast_to_ir :: proc(
 	}
 
 	ctx := Lower_Ctx{
-		pool    = pool,
-		src_int = src_interner,
-		ir      = &ir,
+		pool          = pool,
+		src_int       = src_interner,
+		ir            = &ir,
+		scratch_alloc = allocator,
 	}
-	ctx.enums = make([dynamic]Enum_Def, 0, 8, context.temp_allocator) or_return
-	ctx.exprs = make([dynamic]Expr_IR, 0, max(len(pool.nodes), 16), context.temp_allocator) or_return
-	ctx.extra_exprs = make([dynamic]Expr_Id, 0, 32, context.temp_allocator) or_return
+	ctx.enums = make([dynamic]Enum_Def, 0, 8, allocator) or_return
+	ctx.exprs = make([dynamic]Expr_IR, 0, max(len(pool.nodes) + 1, 16), allocator) or_return
+	ctx.extra_exprs = make([dynamic]Expr_Id, 0, max(len(pool.extra_children), 32), allocator) or_return
+	defer {
+		delete(ctx.enums)
+		delete(ctx.exprs)
+		delete(ctx.extra_exprs)
+	}
 	append(&ctx.exprs, Expr_IR{kind = .Invalid}) or_return // INVALID_EXPR == 0
 
 	ir.module_name = lower_intern(&ctx, pool.module_name) or_return
@@ -332,37 +357,43 @@ lower_ast_to_ir :: proc(
 
 	ir.rules = make([]Rule_Def, len(pool.rules), arena_alloc) or_return
 	for r, ri in pool.rules {
-		staged_acts := make([dynamic]Action_IR, 0, int(r.then_actions.count), context.temp_allocator) or_return
+		valid_acts := 0
 		for ai in 0 ..< r.then_actions.count {
-			aa := pool.actions[r.then_actions.start + ai]
-			ak: Action_Kind_IR
-			switch aa.kind {
-			case .Assert:
-				ak = .Assert
-			case .Assert_Eav:
-				ak = .Assert_Eav
-			case .Retract:
-				ak = .Retract
-			case .Effect:
-				ak = .Effect
-			case .Error:
-				continue
+			if pool.actions[r.then_actions.start + ai].kind != .Error {
+				valid_acts += 1
 			}
-			append(&staged_acts, Action_IR{
-				kind          = ak,
-				target        = lower_intern(&ctx, aa.target) or_return,
-				unconditional = aa.unconditional,
-				fields        = lower_field_assigns(&ctx, aa.fields) or_return,
-				expr          = lower_expr(&ctx, aa.expr) or_return,
-				attr_expr     = lower_expr(&ctx, aa.attr_expr) or_return,
-				val_expr      = lower_expr(&ctx, aa.val_expr) or_return,
-				span          = aa.span,
-			}) or_return
 		}
 		acts: []Action_IR
-		if len(staged_acts) > 0 {
-			acts = make([]Action_IR, len(staged_acts), arena_alloc) or_return
-			copy(acts, staged_acts[:])
+		if valid_acts > 0 {
+			acts = make([]Action_IR, valid_acts, arena_alloc) or_return
+			act_idx := 0
+			for ai in 0 ..< r.then_actions.count {
+				aa := pool.actions[r.then_actions.start + ai]
+				ak: Action_Kind_IR
+				switch aa.kind {
+				case .Assert:
+					ak = .Assert
+				case .Assert_Eav:
+					ak = .Assert_Eav
+				case .Retract:
+					ak = .Retract
+				case .Effect:
+					ak = .Effect
+				case .Error:
+					continue
+				}
+				acts[act_idx] = Action_IR{
+					kind          = ak,
+					target        = lower_intern(&ctx, aa.target) or_return,
+					unconditional = aa.unconditional,
+					fields        = lower_field_assigns(&ctx, aa.fields) or_return,
+					expr          = lower_expr(&ctx, aa.expr) or_return,
+					attr_expr     = lower_expr(&ctx, aa.attr_expr) or_return,
+					val_expr      = lower_expr(&ctx, aa.val_expr) or_return,
+					span          = aa.span,
+				}
+				act_idx += 1
+			}
 		}
 		ir.rules[ri] = Rule_Def{
 			name         = lower_intern(&ctx, r.name) or_return,

@@ -325,8 +325,23 @@ sema_eval_expr :: proc(
 		}
 		return lt, nil
 	case .In_List:
+		has_lhs := e.lhs != INVALID_EXPR && int(e.lhs) < len(ctx.ir.exprs)
+		lt := Type_Ref{kind = .Unknown}
+		if has_lhs {
+			lt = sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
+		}
 		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
-			_ = sema_eval_expr(ctx, scope, ctx.ir.extra_exprs[i], mark_used, used_outer, outer_depth, max_join_gen) or_return
+			item_id := ctx.ir.extra_exprs[i]
+			it := sema_eval_expr(ctx, scope, item_id, mark_used, used_outer, outer_depth, max_join_gen) or_return
+			if has_lhs && lt.kind != .Unknown && it.kind != .Unknown && !types_compatible(ctx.ir, lt, it, item_id) && !types_compatible(ctx.ir, it, lt, e.lhs) {
+				item_span := ctx.ir.exprs[item_id].span if item_id != INVALID_EXPR && int(item_id) < len(ctx.ir.exprs) else e.span
+				sema_error(
+					ctx,
+					.E2002,
+					item_span,
+					fmt.tprintf("'in' item type mismatch: expected %s, got %s", type_kind_str(lt.kind), type_kind_str(it.kind)),
+				) or_return
+			}
 		}
 		return Type_Ref{kind = .Bool}, nil
 	case .Cell_Cmp:
@@ -472,6 +487,96 @@ pop_scope_depth :: proc(ctx: ^Sema_Ctx, scope: ^map[String_Id]Scope_Var, min_kee
 }
 
 @(private)
+sema_validate_pattern_field_expr :: proc(
+	ctx: ^Sema_Ctx,
+	scope: ^map[String_Id]Scope_Var,
+	expected_t: Type_Ref,
+	eid: Expr_Id,
+	fname: String_Id,
+	fspan: Span,
+	shares_join: ^bool,
+	depth: int,
+	cur_gen: u32,
+) -> mem.Allocator_Error {
+	if eid == INVALID_EXPR || int(eid) >= len(ctx.ir.exprs) {
+		return nil
+	}
+	e := ctx.ir.exprs[eid]
+	#partial switch e.kind {
+	case .Wildcard:
+		return nil
+	case .Cell_Cmp:
+		rt := sema_eval_expr(ctx, scope, e.rhs, true, shares_join, depth, cur_gen) or_return
+		if !types_compatible(ctx.ir, expected_t, rt, e.rhs) {
+			sema_error(
+				ctx,
+				.E2002,
+				fspan,
+				fmt.tprintf("field %q expects %s, got %s", ir_string(ctx.ir, fname), type_kind_str(expected_t.kind), type_kind_str(rt.kind)),
+			) or_return
+			return nil
+		}
+		if (e.binary_op == .Lt || e.binary_op == .Lte || e.binary_op == .Gt || e.binary_op == .Gte) &&
+		   expected_t.kind != .Unknown && !is_ordered_kind(expected_t.kind) {
+			sema_error(
+				ctx,
+				.E2002,
+				e.span,
+				fmt.tprintf("ordering predicate on field %q requires numeric, time, or string type, got %s", ir_string(ctx.ir, fname), type_kind_str(expected_t.kind)),
+			) or_return
+		}
+		return nil
+	case .Range:
+		rt := sema_eval_expr(ctx, scope, eid, true, shares_join, depth, cur_gen) or_return
+		compat := types_compatible(ctx.ir, expected_t, rt) ||
+			(expected_t.kind == .I32 && rt.kind == .I64 && is_int_literal_expr(ctx.ir, e.lhs) && is_int_literal_expr(ctx.ir, e.rhs))
+		if !compat {
+			sema_error(
+				ctx,
+				.E2002,
+				fspan,
+				fmt.tprintf("field %q expects %s, got %s", ir_string(ctx.ir, fname), type_kind_str(expected_t.kind), type_kind_str(rt.kind)),
+			) or_return
+		}
+		return nil
+	case .In_List:
+		if e.lhs == INVALID_EXPR {
+			for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
+				item_id := ctx.ir.extra_exprs[i]
+				it := sema_eval_expr(ctx, scope, item_id, true, shares_join, depth, cur_gen) or_return
+				if !types_compatible(ctx.ir, expected_t, it, item_id) {
+					item_span := ctx.ir.exprs[item_id].span if item_id != INVALID_EXPR && int(item_id) < len(ctx.ir.exprs) else fspan
+					sema_error(
+						ctx,
+						.E2002,
+						item_span,
+						fmt.tprintf("field %q 'in' item expects %s, got %s", ir_string(ctx.ir, fname), type_kind_str(expected_t.kind), type_kind_str(it.kind)),
+					) or_return
+				}
+			}
+			return nil
+		}
+	case .Binary:
+		if (e.binary_op == .And || e.binary_op == .Or) && _expr_is_field_matcher(ctx.ir, eid) {
+			sema_validate_pattern_field_expr(ctx, scope, expected_t, e.lhs, fname, fspan, shares_join, depth, cur_gen) or_return
+			sema_validate_pattern_field_expr(ctx, scope, expected_t, e.rhs, fname, fspan, shares_join, depth, cur_gen) or_return
+			return nil
+		}
+	}
+
+	et := sema_eval_expr(ctx, scope, eid, true, shares_join, depth, cur_gen) or_return
+	if !types_compatible(ctx.ir, expected_t, et, eid) {
+		sema_error(
+			ctx,
+			.E2002,
+			fspan,
+			fmt.tprintf("field %q expects %s, got %s", ir_string(ctx.ir, fname), type_kind_str(expected_t.kind), type_kind_str(et.kind)),
+		) or_return
+	}
+	return nil
+}
+
+@(private)
 sema_analyze_clauses :: proc(
 	ctx: ^Sema_Ctx,
 	scope: ^map[String_Id]Scope_Var,
@@ -556,15 +661,7 @@ sema_analyze_clauses :: proc(
 						}
 					}
 				} else {
-					et := sema_eval_expr(ctx, scope, fb.expr, true, &shares_join, depth, cur_gen) or_return
-					if !types_compatible(ctx.ir, expected_t, et, fb.expr) {
-						sema_error(
-							ctx,
-							.E2002,
-							fb.span,
-							fmt.tprintf("field %q expects %s, got %s", ir_string(ctx.ir, fb.name), type_kind_str(expected_t.kind), type_kind_str(et.kind)),
-						) or_return
-					}
+					sema_validate_pattern_field_expr(ctx, scope, expected_t, fb.expr, fb.name, fb.span, &shares_join, depth, cur_gen) or_return
 				}
 			}
 
