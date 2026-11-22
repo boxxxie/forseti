@@ -1,10 +1,13 @@
 package forseti
 
+import "base:runtime"
 import "core:encoding/endian"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
 import xitdb "xitdb:."
+
+MAX_HYDRATE_SNAPSHOT_BYTES :: 32 * 1024 * 1024
 
 Fact_Delta_Kind :: enum u8 {
 	Added,
@@ -47,6 +50,7 @@ Delta_Syncer :: struct {
 	last_file_id:      u64,
 	last_moment_index: i64,
 	last_moment_slot:  xitdb.Slot,
+	key_arena:         vmem.Arena,
 	scratch_arena:     vmem.Arena,
 	telemetry:         ^Telemetry_Sink,
 	allocator:         mem.Allocator,
@@ -62,6 +66,10 @@ delta_syncer_init :: proc(
 		return .Invalid_Pointer
 	}
 	s^ = {}
+	vmem.arena_init_growing(&s.key_arena) or_return
+	defer if err != nil {
+		vmem.arena_destroy(&s.key_arena)
+	}
 	vmem.arena_init_growing(&s.scratch_arena) or_return
 	defer if err != nil {
 		delta_syncer_destroy(s)
@@ -78,16 +86,15 @@ delta_syncer_destroy :: proc(s: ^Delta_Syncer) {
 		return
 	}
 	vmem.arena_check_temp(&s.scratch_arena)
+	vmem.arena_check_temp(&s.key_arena)
 	for &wc in s.watched {
-		for k in wc.logical_keys {
-			delete(k, s.allocator)
-		}
 		delete(wc.logical_keys)
 		delete(wc.path_keys, s.allocator)
 		delete(wc.path, s.allocator)
 	}
 	delete(s.watched)
 	vmem.arena_destroy(&s.scratch_arena)
+	vmem.arena_destroy(&s.key_arena)
 	s^ = {}
 }
 
@@ -203,6 +210,18 @@ _cursor_content_fingerprint :: proc(
 	case .Int, .Uint, .Float, .Short_Bytes:
 		return _mix64(u64(sp.slot.tag) * 0x517cc1b727220a95 ~ u64(sp.slot.value) ~ (u64(1) if sp.slot.full else 0)), nil
 	case .Bytes:
+		stack_buf: [258]u8 = ---
+		b_obj, b_err := xitdb.cursor_read_bytes_buf(cur, stack_buf[:])
+		if b_err == nil {
+			h := _hash_bytes64(0x2000000000000002, b_obj.value)
+			if b_obj.format_tag != nil {
+				h = _hash_bytes64(h, b_obj.format_tag)
+			}
+			return h, nil
+		}
+		if b_err != .Stream_Too_Long {
+			return 0, xitdb_to_store_err(b_err)
+		}
 		obj, o_err := xitdb.cursor_read_bytes_object(cur, 0, scratch)
 		if o_err != nil {
 			return 0, xitdb_to_store_err(o_err)
@@ -300,7 +319,7 @@ _update_logical_key_fp :: proc(
 	if r_err := reserve(&wc.logical_keys, len(wc.logical_keys) + 1); r_err != nil {
 		return r_err
 	}
-	owned, c_err := strings.clone(key, s.allocator)
+	owned, c_err := strings.clone(key, vmem.arena_allocator(&s.key_arena))
 	if c_err != nil {
 		return c_err
 	}
@@ -310,10 +329,8 @@ _update_logical_key_fp :: proc(
 
 @(private)
 _delete_logical_key :: proc(s: ^Delta_Syncer, wc: ^Watched_Collection, key: string) {
-	if key in wc.logical_keys {
-		dk, _ := delete_key(&wc.logical_keys, key)
-		delete(dk, s.allocator)
-	}
+	_ = s
+	delete_key(&wc.logical_keys, key)
 }
 
 @(private)
@@ -361,12 +378,53 @@ _Pending_Wc_State :: struct {
 }
 
 @(private)
+_try_build_file_snapshot :: proc(
+	bridge: ^Store_Bridge,
+	snap_arena: ^vmem.Arena,
+	snap_core: ^xitdb.Core,
+	snap_db: ^xitdb.Database,
+) -> bool {
+	if bridge == nil || bridge.db == nil || bridge.db.core == nil || !_core_has_disk_backing(bridge.db.core) {
+		return false
+	}
+	file_len, l_err := xitdb.core_length(bridge.db.core)
+	if l_err != nil || file_len <= 0 || file_len > MAX_HYDRATE_SNAPSHOT_BYTES {
+		return false
+	}
+	raw_bytes, a_err := make([]u8, int(file_len), vmem.arena_allocator(snap_arena))
+	if a_err != nil {
+		return false
+	}
+	if r_err := xitdb.core_read_exact_at(bridge.db.core, 0, raw_bytes); r_err != nil {
+		return false
+	}
+	raw_arr := runtime.Raw_Dynamic_Array{
+		data      = raw_data(raw_bytes),
+		len       = len(raw_bytes),
+		cap       = len(raw_bytes),
+		allocator = runtime.nil_allocator(),
+	}
+	snap_core^ = xitdb.Core_Memory{
+		buf       = transmute([dynamic]u8)raw_arr,
+		pos       = 0,
+		allocator = runtime.nil_allocator(),
+	}
+	snap_db^ = xitdb.Database{
+		core   = snap_core,
+		hasher = bridge.db.hasher,
+		header = bridge.db.header,
+	}
+	return true
+}
+
+@(private)
 _sync_full_scan :: proc(
 	wc: ^Watched_Collection,
 	col_path: string,
 	col_cur: xitdb.Read_Cursor,
 	has_col: bool,
 	is_resync: bool,
+	live_db: ^xitdb.Database,
 	out: ^Sync_Result,
 	pending_ops: ^[dynamic]_Pending_Key_Op,
 	scratch: mem.Allocator,
@@ -404,6 +462,8 @@ _sync_full_scan :: proc(
 				out.keys_decoded += 1
 				k_str := string(kbytes)
 				fp := _cursor_content_fingerprint(vc, scratch) or_return
+				vc_live := vc
+				vc_live.db = live_db
 
 				k_scratch: string
 				if need_seen {
@@ -428,8 +488,8 @@ _sync_full_scan :: proc(
 							if _, a_err := append(pending_ops, _Pending_Key_Op{wc = wc, key = k_scratch, fp = fp}); a_err != nil {
 								return a_err
 							}
-							_emit_delta(out, col_path, k_str, .Changed_Old, {}, vc) or_return
-							_emit_delta(out, col_path, k_str, .Changed_New, {}, vc) or_return
+							_emit_delta(out, col_path, k_str, .Changed_Old, {}, vc_live) or_return
+							_emit_delta(out, col_path, k_str, .Changed_New, {}, vc_live) or_return
 						}
 						continue
 					}
@@ -444,7 +504,7 @@ _sync_full_scan :: proc(
 				if _, a_err := append(pending_ops, _Pending_Key_Op{wc = wc, key = k_scratch, fp = fp}); a_err != nil {
 					return a_err
 				}
-				_emit_delta(out, col_path, k_str, .Added, {}, vc) or_return
+				_emit_delta(out, col_path, k_str, .Added, {}, vc_live) or_return
 			}
 		}
 	}
@@ -475,6 +535,16 @@ delta_syncer_sync :: proc(
 	bridge: ^Store_Bridge,
 	out: ^Sync_Result,
 ) -> (err: Store_Error) {
+	return _delta_syncer_sync_impl(s, bridge, out, nil)
+}
+
+@(private)
+_delta_syncer_sync_impl :: proc(
+	s: ^Delta_Syncer,
+	bridge: ^Store_Bridge,
+	out: ^Sync_Result,
+	snap_db: ^xitdb.Database = nil,
+) -> (err: Store_Error) {
 	if s == nil || bridge == nil || bridge.db == nil || out == nil {
 		return .Invalid_Config
 	}
@@ -493,8 +563,13 @@ delta_syncer_sync :: proc(
 	}
 	out.deltas = make([dynamic]Fact_Delta, 0, 16, s.allocator) or_return
 
+	read_bridge := bridge^
+	if snap_db != nil {
+		read_bridge.db = snap_db
+	}
+
 	out_alloc := vmem.arena_allocator(&out.arena)
-	moment_count := store_bridge_moment_count(bridge) or_return
+	moment_count := store_bridge_moment_count(&read_bridge) or_return
 	if moment_count == 0 {
 		if !s.has_synced {
 			return nil
@@ -513,13 +588,11 @@ delta_syncer_sync :: proc(
 			}
 		}
 		for &wc in s.watched {
-			for k in wc.logical_keys {
-				delete(k, s.allocator)
-			}
 			clear(&wc.logical_keys)
 			wc.has_prev = false
 			wc.prev_collection_slot = {}
 		}
+		vmem.arena_free_all(&s.key_arena)
 		s.has_synced = false
 		s.last_file_id = 0
 		s.last_moment_index = 0
@@ -527,7 +600,7 @@ delta_syncer_sync :: proc(
 		return nil
 	}
 	cur_moment_idx := moment_count - 1
-	cur_m_cur, cur_m_ok, cur_m_err := store_bridge_moment_cursor(bridge, cur_moment_idx)
+	cur_m_cur, cur_m_ok, cur_m_err := store_bridge_moment_cursor(&read_bridge, cur_moment_idx)
 	if cur_m_err != nil {
 		return cur_m_err
 	}
@@ -546,7 +619,7 @@ delta_syncer_sync :: proc(
 		if cur_file_id != s.last_file_id || moment_count <= s.last_moment_index {
 			compacted = true
 		} else {
-			pm, pm_ok, pm_err := store_bridge_moment_cursor(bridge, s.last_moment_index)
+			pm, pm_ok, pm_err := store_bridge_moment_cursor(&read_bridge, s.last_moment_index)
 			if pm_err != nil || !pm_ok {
 				compacted = true
 			} else {
@@ -580,7 +653,7 @@ delta_syncer_sync :: proc(
 		}
 
 		if !s.has_synced || !wc.has_prev || compacted {
-			_sync_full_scan(&wc, col_path, cur_col_cur, cur_ok, s.has_synced && wc.has_prev, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, cur_col_cur, cur_ok, s.has_synced && wc.has_prev, bridge.db, out, &pending_ops, scratch) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_has_prev         = true,
@@ -614,7 +687,7 @@ delta_syncer_sync :: proc(
 			continue
 		}
 		if !prev_ok && cur_ok {
-			_sync_full_scan(&wc, col_path, cur_col_cur, true, false, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, cur_col_cur, true, false, bridge.db, out, &pending_ops, scratch) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_prev_slot        = true,
@@ -625,7 +698,7 @@ delta_syncer_sync :: proc(
 			continue
 		}
 		if prev_ok && !cur_ok {
-			_sync_full_scan(&wc, col_path, {}, false, true, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, {}, false, true, bridge.db, out, &pending_ops, scratch) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_prev_slot        = true,
@@ -647,25 +720,29 @@ delta_syncer_sync :: proc(
 
 		for ch in changes {
 			k_str := string(ch.key)
+			old_live := ch.old_value
+			old_live.db = bridge.db
+			new_live := ch.new_value
+			new_live.db = bridge.db
 			switch ch.op {
 			case .Added:
 				fp := _cursor_content_fingerprint(ch.new_value, scratch) or_return
 				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, fp = fp}); a_err != nil {
 					return a_err
 				}
-				_emit_delta(out, col_path, k_str, .Added, {}, ch.new_value) or_return
+				_emit_delta(out, col_path, k_str, .Added, {}, new_live) or_return
 			case .Removed:
 				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, delete = true}); a_err != nil {
 					return a_err
 				}
-				_emit_delta(out, col_path, k_str, .Removed, ch.old_value, {}) or_return
+				_emit_delta(out, col_path, k_str, .Removed, old_live, {}) or_return
 			case .Changed:
 				fp := _cursor_content_fingerprint(ch.new_value, scratch) or_return
 				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, fp = fp}); a_err != nil {
 					return a_err
 				}
-				_emit_delta(out, col_path, k_str, .Changed_Old, ch.old_value, ch.new_value) or_return
-				_emit_delta(out, col_path, k_str, .Changed_New, ch.old_value, ch.new_value) or_return
+				_emit_delta(out, col_path, k_str, .Changed_Old, old_live, new_live) or_return
+				_emit_delta(out, col_path, k_str, .Changed_New, old_live, new_live) or_return
 			}
 		}
 		if _, a_err := append(&pending_wc, _Pending_Wc_State{
@@ -688,30 +765,19 @@ delta_syncer_sync :: proc(
 			reserve(&wc.logical_keys, len(wc.logical_keys) + add_cnt) or_return
 		}
 	}
+	key_alloc := vmem.arena_allocator(&s.key_arena)
 	staged_keys := make([]string, len(pending_ops), scratch)
-	staged_committed := false
-	defer if !staged_committed {
-		for sk in staged_keys {
-			if len(sk) > 0 {
-				delete(sk, s.allocator)
-			}
-		}
-	}
 	for op, oi in pending_ops {
 		if !op.delete && !(op.key in op.wc.logical_keys) {
-			staged_keys[oi] = strings.clone(op.key, s.allocator) or_return
+			staged_keys[oi] = strings.clone(op.key, key_alloc) or_return
 		}
 	}
-	staged_committed = true
 
 	for op, oi in pending_ops {
 		if op.delete {
 			_delete_logical_key(s, op.wc, op.key)
 		} else if op.key in op.wc.logical_keys {
 			op.wc.logical_keys[op.key] = op.fp
-			if len(staged_keys[oi]) > 0 {
-				delete(staged_keys[oi], s.allocator)
-			}
 		} else {
 			op.wc.logical_keys[staged_keys[oi]] = op.fp
 		}

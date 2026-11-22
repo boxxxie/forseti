@@ -34,6 +34,7 @@ Beta_Node_Def :: struct {
 	fact_slot:     u8,
 	decide_slot:   u8,
 	accum_op:      Accum_Op,
+	owner_pat:     i8, // Pattern index in [0, pat_idx) owning all join_keys for pure_multi_join (-1 otherwise)
 }
 
 Segment_Input_Link :: struct {
@@ -51,6 +52,10 @@ Segment_Def :: struct {
 	pure_single_lia: bool,
 	delta_outer_ok:  bool,
 	pure_two_join:   bool,
+	pure_multi_join: bool,
+	join_prefix_len: u8,
+	delta_accum_ok:  bool,
+	accum_node_idx:  u8,
 }
 
 @(private)
@@ -574,6 +579,127 @@ build_compiled_rule :: proc(
 		}
 	}
 
+	is_pure_multi_join := false
+	join_prefix := u8(0)
+	if pat_idx >= 3 && pat_idx <= 8 && node_count >= u32(pat_idx) + 1 {
+		bn0 := ctx.beta_nodes[node_start]
+		if bn0.kind == .Left_Input_Adapter {
+			prefix_ok := true
+			for mi := u32(1); mi < u32(pat_idx); mi += 1 {
+				bn_m := ctx.beta_nodes[node_start + mi]
+				if bn_m.kind != .Join || len(bn_m.join_keys) == 0 {
+					prefix_ok = false
+					break
+				}
+			}
+			if prefix_ok {
+				for ni := node_start + u32(pat_idx); ni < u32(len(ctx.beta_nodes)); ni += 1 {
+					k := ctx.beta_nodes[ni].kind
+					if k == .Join || k == .Not || k == .Exists || k == .Accum {
+						prefix_ok = false
+						break
+					}
+				}
+			}
+			if prefix_ok {
+				owners: [8]i8
+				for &o in owners {
+					o = -1
+				}
+				for mi := u32(1); mi < u32(pat_idx); mi += 1 {
+					bn_m := ctx.beta_nodes[node_start + mi]
+					owner_found := i8(-1)
+					multi_owner := false
+					for jk in bn_m.join_keys {
+						slot_owner := i8(-1)
+						for pi := u32(0); pi < mi; pi += 1 {
+							cand_bn := ctx.beta_nodes[node_start + pi]
+							for fb in cand_bn.field_binds {
+								if fb.var_slot == jk.left_var_slot {
+									slot_owner = i8(pi)
+									break
+								}
+							}
+							if slot_owner >= 0 {
+								break
+							}
+						}
+						if slot_owner < 0 {
+							multi_owner = true
+							break
+						}
+						if owner_found < 0 {
+							owner_found = slot_owner
+						} else if owner_found != slot_owner {
+							multi_owner = true
+							break
+						}
+					}
+					if multi_owner || owner_found < 0 {
+						prefix_ok = false
+						break
+					}
+					owners[mi] = owner_found
+				}
+				if prefix_ok {
+					for mi := u32(1); mi < u32(pat_idx); mi += 1 {
+						ctx.beta_nodes[node_start + mi].owner_pat = owners[mi]
+					}
+					is_pure_multi_join = true
+					join_prefix = pat_idx
+				}
+			}
+		}
+	}
+
+	is_delta_accum := false
+	accum_rel_idx := u8(0)
+	if pat_idx == 1 && len(rdef.then_actions) > 0 {
+		accum_cnt := 0
+		has_other := false
+		for ni := node_start; ni < u32(len(ctx.beta_nodes)); ni += 1 {
+			k := ctx.beta_nodes[ni].kind
+			if k == .Accum {
+				accum_cnt += 1
+				accum_rel_idx = u8(ni - node_start)
+			} else if k == .Join || k == .Not || k == .Exists {
+				has_other = true
+				break
+			}
+		}
+		if !has_other && accum_cnt == 1 {
+			lia_bn := ctx.beta_nodes[node_start]
+			acc_bn := ctx.beta_nodes[node_start + u32(accum_rel_idx)]
+			acc_sub := ctx.subnetworks[acc_bn.subnetwork_id]
+			if lia_bn.kind == .Left_Input_Adapter && _accum_can_track_incrementally(acc_sub) {
+				binds_ok := true
+				for gslot in acc_sub.group_var_slots {
+					found_g := false
+					for fb in lia_bn.field_binds {
+						if fb.var_slot == gslot {
+							found_g = true
+							break
+						}
+					}
+					if !found_g {
+						binds_ok = false
+						break
+					}
+				}
+				if binds_ok {
+					actions_ok := true
+					for act in rdef.then_actions {
+						if act.kind != .Assert || act.unconditional {
+							actions_ok = false
+							break
+						}
+					}
+					is_delta_accum = actions_ok
+				}
+			}
+		}
+	}
+
 	links := make([]Segment_Input_Link, len(input_links^), ctx.alloc)
 	copy(links, input_links^[:])
 	append(&ctx.segments, Segment_Def{
@@ -586,6 +712,10 @@ build_compiled_rule :: proc(
 		pure_single_lia = is_pure_lia,
 		delta_outer_ok  = is_delta_outer,
 		pure_two_join   = is_pure_two_join,
+		pure_multi_join = is_pure_multi_join,
+		join_prefix_len = join_prefix,
+		delta_accum_ok  = is_delta_accum,
+		accum_node_idx  = accum_rel_idx,
 	})
 
 	seg_ids := make([]u32, 1, ctx.alloc)

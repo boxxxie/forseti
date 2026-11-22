@@ -534,3 +534,155 @@ rule approve_high_score {
 	upon_explaining_derived_fact(&w, "s", "Approved", {"org:1", i64(90)}, "exp_eff")
 	then_explanation_contains(&w, "exp_eff", {"approve_high_score", "request_enrichment", "RawOrg", "org:1"})
 }
+
+@(test)
+spec_fast_vs_audit_full_cyclic_diamond_parity_and_re_derivation :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	src := `module fast_vs_audit_cycle version "1.0"
+
+schema Edge { src: string, dst: string }
+schema Seed { node: string }
+schema Alert { node: string, src: string }
+
+source Seed : Seed at .seed[?id]
+source Alt : Seed at .alt[?id]
+source Edge : Edge at .edge[?id]
+derived Reach : Seed at .reach[?id]
+derived Alert : Alert at .alert[?id]
+
+rule reach_seed {
+  when { ?_s := Seed(node: ?n) }
+  then { assert Reach(node: ?n) }
+}
+rule reach_alt {
+  when { ?_a := Alt(node: ?n) }
+  then { assert Reach(node: ?n) }
+}
+rule reach_step {
+  when {
+    ?_r := Reach(node: ?x)
+    ?_e := Edge(src: ?x, dst: ?y)
+  }
+  then { assert Reach(node: ?y) }
+}
+rule raise_alert {
+  when { ?_r := Reach(node: ?n) }
+  then { assert Alert(node: ?n, src: "reachable") }
+}`
+
+	given_external_policy(&w, "cyc_par", src, "fast_vs_audit.forseti")
+	upon_compiling_policy(&w, "cyc_par")
+	then_compilation_has_zero_diagnostics(&w, "cyc_par")
+	upon_compiling_rulebase(&w, "cyc_par", "rb")
+
+	given_session(&w, "rb", "s_audit", forseti.Session_Config{provenance_mode = .Audit_Full})
+	given_session(&w, "rb", "s_fast", forseti.Session_Config{provenance_mode = .Fast})
+
+	// Seed cycle B <-> C and diamond A (Seed + Alt) -> B -> C.
+	for sl in ([2]string{"s_audit", "s_fast"}) {
+		upon_asserting_fact(&w, sl, "Seed", "sd_a", {"A"})
+		upon_asserting_fact(&w, sl, "Alt", "al_a", {"A"})
+		upon_asserting_fact(&w, sl, "Edge", "e_ab", {"A", "B"})
+		upon_asserting_fact(&w, sl, "Edge", "e_bc", {"B", "C"})
+		upon_asserting_fact(&w, sl, "Edge", "e_cb", {"C", "B"})
+		upon_firing_session(&w, sl, sl)
+		then_session_binding_count_is(&w, sl, "Reach", 3)
+		then_session_binding_count_is(&w, sl, "Alert", 3)
+	}
+	then_derived_fact_proof_and_support(&w, "s_audit", "Reach", {"A"}, .Logical, expected_support = 2, expected_height = 1)
+	then_derived_fact_proof_and_support(&w, "s_audit", "Reach", {"B"}, .Logical, expected_support = 2, expected_height = 2)
+
+	// Retract Seed(sd_a): A stays grounded via Alt(al_a), so B and C survive in both modes!
+	for sl in ([2]string{"s_audit", "s_fast"}) {
+		upon_retracting_fact(&w, sl, "Seed", "sd_a")
+		then_derived_fact_proof_and_support(&w, sl, "Reach", {"A"}, .Logical, expected_support = 1, expected_height = 1)
+		then_session_binding_count_is(&w, sl, "Reach", 3)
+		then_session_binding_count_is(&w, sl, "Alert", 3)
+	}
+
+	// Retract Alt(al_a): self-supporting ghost cycle B <-> C must collapse cleanly in BOTH Audit_Full & Fast!
+	for sl in ([2]string{"s_audit", "s_fast"}) {
+		upon_retracting_fact(&w, sl, "Alt", "al_a")
+		then_session_binding_count_is(&w, sl, "Reach", 0)
+		then_session_binding_count_is(&w, sl, "Alert", 0)
+	}
+
+	// Re-derive via Seed("sd_a2", "A") verifying Fast-mode recycled logical slots behave identically to Audit_Full!
+	for sl in ([2]string{"s_audit", "s_fast"}) {
+		upon_asserting_fact(&w, sl, "Seed", "sd_a2", {"A"})
+		upon_firing_session(&w, sl, "re_derive")
+		then_session_binding_count_is(&w, sl, "Reach", 3)
+		then_session_has_derived_fact(&w, sl, "Alert", {"C", "reachable"})
+	}
+}
+
+@(test)
+spec_multi_decision_table_rule_token_isolation :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	src := `module multi_decide_test version "1.0"
+
+schema Req { code: i64 }
+schema DecisionRec { code: i64, tag: string }
+source Req : Req at .req[?id]
+derived DecisionRec : DecisionRec at .dec[?id]
+
+table t1 version "1.0" hit First {
+  inputs { c: i64 cost 1 }
+  outputs { v: string }
+  rows { r1: == 1 || "a1"; r2: - || "b1"; }
+}
+table t2 version "1.0" hit First {
+  inputs { c: i64 cost 1 }
+  outputs { v: string }
+  rows { r1: == 1 || "a2"; r2: - || "b2"; }
+}
+table t3 version "1.0" hit First {
+  inputs { c: i64 cost 1 }
+  outputs { v: string }
+  rows { r1: == 1 || "a3"; r2: - || "b3"; }
+}
+table t4 version "1.0" hit First {
+  inputs { c: i64 cost 1 }
+  outputs { v: string }
+  rows { r1: == 1 || "a4"; r2: - || "b4"; }
+}
+table t5 version "1.0" hit First {
+  inputs { c: i64 cost 1 }
+  outputs { v: string }
+  rows { r1: == 1 || "a5"; r2: - || "b5"; }
+}
+
+rule five_tables {
+  when {
+    ?_r := Req(code: ?c)
+    ?d1 := decide t1(c: ?c)
+    ?d2 := decide t2(c: ?c)
+    ?d3 := decide t3(c: ?c)
+    ?d4 := decide t4(c: ?c)
+    ?d5 := decide t5(c: ?c)
+    where ?d1.v != "" and ?d2.v != "" and ?d3.v != "" and ?d4.v != ""
+  }
+  then {
+    assert DecisionRec(code: ?c, tag: ?d5.v)
+  }
+}`
+
+	given_external_policy(&w, "md5", src, "multi_decide.forseti")
+	upon_compiling_policy(&w, "md5")
+	then_compilation_has_zero_diagnostics(&w, "md5")
+	upon_compiling_rulebase(&w, "md5", "rb")
+	given_session(&w, "rb", "s")
+
+	upon_asserting_fact(&w, "s", "Req", "r1", {i64(1)})
+	upon_asserting_fact(&w, "s", "Req", "r2", {i64(2)})
+	upon_firing_session(&w, "s", "run")
+	then_rules_fired_count_is(&w, "run", 2)
+	then_session_has_derived_fact(&w, "s", "DecisionRec", {i64(1), "a5"})
+	then_session_has_derived_fact(&w, "s", "DecisionRec", {i64(2), "b5"})
+}

@@ -27,7 +27,27 @@ Fact :: struct {
 	proof_height:    u32,
 	content_hash:    u64,
 	best_derivation: Derivation_Id,
+	next_logical:    Fact_Id,
 	origin:          Fact_Origin,
+}
+
+Fact_Alpha_Edge :: struct {
+	alpha_id: u32,
+	next:     i32,
+}
+
+Beta_Bucket_Node :: struct {
+	fid:  Fact_Id,
+	hash: u64,
+	prev: i32,
+	next: i32,
+}
+
+Beta_Bucket_Index :: struct {
+	heads:     map[u64]i32,
+	fact_node: map[Fact_Id]i32,
+	nodes:     [dynamic]Beta_Bucket_Node,
+	free_list: [dynamic]i32,
 }
 
 Fact_Lookup_Key :: struct {
@@ -67,15 +87,13 @@ Beta_Memory :: struct {
 	indexed_count:       int,
 	right_facts:         [dynamic]Fact_Id,
 	right_fact_pos:      map[Fact_Id]int,
-	right_buckets:       map[u64][dynamic]Fact_Id,
-	right_bucket_hash:   map[Fact_Id]u64,
+	right_idx:           Beta_Bucket_Index,
 	left_initialized:    bool,
 	left_alpha_version:  u64,
 	left_retract_epoch:  u64,
 	left_insert_epoch:   u64,
 	left_indexed_count:  int,
-	left_buckets:        map[u64][dynamic]Fact_Id,
-	left_bucket_hash:    map[Fact_Id]u64,
+	left_idx:            Beta_Bucket_Index,
 }
 
 Session_Config :: struct {
@@ -103,9 +121,11 @@ Session :: struct {
 	telemetry:              ^Telemetry_Sink,
 	facts:                  [dynamic]Fact,
 	facts_by_key:           map[Fact_Lookup_Key]Fact_Id,
-	logical_buckets:        map[u64][dynamic]Fact_Id,
+	logical_buckets:        map[u64]Fact_Id,
 	free_logical_facts:     map[u16][dynamic]Fact_Id,
-	fact_alpha_mems:        map[Fact_Id][dynamic]u32,
+	fact_alpha_head:        [dynamic]i32,
+	fact_alpha_edges:       [dynamic]Fact_Alpha_Edge,
+	free_fact_alpha_edges:  [dynamic]i32,
 	alpha_mems:             map[u32]^Alpha_Memory,
 	seg_mems:               map[u32]^Segment_Memory,
 	dirty_segs:             [dynamic]u32,
@@ -113,12 +133,17 @@ Session :: struct {
 	dirty_segs_work:        [dynamic]u32,
 	zero_input_seeded:      bool,
 	beta_mems:              map[u32]^Beta_Memory,
+	sub_beta_mems:          map[u64]^Beta_Memory,
 	neg_mems:               map[u32]^Not_Exists_Memory,
 	accum_mems:             map[u32]^Accum_Memory,
 	eval_stack:             [dynamic]Eval_Frame,
 	eval_buf_pool:          [dynamic][dynamic]Beta_Token,
+	eval_decide_pool:       [dynamic]Decision_Result,
+	firing_decide_buf:      [dynamic]Decision_Result,
 	reconcile_live_hashes:  map[u64]bool,
 	reconcile_to_revoke:    [dynamic]Firing_Key,
+	partial_reconcile_fids: [dynamic]Fact_Id,
+	partial_reconcile_seen: map[Fact_Id]bool,
 	agenda:                 Agenda,
 	fired_trace:            [dynamic]String_Id,
 	derived_seq_by_bind:    map[u16]u64,
@@ -170,21 +195,29 @@ session_init :: proc(
 	// Allocate tiny fixed initial buckets (O(1) regardless of Rulebase size: works for 1M rules!).
 	s.facts = make([dynamic]Fact, 1, 16, allocator) // slot 0 = sentinel
 	s.facts_by_key = make(map[Fact_Lookup_Key]Fact_Id, 16, allocator)
-	s.logical_buckets = make(map[u64][dynamic]Fact_Id, 16, allocator)
+	s.logical_buckets = make(map[u64]Fact_Id, 16, allocator)
 	s.free_logical_facts = make(map[u16][dynamic]Fact_Id, 8, allocator)
-	s.fact_alpha_mems = make(map[Fact_Id][dynamic]u32, 16, allocator)
+	s.fact_alpha_head = make([dynamic]i32, 1, 16, allocator)
+	s.fact_alpha_head[0] = -1
+	s.fact_alpha_edges = make([dynamic]Fact_Alpha_Edge, 0, 16, allocator)
+	s.free_fact_alpha_edges = make([dynamic]i32, 0, 16, allocator)
 	s.alpha_mems = make(map[u32]^Alpha_Memory, 16, allocator)
 	s.seg_mems = make(map[u32]^Segment_Memory, 16, allocator)
 	s.dirty_segs = make([dynamic]u32, 0, 16, allocator)
 	s.dirty_segs_rem = make([dynamic]u32, 0, 16, allocator)
 	s.dirty_segs_work = make([dynamic]u32, 0, 16, allocator)
 	s.beta_mems = make(map[u32]^Beta_Memory, 16, allocator)
+	s.sub_beta_mems = make(map[u64]^Beta_Memory, 8, allocator)
 	s.neg_mems = make(map[u32]^Not_Exists_Memory, 8, allocator)
 	s.accum_mems = make(map[u32]^Accum_Memory, 8, allocator)
 	s.eval_stack = make([dynamic]Eval_Frame, 0, 16, allocator)
 	s.eval_buf_pool = make([dynamic][dynamic]Beta_Token, 0, 8, allocator)
+	s.eval_decide_pool = make([dynamic]Decision_Result, 0, 8, allocator)
+	s.firing_decide_buf = make([dynamic]Decision_Result, 0, 4, allocator)
 	s.reconcile_live_hashes = make(map[u64]bool, 16, allocator)
 	s.reconcile_to_revoke = make([dynamic]Firing_Key, 0, 8, allocator)
+	s.partial_reconcile_fids = make([dynamic]Fact_Id, 0, 16, allocator)
+	s.partial_reconcile_seen = make(map[Fact_Id]bool, 16, allocator)
 	s.fired_trace = make([dynamic]String_Id, 0, 16, allocator)
 	s.derived_seq_by_bind = make(map[u16]u64, 8, allocator)
 	s.pending_effects = make([dynamic]Effect_Job, 0, 8, allocator)
@@ -218,12 +251,16 @@ session_destroy :: proc(s: ^Session) {
 	agenda_destroy(&s.agenda)
 	delete(s.fired_trace)
 	delete(s.derived_seq_by_bind)
+	delete(s.partial_reconcile_seen)
+	delete(s.partial_reconcile_fids)
 	delete(s.reconcile_to_revoke)
 	delete(s.reconcile_live_hashes)
 	for buf in s.eval_buf_pool {
 		delete(buf)
 	}
 	delete(s.eval_buf_pool)
+	delete(s.eval_decide_pool)
+	delete(s.firing_decide_buf)
 	for &ef in s.eval_stack {
 		delete(ef.tokens)
 		delete(ef.sub_tokens)
@@ -245,32 +282,26 @@ session_destroy :: proc(s: ^Session) {
 			accum_destroy(&st)
 		}
 		delete(am_acc.groups)
-		delete(am_acc.group_tokens)
-		for _, &glist in am_acc.fact_to_groups {
-			delete(glist)
-		}
-		delete(am_acc.fact_to_groups)
+		delete(am_acc.dirty_groups)
 		delete(am_acc.tracked_facts)
+		delete(am_acc.outer_by_group)
+		delete(am_acc.outer_fact_node)
+		delete(am_acc.outer_nodes)
+		delete(am_acc.free_outer_nodes)
 		free(am_acc, s.allocator)
 	}
 	delete(s.accum_mems)
 
 	for _, bm in s.beta_mems {
-		for _, bucket in bm.right_buckets {
-			delete(bucket)
-		}
-		delete(bm.right_buckets)
-		delete(bm.right_bucket_hash)
-		delete(bm.right_fact_pos)
-		delete(bm.right_facts)
-		for _, bucket in bm.left_buckets {
-			delete(bucket)
-		}
-		delete(bm.left_buckets)
-		delete(bm.left_bucket_hash)
+		_beta_mem_destroy(bm)
 		free(bm, s.allocator)
 	}
 	delete(s.beta_mems)
+	for _, bm in s.sub_beta_mems {
+		_beta_mem_destroy(bm)
+		free(bm, s.allocator)
+	}
+	delete(s.sub_beta_mems)
 
 	for _, sm in s.seg_mems {
 		free(sm, s.allocator)
@@ -284,27 +315,18 @@ session_destroy :: proc(s: ^Session) {
 	}
 	delete(s.alpha_mems)
 
-	for _, list in s.fact_alpha_mems {
-		delete(list)
-	}
-	delete(s.fact_alpha_mems)
+	delete(s.free_fact_alpha_edges)
+	delete(s.fact_alpha_edges)
+	delete(s.fact_alpha_head)
 
 	for _, flist in s.free_logical_facts {
 		delete(flist)
 	}
 	delete(s.free_logical_facts)
 
-	for _, list in s.logical_buckets {
-		delete(list)
-	}
 	delete(s.logical_buckets)
 
 	delete(s.facts_by_key)
-	for &f in s.facts {
-		if f.fields != nil {
-			delete(f.fields, s.allocator)
-		}
-	}
 	delete(s.facts)
 	interner_destroy(&s.interner)
 	vmem.arena_destroy(&s.arena)
@@ -376,7 +398,7 @@ _normalize_fact_fields_into :: proc(s: ^Session, schema: Schema_Def, fields: []V
 @(private)
 _normalize_fact_fields :: proc(s: ^Session, schema: Schema_Def, fields: []Value) -> []Value {
 	n := max(len(schema.fields), len(fields))
-	out := make([]Value, n, s.allocator)
+	out := make([]Value, n, vmem.arena_allocator(&s.arena))
 	_normalize_fact_fields_into(s, schema, fields, out)
 	return out
 }
@@ -474,6 +496,9 @@ session_insert_fact_by_idx :: proc(
 		support_count = 1,
 		origin        = origin,
 	})
+	for len(s.fact_alpha_head) <= int(fid) {
+		append(&s.fact_alpha_head, -1)
+	}
 	s.facts_by_key[lk] = fid
 	_record_dirty_derived_fact(s, fid, binding_idx)
 
@@ -486,6 +511,17 @@ session_insert_cursor_fact :: proc(
 	binding_idx: u16,
 	key: string,
 	cursor: xitdb.Read_Cursor,
+) -> (fid: Fact_Id, err: Session_Error) {
+	return _session_insert_cursor_fact_hydrated(s, binding_idx, key, cursor, nil)
+}
+
+@(private)
+_session_insert_cursor_fact_hydrated :: proc(
+	s: ^Session,
+	binding_idx: u16,
+	key: string,
+	cursor: xitdb.Read_Cursor,
+	snap_db: ^xitdb.Database,
 ) -> (fid: Fact_Id, err: Session_Error) {
 	if s == nil || s.rb == nil || int(binding_idx) >= len(s.rb.bindings) {
 		return INVALID_FACT, .Unknown_Binding
@@ -501,7 +537,25 @@ session_insert_cursor_fact :: proc(
 
 	bdef := s.rb.bindings[binding_idx]
 	schema := s.rb.schemas[bdef.schema_id]
-	fields := make([]Value, len(schema.fields), s.allocator) // nil entries populated lazily on first touch
+	fields := make([]Value, len(schema.fields), vmem.arena_allocator(&s.arena)) // nil entries populated lazily or from snapshot
+	if snap_db != nil {
+		snap_cur := cursor
+		snap_cur.db = snap_db
+		fhashes := s.rb.schema_field_hashes[bdef.schema_id]
+		for sf, fi in schema.fields {
+			path := [1]Prehashed_Key{fhashes[fi]}
+			val, found, f_err := cursor_read_field_path_prehashed(snap_cur, path[:], &s.interner, sf.type.kind)
+			if f_err == nil && found {
+				if sid, is_s := val.(String_Id); is_s {
+					txt := interner_get(&s.interner, sid)
+					if mapped, m_err := intern_session_string(&s.rb.interner, &s.interner, txt); m_err == nil {
+						val = mapped
+					}
+				}
+				fields[fi] = val
+			}
+		}
+	}
 
 	fid = Fact_Id(len(s.facts))
 	recency := s.next_recency
@@ -518,6 +572,9 @@ session_insert_cursor_fact :: proc(
 		support_count = 1,
 		origin        = .External,
 	})
+	for len(s.fact_alpha_head) <= int(fid) {
+		append(&s.fact_alpha_head, -1)
+	}
 	s.facts_by_key[lk] = fid
 	_record_dirty_derived_fact(s, fid, binding_idx)
 
@@ -578,10 +635,7 @@ session_modify_fact_by_key :: proc(
 
 					need_len := max(len(schema.fields), len(new_fields))
 					if len(f.fields) != need_len {
-						if f.fields != nil {
-							delete(f.fields, s.allocator)
-						}
-						f.fields = make([]Value, need_len, s.allocator)
+						f.fields = make([]Value, need_len, vmem.arena_allocator(&s.arena))
 					} else {
 						for &fv in f.fields {
 							fv = nil

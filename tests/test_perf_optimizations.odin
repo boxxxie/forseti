@@ -1,6 +1,8 @@
 package forseti_tests
 
 import "core:fmt"
+import "core:math"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import xitdb "xitdb:."
@@ -21,6 +23,13 @@ _compile_test_rb :: proc(
 
 	ir, ir_err := forseti.compile_source(src, name, &diags)
 	testing.expect_value(t, ir_err, nil, loc = loc)
+	if diags.error_count > 0 {
+		for d in diags.items {
+			if d.severity == .Error {
+				testing.expectf(t, false, "diag %s: %s", d.code, d.message, loc = loc)
+			}
+		}
+	}
 	testing.expect_value(t, diags.error_count, 0, loc = loc)
 	defer forseti.ir_destroy(&ir)
 
@@ -1050,4 +1059,397 @@ test_prehashed_key_custom_20byte_hasher_id0 :: proc(t: ^testing.T) {
 	v2, r2 := xitdb.cursor_read_int(rc2)
 	testing.expect_value(t, r2, nil)
 	testing.expect_value(t, v2, i64(222))
+}
+
+@(test)
+test_interner_geometric_growth_10k :: proc(t: ^testing.T) {
+	si: forseti.String_Interner
+	testing.expect_value(t, forseti.interner_init(&si), nil)
+	defer forseti.interner_destroy(&si)
+
+	buf: [32]u8 = ---
+	for i := 0; i < 10_000; i += 1 {
+		txt := fmt.bprintf(buf[:], "str:%06d", i)
+		sid, err := forseti.intern(&si, txt)
+		testing.expect_value(t, err, nil)
+		testing.expect_value(t, forseti.interner_get(&si, sid), txt)
+	}
+	testing.expect_value(t, len(si.strings), 10_001) // slot 0 = EMPTY_STRING
+	sid_dup, err_dup := forseti.intern(&si, "str:004242")
+	testing.expect_value(t, err_dup, nil)
+	testing.expect_value(t, forseti.interner_get(&si, sid_dup), "str:004242")
+	testing.expect_value(t, len(si.strings), 10_001)
+}
+
+@(test)
+test_beta_token_size_and_multi_decide_isolation :: proc(t: ^testing.T) {
+	testing.expectf(
+		t,
+		size_of(forseti.Beta_Token) <= 768,
+		"expected compact Beta_Token <= 768 B, got %d B",
+		size_of(forseti.Beta_Token),
+	)
+
+	src := `module six_decide version "1.0"
+schema In { id: string, k: i64 }
+schema Out { id: string, score: i64, tag: string }
+source In : In at .req_in[?id]
+derived Out : Out at .req_out[?id]
+
+table d1 version "1.0" hit First { inputs { k: i64 cost 1 } outputs { s: i64 } rows { r1: == 1 || 10; r2: - || 20; } }
+table d2 version "1.0" hit First { inputs { k: i64 cost 1 } outputs { s: i64 } rows { r1: == 1 || 100; r2: - || 200; } }
+table d3 version "1.0" hit First { inputs { k: i64 cost 1 } outputs { t: string } rows { r1: == 1 || "k1"; r2: - || "k2"; } }
+table d4 version "1.0" hit First { inputs { k: i64 cost 1 } outputs { s: i64 } rows { r1: == 1 || 1; r2: - || 2; } }
+table d5 version "1.0" hit First { inputs { k: i64 cost 1 } outputs { t: string } rows { r1: == 1 || "ok"; r2: - || "alt"; } }
+table d6 version "1.0" hit First { inputs { k: i64 cost 1 } outputs { t: string } rows { r1: == 1 || "p1"; r2: - || "p2"; } }
+
+rule six_steps {
+  when {
+    ?_x := In(id: ?id, k: ?k)
+    ?a1 := decide d1(k: ?k)
+    ?a2 := decide d2(k: ?k)
+    ?a3 := decide d3(k: ?k)
+    ?a4 := decide d4(k: ?k)
+    ?a5 := decide d5(k: ?k)
+    ?a6 := decide d6(k: ?k)
+    where ?a3.t == "k1" or ?a5.t == "alt"
+  }
+  then {
+    assert Out(id: ?id, score: ?a1.s + ?a2.s + ?a4.s, tag: ?a6.t)
+  }
+}`
+
+	rb := _compile_test_rb(t, src, "six_decide.forseti")
+	defer forseti.rulebase_destroy(&rb)
+
+	sess := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(sess, &rb), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(sess)
+		free(sess)
+	}
+
+	for i := 1; i <= 4; i += 1 {
+		key := fmt.tprintf("i:%d", i)
+		ks, _ := forseti.intern_session_string(&rb.interner, &sess.interner, key)
+		kv := i64(1 if i % 2 == 1 else 2)
+		_, _ = forseti.session_insert_fact(sess, "In", key, {ks, kv})
+	}
+	defer free_all(context.temp_allocator)
+
+	fired, fe := forseti.session_fire(sess)
+	testing.expect_value(t, fe, forseti.Session_Error.None)
+	testing.expect_value(t, fired, u64(4))
+	testing.expect_value(t, _count_alive_binding(sess, "Out"), 4)
+
+	bidx, _ := forseti.session_find_binding(sess, "Out")
+	for &f in sess.facts {
+		if !f.alive || f.binding_idx != bidx {
+			continue
+		}
+		id_s := forseti.session_string(sess, f.fields[0].(forseti.String_Id))
+		sc := f.fields[1].(i64)
+		tg := forseti.session_string(sess, f.fields[2].(forseti.String_Id))
+		if id_s == "i:1" || id_s == "i:3" {
+			testing.expect_value(t, sc, i64(111))
+			testing.expect_value(t, tg, "p1")
+		} else {
+			testing.expect_value(t, sc, i64(222))
+			testing.expect_value(t, tg, "p2")
+		}
+	}
+}
+
+@(test)
+test_accum_f64_cancellation_nonfinite_and_heap_compaction :: proc(t: ^testing.T) {
+	// 1. Float cancellation + nonfinite recovery
+	sum_st: forseti.Accum_State
+	forseti.accum_init(&sum_st, .Sum)
+	defer forseti.accum_destroy(&sum_st)
+
+	forseti.accum_insert(&sum_st, f64(1e16))
+	forseti.accum_insert(&sum_st, f64(1.0))
+	forseti.accum_insert(&sum_st, f64(-1e16))
+	v_c, ok_c := forseti.accum_finalize(&sum_st)
+	testing.expect(t, ok_c)
+	testing.expect(t, math.abs(v_c.(f64) - 1.0) < 1e-6)
+
+	pos_inf := math.inf_f64(1)
+	neg_inf := math.inf_f64(-1)
+	nan_v := math.nan_f64()
+
+	forseti.accum_insert(&sum_st, f64(41.5))
+	forseti.accum_insert(&sum_st, pos_inf)
+	v_inf, _ := forseti.accum_finalize(&sum_st)
+	testing.expect(t, math.is_inf(v_inf.(f64), 1))
+
+	forseti.accum_insert(&sum_st, neg_inf)
+	v_nan1, _ := forseti.accum_finalize(&sum_st)
+	testing.expect(t, math.is_nan(v_nan1.(f64)))
+
+	forseti.accum_retract(&sum_st, pos_inf)
+	forseti.accum_retract(&sum_st, neg_inf)
+	forseti.accum_insert(&sum_st, nan_v)
+	v_nan2, _ := forseti.accum_finalize(&sum_st)
+	testing.expect(t, math.is_nan(v_nan2.(f64)))
+
+	forseti.accum_retract(&sum_st, nan_v)
+	v_rec, ok_rec := forseti.accum_finalize(&sum_st)
+	testing.expect(t, ok_rec)
+	testing.expect(t, math.abs(v_rec.(f64) - 42.5) < 1e-6)
+
+	// 2. Min/Max lazy heap compaction across heavy insert/retract churn
+	for op in ([2]forseti.Accum_Op{.Min, .Max}) {
+		st: forseti.Accum_State
+		forseti.accum_init(&st, op)
+		defer forseti.accum_destroy(&st)
+
+		for i := i64(1); i <= 300; i += 1 {
+			forseti.accum_insert(&st, i)
+		}
+		for i := i64(1); i <= 250; i += 1 {
+			forseti.accum_retract(&st, i)
+		}
+		got, ok := forseti.accum_finalize(&st)
+		testing.expect(t, ok)
+		expected := i64(251) if op == .Min else i64(300)
+		testing.expect_value(t, got.(i64), expected)
+		testing.expectf(
+			t,
+			len(st.bag_heap) <= max(len(st.bag_counts) * 2, 64),
+			"expected compacted heap <= max(2*U, 64), got %d for U=%d",
+			len(st.bag_heap),
+			len(st.bag_counts),
+		)
+	}
+}
+
+@(test)
+test_accum_overflow_64_delta_fallback_and_fast_modify :: proc(t: ^testing.T) {
+	src := `module accum_overflow version "1.0"
+schema Bucket { grp: i64 }
+schema Item { grp: i64, amt: i64 }
+schema Out { grp: i64, s: i64 }
+source Bucket : Bucket at .b[?id]
+source Item : Item at .it[?id]
+derived Out : Out at .out[?id]
+
+rule sum_grp {
+  when {
+    ?_b := Bucket(grp: ?g)
+    ?s := sum(?a) from Item(grp: ?g, amt: ?a)
+  }
+  then { assert Out(grp: ?g, s: ?s) }
+}`
+
+	rb := _compile_test_rb(t, src, "accum_overflow.forseti")
+	defer forseti.rulebase_destroy(&rb)
+
+	sess := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(sess, &rb, forseti.Session_Config{provenance_mode = .Fast}), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(sess)
+		free(sess)
+	}
+
+	_, _ = forseti.session_insert_fact(sess, "Bucket", "b0", {i64(0)})
+	_, _ = forseti.session_insert_fact(sess, "Bucket", "b1", {i64(1)})
+	_, _ = forseti.session_fire(sess)
+
+	// Burst > 64 inserts in one tx (75 items) overflows MAX_ALPHA_DELTA_LOG and falls back cleanly.
+	kbuf: [24]u8 = ---
+	for i := 0; i < 75; i += 1 {
+		key := fmt.bprintf(kbuf[:], "it:%d", i)
+		grp := i64(i % 2)
+		_, _ = forseti.session_insert_fact(sess, "Item", key, {grp, i64(10)})
+	}
+	_, fe1 := forseti.session_fire(sess)
+	testing.expect_value(t, fe1, forseti.Session_Error.None)
+
+	find_sum :: proc(s: ^forseti.Session, grp: i64) -> (val: i64, ok: bool) {
+		bidx, _ := forseti.session_find_binding(s, "Out")
+		for &f in s.facts {
+			if f.alive && f.binding_idx == bidx && f.fields[0] == forseti.Value(grp) {
+				return f.fields[1].(i64), true
+			}
+		}
+		return 0, false
+	}
+
+	s0, ok0 := find_sum(sess, 0)
+	s1, ok1 := find_sum(sess, 1)
+	testing.expect(t, ok0 && ok1)
+	testing.expect_value(t, s0, i64(380)) // 38 even indices * 10
+	testing.expect_value(t, s1, i64(370)) // 37 odd indices * 10
+
+	// Burst > 64 retracts in one tx.
+	for i := 0; i < 70; i += 1 {
+		key := fmt.bprintf(kbuf[:], "it:%d", i)
+		_ = forseti.session_retract_fact_by_key(sess, "Item", key)
+	}
+	_, fe2 := forseti.session_fire(sess)
+	testing.expect_value(t, fe2, forseti.Session_Error.None)
+	s0b, _ := find_sum(sess, 0)
+	s1b, _ := find_sum(sess, 1)
+	testing.expect_value(t, s0b, i64(30)) // 70, 72, 74
+	testing.expect_value(t, s1b, i64(20)) // 71, 73
+
+	// In-place fast modify on Bucket moving outer key 1 -> 0.
+	_ = forseti.session_modify_fact_by_key(sess, "Bucket", "b1", {i64(0)})
+	_, fe3 := forseti.session_fire(sess)
+	testing.expect_value(t, fe3, forseti.Session_Error.None)
+	testing.expect_value(t, _count_alive_binding(sess, "Out"), 1)
+	s0c, _ := find_sum(sess, 0)
+	testing.expect_value(t, s0c, i64(30))
+}
+
+@(test)
+test_jtms_pooled_recycle_and_provenance_fifo_order :: proc(t: ^testing.T) {
+	src := `module hub_fifo version "1.0"
+schema Hub { x: i64 }
+schema Leaf { id: i64, x: i64 }
+schema Alt { id: i64 }
+schema Out { id: i64 }
+source Hub : Hub at .hub[?id]
+source Leaf : Leaf at .leaf[?id]
+source Alt : Alt at .alt[?id]
+derived Out : Out at .out[?id]
+
+rule r_hub {
+  when {
+    ?_h := Hub(x: ?x)
+    ?_l := Leaf(id: ?id, x: ?x)
+  }
+  then { assert Out(id: ?id) }
+}
+rule r_alt {
+  when { ?_a := Alt(id: ?id) }
+  then { assert Out(id: ?id) }
+}`
+
+	rb := _compile_test_rb(t, src, "hub_fifo.forseti")
+	defer forseti.rulebase_destroy(&rb)
+
+	// 1. Audit_Full preserves exact FIFO derivation order in intrusive Provenance lists.
+	s_audit := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(s_audit, &rb, forseti.Session_Config{provenance_mode = .Audit_Full}), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(s_audit)
+		free(s_audit)
+	}
+	_, _ = forseti.session_insert_fact(s_audit, "Hub", "h1", {i64(7)})
+	_, _ = forseti.session_insert_fact(s_audit, "Leaf", "l1", {i64(1), i64(7)})
+	_, _ = forseti.session_fire(s_audit)
+	_, _ = forseti.session_insert_fact(s_audit, "Alt", "a1", {i64(1)})
+	_, _ = forseti.session_fire(s_audit)
+
+	out_bidx, _ := forseti.session_find_binding(s_audit, "Out")
+	out_fid := forseti.INVALID_FACT
+	for &f in s_audit.facts {
+		if f.alive && f.binding_idx == out_bidx {
+			out_fid = f.id
+			break
+		}
+	}
+	testing.expect(t, out_fid != forseti.INVALID_FACT)
+	testing.expect(t, int(out_fid) < len(s_audit.provenance.fact_deriv_lists))
+	d0 := s_audit.provenance.fact_deriv_lists[out_fid].head
+	testing.expect(t, d0 != forseti.INVALID_DERIVATION)
+	d1 := s_audit.provenance.deriv_next_for_fact[d0]
+	testing.expect(t, d1 != forseti.INVALID_DERIVATION)
+	testing.expect_value(t, s_audit.provenance.deriv_next_for_fact[d1], forseti.INVALID_DERIVATION)
+	testing.expect_value(t, forseti.interner_get(&rb.interner, rb.rules[s_audit.provenance.derivs[d0].rule_id].name), "r_hub")
+	testing.expect_value(t, forseti.interner_get(&rb.interner, rb.rules[s_audit.provenance.derivs[d1].rule_id].name), "r_alt")
+
+	// 2. Fast mode hub retract + recycle handles 64+ dependents cleanly across multiple cycles.
+	s_fast := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(s_fast, &rb, forseti.Session_Config{provenance_mode = .Fast}), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(s_fast)
+		free(s_fast)
+	}
+	kbuf: [24]u8 = ---
+	for i := i64(0); i < 64; i += 1 {
+		_, _ = forseti.session_insert_fact(s_fast, "Leaf", fmt.bprintf(kbuf[:], "l:%d", i), {i, i64(9)})
+	}
+	for cycle := 0; cycle < 3; cycle += 1 {
+		_, _ = forseti.session_insert_fact(s_fast, "Hub", "h", {i64(9)})
+		_, _ = forseti.session_fire(s_fast)
+		testing.expect_value(t, _count_alive_binding(s_fast, "Out"), 64)
+		_ = forseti.session_retract_fact_by_key(s_fast, "Hub", "h")
+		_, _ = forseti.session_fire(s_fast)
+		testing.expect_value(t, _count_alive_binding(s_fast, "Out"), 0)
+	}
+	testing.expect(t, len(s_fast.jtms.free_justs) >= 64)
+}
+
+@(test)
+test_flat_pool_steady_state_alloc_budget :: proc(t: ^testing.T) {
+	src := `module pool_budget version "1.0"
+schema Org { id: string, dom: string }
+schema Dept { id: string, dom: string }
+schema Contract { id: string, dom: string, v: i64 }
+schema Out { id: string }
+source Org : Org at .o[?id]
+source Dept : Dept at .d[?id]
+source Contract : Contract at .c[?id]
+derived Out : Out at .out[?id]
+
+rule join3 {
+  when {
+    ?_o := Org(id: ?id, dom: ?dom)
+    ?_p := Dept(dom: ?dom)
+    ?_c := Contract(dom: ?dom, v: ?v)
+    where ?v >= 10
+  }
+  then { assert Out(id: ?id) }
+}`
+
+	rb := _compile_test_rb(t, src, "pool_budget.forseti")
+	defer forseti.rulebase_destroy(&rb)
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	talloc := mem.tracking_allocator(&track)
+
+	sess := new(forseti.Session, talloc)
+	testing.expect_value(t, forseti.session_init(sess, &rb, forseti.Session_Config{provenance_mode = .Fast}, nil, talloc), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(sess)
+		free(sess, talloc)
+	}
+
+	kbuf: [24]u8 = ---
+	dbuf: [24]u8 = ---
+	for i := 0; i < 200; i += 1 {
+		k := fmt.bprintf(kbuf[:], "k:%d", i)
+		d := fmt.bprintf(dbuf[:], "d:%d", i)
+		ks, _ := forseti.intern_session_string(&rb.interner, &sess.interner, k)
+		ds, _ := forseti.intern_session_string(&rb.interner, &sess.interner, d)
+		_, _ = forseti.session_insert_fact(sess, "Org", k, {ks, ds})
+		_, _ = forseti.session_insert_fact(sess, "Dept", k, {ks, ds})
+		_, _ = forseti.session_insert_fact(sess, "Contract", k, {ks, ds, i64(20)})
+	}
+	_, _ = forseti.session_fire(sess)
+
+	k0_s, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "k:0")
+	d0_s, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "d:0")
+	// Warm up both alternating toggle states across 3-way join cleanly.
+	for toggle_val in ([2]i64{30, 5}) {
+		_ = forseti.session_modify_fact_by_key(sess, "Contract", "k:0", {k0_s, d0_s, toggle_val})
+		_, _ = forseti.session_fire(sess)
+	}
+	free_all(context.temp_allocator)
+
+	before_allocs := track.total_allocation_count
+	for i := 0; i < 10; i += 1 {
+		v := i64(30 if i % 2 == 0 else 5)
+		_ = forseti.session_modify_fact_by_key(sess, "Contract", "k:0", {k0_s, d0_s, v})
+		_, _ = forseti.session_fire(sess)
+		free_all(context.temp_allocator)
+	}
+	after_allocs := track.total_allocation_count
+	delta_allocs := after_allocs - before_allocs
+	testing.expectf(t, delta_allocs <= 4, "expected steady-state 3-way flat-pool allocs <= 4 across 10 modify cycles, got %d", delta_allocs)
 }

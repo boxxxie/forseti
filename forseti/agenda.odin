@@ -1,6 +1,8 @@
 package forseti
 
 import "core:mem"
+import vmem "core:mem/virtual"
+import xitdb "xitdb:."
 
 Activation_Key :: struct {
 	rule_id:  u32,
@@ -8,14 +10,15 @@ Activation_Key :: struct {
 }
 
 Activation :: struct {
-	rule_id:    u32,
-	stratum:    u32,
-	phase:      String_Id,
-	salience:   i32,
-	gen:        u32,
-	rule_q_idx: u32,
-	token:      Beta_Token,
-	alive:      bool,
+	rule_id:      u32,
+	stratum:      u32,
+	phase:        String_Id,
+	salience:     i32,
+	gen:          u32,
+	rule_q_idx:   u32,
+	decide_block: i32,
+	token:        Beta_Token,
+	alive:        bool,
 }
 
 Agenda_Heap_Entry :: struct {
@@ -37,19 +40,28 @@ Agenda_Queued_Ref :: struct {
 	gen:      u32,
 }
 
+Fact_Act_Edge :: struct {
+	ak:   Activation_Key,
+	next: i32,
+}
+
 Agenda :: struct {
-	slots:             [dynamic]Activation,
-	free_slots:        [dynamic]u32,
-	next_gen:          u32,
-	stratum_heaps:     map[u32][dynamic]Agenda_Heap_Entry,
-	phase_heaps:       map[Agenda_Bucket_Key][dynamic]Agenda_Heap_Entry,
-	phase_live_counts: map[String_Id]u32,
-	queued:            map[Activation_Key]Agenda_Queued_Ref,
-	rule_queued:       map[u32][dynamic]Activation_Key,
-	refracted:         map[Activation_Key]bool,
-	fact_activations:  map[Fact_Id][dynamic]Activation_Key,
-	phases:            [dynamic]String_Id,
-	allocator:         mem.Allocator,
+	slots:              [dynamic]Activation,
+	free_slots:         [dynamic]u32,
+	next_gen:           u32,
+	stratum_heaps:      map[u32][dynamic]Agenda_Heap_Entry,
+	phase_heaps:        map[Agenda_Bucket_Key][dynamic]Agenda_Heap_Entry,
+	phase_live_counts:  map[String_Id]u32,
+	queued:             map[Activation_Key]Agenda_Queued_Ref,
+	rule_queued:        map[u32][dynamic]Activation_Key,
+	refracted:          map[Activation_Key]bool,
+	fact_act_head:      [dynamic]i32,
+	fact_act_edges:     [dynamic]Fact_Act_Edge,
+	free_fact_act_edges:[dynamic]i32,
+	decide_blocks:      [dynamic][dynamic]Decision_Result,
+	free_decide_blocks: [dynamic]i32,
+	phases:             [dynamic]String_Id,
+	allocator:          mem.Allocator,
 }
 
 @(private)
@@ -64,16 +76,25 @@ agenda_init :: proc(ag: ^Agenda, allocator: mem.Allocator) {
 	ag.queued = make(map[Activation_Key]Agenda_Queued_Ref, 16, allocator)
 	ag.rule_queued = make(map[u32][dynamic]Activation_Key, 8, allocator)
 	ag.refracted = make(map[Activation_Key]bool, 16, allocator)
-	ag.fact_activations = make(map[Fact_Id][dynamic]Activation_Key, 16, allocator)
+	ag.fact_act_head = make([dynamic]i32, 1, 16, allocator)
+	ag.fact_act_head[0] = -1
+	ag.fact_act_edges = make([dynamic]Fact_Act_Edge, 0, 16, allocator)
+	ag.free_fact_act_edges = make([dynamic]i32, 0, 16, allocator)
+	ag.decide_blocks = make([dynamic][dynamic]Decision_Result, 0, 8, allocator)
+	ag.free_decide_blocks = make([dynamic]i32, 0, 8, allocator)
 	ag.phases = make([dynamic]String_Id, 0, 8, allocator)
 }
 
 @(private)
 agenda_destroy :: proc(ag: ^Agenda) {
-	for _, list in ag.fact_activations {
-		delete(list)
+	for blk in ag.decide_blocks {
+		delete(blk)
 	}
-	delete(ag.fact_activations)
+	delete(ag.decide_blocks)
+	delete(ag.free_decide_blocks)
+	delete(ag.free_fact_act_edges)
+	delete(ag.fact_act_edges)
+	delete(ag.fact_act_head)
 	for _, list in ag.rule_queued {
 		delete(list)
 	}
@@ -190,6 +211,10 @@ _agenda_kill_slot :: proc(ag: ^Agenda, slot_idx: u32) {
 		}
 	}
 	delete_key(&ag.queued, ak)
+	if slot.decide_block >= 0 {
+		append(&ag.free_decide_blocks, slot.decide_block)
+		slot.decide_block = -1
+	}
 	append(&ag.free_slots, slot_idx)
 }
 
@@ -291,7 +316,7 @@ session_set_phases :: proc(s: ^Session, phases: []string) -> Session_Error {
 }
 
 @(private)
-agenda_stage_activation :: proc(s: ^Session, rule_id: u32, tok: Beta_Token) {
+agenda_stage_activation :: proc(s: ^Session, rule_id: u32, tok: ^Beta_Token) {
 	ag := &s.agenda
 	ak := Activation_Key{rule_id = rule_id, tok_hash = tok.fact_sig_hash}
 	if ak in ag.refracted || ak in ag.queued {
@@ -317,15 +342,31 @@ agenda_stage_activation :: proc(s: ^Session, rule_id: u32, tok: Beta_Token) {
 	rule_q_idx := u32(len(rq^))
 	append(rq, ak)
 
+	dec_blk := i32(-1)
+	if tok.decide_count > 0 {
+		src := _token_decide_slice(s, tok)
+		if len(src) > 0 {
+			if len(ag.free_decide_blocks) > 0 {
+				dec_blk = pop(&ag.free_decide_blocks)
+			} else {
+				dec_blk = i32(len(ag.decide_blocks))
+				append(&ag.decide_blocks, make([dynamic]Decision_Result, 0, len(src), ag.allocator))
+			}
+			resize(&ag.decide_blocks[dec_blk], len(src))
+			copy(ag.decide_blocks[dec_blk][:], src)
+		}
+	}
+
 	ag.slots[slot_idx] = Activation{
-		rule_id    = rule_id,
-		stratum    = rule.stratum,
-		phase      = rule.phase,
-		salience   = rule.salience,
-		gen        = gen,
-		rule_q_idx = rule_q_idx,
-		token      = tok,
-		alive      = true,
+		rule_id      = rule_id,
+		stratum      = rule.stratum,
+		phase        = rule.phase,
+		salience     = rule.salience,
+		gen          = gen,
+		rule_q_idx   = rule_q_idx,
+		decide_block = dec_blk,
+		token        = tok^,
+		alive        = true,
 	}
 	ag.queued[ak] = Agenda_Queued_Ref{slot_idx = slot_idx, gen = gen}
 
@@ -365,46 +406,66 @@ agenda_stage_activation :: proc(s: ^Session, rule_id: u32, tok: Beta_Token) {
 
 	for i := 0; i < int(tok.fact_count); i += 1 {
 		fid := tok.fact_ids[i]
-		list, has := &ag.fact_activations[fid]
-		if !has {
-			ag.fact_activations[fid] = make([dynamic]Activation_Key, 0, 4, ag.allocator)
-			list = &ag.fact_activations[fid]
+		for len(ag.fact_act_head) <= int(fid) {
+			append(&ag.fact_act_head, -1)
 		}
 		already := false
-		if len(list^) <= 8 {
-			for prev in list^ {
-				if prev == ak {
-					already = true
-					break
-				}
+		dead_slot := i32(-1)
+		cur := ag.fact_act_head[fid]
+		for step := 0; cur >= 0 && step < 8; step += 1 {
+			edge := ag.fact_act_edges[cur]
+			if edge.ak == ak {
+				already = true
+				break
 			}
+			if dead_slot < 0 && !(edge.ak in ag.queued) && !(edge.ak in ag.refracted) {
+				dead_slot = cur
+			}
+			cur = edge.next
 		}
 		if !already {
-			if len(list^) == cap(list^) {
-				kept := 0
-				for prev in list^ {
-					if (prev in ag.queued) || (prev in ag.refracted) {
-						list^[kept] = prev
-						kept += 1
+			if dead_slot >= 0 {
+				ag.fact_act_edges[dead_slot].ak = ak
+			} else {
+				eidx: i32
+				if len(ag.free_fact_act_edges) > 0 {
+					eidx = pop(&ag.free_fact_act_edges)
+					ag.fact_act_edges[eidx] = Fact_Act_Edge{
+						ak   = ak,
+						next = ag.fact_act_head[fid],
 					}
+				} else {
+					eidx = i32(len(ag.fact_act_edges))
+					append(&ag.fact_act_edges, Fact_Act_Edge{
+						ak   = ak,
+						next = ag.fact_act_head[fid],
+					})
 				}
-				resize(list, kept)
+				ag.fact_act_head[fid] = eidx
 			}
-			append(list, ak)
 		}
 	}
 }
 
 @(private)
 agenda_remove_fact :: proc(ag: ^Agenda, fid: Fact_Id) {
-	if list, has := &ag.fact_activations[fid]; has {
-		for ak in list^ {
-			if qref, is_q := ag.queued[ak]; is_q {
-				_agenda_kill_slot(ag, qref.slot_idx)
-			}
-			delete_key(&ag.refracted, ak)
+	if int(fid) >= len(ag.fact_act_head) {
+		return
+	}
+	cur := ag.fact_act_head[fid]
+	if cur < 0 {
+		return
+	}
+	ag.fact_act_head[fid] = -1
+	for cur >= 0 {
+		edge := ag.fact_act_edges[cur]
+		nxt := edge.next
+		append(&ag.free_fact_act_edges, cur)
+		cur = nxt
+		if qref, is_q := ag.queued[edge.ak]; is_q {
+			_agenda_kill_slot(ag, qref.slot_idx)
 		}
-		clear(list)
+		delete_key(&ag.refracted, edge.ak)
 	}
 }
 
@@ -425,7 +486,29 @@ agenda_cancel_rule_not_in_set :: proc(ag: ^Agenda, rule_id: u32, live_hashes: ma
 }
 
 @(private)
-_agenda_pop_live_from_heap :: proc(ag: ^Agenda, h: ^[dynamic]Agenda_Heap_Entry) -> (act: Activation, found: bool) {
+agenda_cancel_fact_rule_not_in_set :: proc(ag: ^Agenda, fid: Fact_Id, rule_id: u32, live_hashes: map[u64]bool) {
+	if int(fid) >= len(ag.fact_act_head) {
+		return
+	}
+	cur := ag.fact_act_head[fid]
+	for cur >= 0 {
+		edge := ag.fact_act_edges[cur]
+		nxt := edge.next
+		if edge.ak.rule_id == rule_id && !(edge.ak.tok_hash in live_hashes) {
+			if qref, has_q := ag.queued[edge.ak]; has_q {
+				_agenda_kill_slot(ag, qref.slot_idx)
+			}
+		}
+		cur = nxt
+	}
+}
+
+@(private)
+_agenda_pop_live_from_heap :: proc(
+	ag: ^Agenda,
+	h: ^[dynamic]Agenda_Heap_Entry,
+	decide_out: ^[dynamic]Decision_Result,
+) -> (act: Activation, found: bool) {
 	for {
 		entry, ok := _agenda_heap_pop(h)
 		if !ok {
@@ -437,6 +520,13 @@ _agenda_pop_live_from_heap :: proc(ag: ^Agenda, h: ^[dynamic]Agenda_Heap_Entry) 
 		slot := &ag.slots[entry.slot_idx]
 		if !slot.alive || slot.gen != entry.gen {
 			continue
+		}
+		if slot.decide_block >= 0 {
+			src := ag.decide_blocks[slot.decide_block]
+			resize(decide_out, len(src))
+			copy(decide_out^[:], src[:])
+		} else {
+			clear(decide_out)
 		}
 		act = slot^
 		_agenda_kill_slot(ag, entry.slot_idx)
@@ -452,7 +542,7 @@ _agenda_pop_for_stratum :: proc(s: ^Session, stratum: u32) -> (act: Activation, 
 		for cur_phase in ag.phases {
 			bk := Agenda_Bucket_Key{stratum = stratum, phase = cur_phase}
 			if ph_h, has_ph := &ag.phase_heaps[bk]; has_ph {
-				if popped, ok := _agenda_pop_live_from_heap(ag, ph_h); ok {
+				if popped, ok := _agenda_pop_live_from_heap(ag, ph_h, &s.firing_decide_buf); ok {
 					return popped, true
 				}
 			}
@@ -460,7 +550,7 @@ _agenda_pop_for_stratum :: proc(s: ^Session, stratum: u32) -> (act: Activation, 
 	}
 
 	if sh, has_sh := &ag.stratum_heaps[stratum]; has_sh {
-		return _agenda_pop_live_from_heap(ag, sh)
+		return _agenda_pop_live_from_heap(ag, sh, &s.firing_decide_buf)
 	}
 	return {}, false
 }
@@ -469,6 +559,7 @@ _agenda_pop_for_stratum :: proc(s: ^Session, stratum: u32) -> (act: Activation, 
 _execute_rule_actions :: proc(s: ^Session, rule: Rule_Compiled, tok: ^Beta_Token) -> Session_Error {
 	fact_slots_buf: [MAX_TOKEN_FACTS]Vm_Fact_Binding
 	fslots := _fill_vm_fact_slots(s, tok, fact_slots_buf[:])
+	decide_res := s.firing_decide_buf[:]
 
 	fkey := Firing_Key{rule_id = rule.id, tok_hash = tok.fact_sig_hash}
 	parents := tok.fact_ids[:tok.fact_count]
@@ -476,8 +567,8 @@ _execute_rule_actions :: proc(s: ^Session, rule: Rule_Compiled, tok: ^Beta_Token
 
 	tidx := rule.decide_table_idx
 	trow := INVALID_ROW_ID
-	if rule.decide_slots > 0 && tok.decide_results[0].matched && tok.decide_results[0].trace.winning_row_idx >= 0 {
-		trow = u16(tok.decide_results[0].trace.winning_row_idx)
+	if rule.decide_slots > 0 && len(decide_res) > 0 && decide_res[0].matched && decide_res[0].trace.winning_row_idx >= 0 {
+		trow = u16(decide_res[0].trace.winning_row_idx)
 	}
 
 	had_logical := false
@@ -500,7 +591,7 @@ _execute_rule_actions :: proc(s: ^Session, rule: Rule_Compiled, tok: ^Beta_Token
 						fslots,
 						s.rb.tables,
 						&s.rb.interner,
-						tok.decide_results[:],
+						decide_res,
 						&s.interner,
 					)
 					if verr != .None {
@@ -581,7 +672,7 @@ _execute_rule_actions :: proc(s: ^Session, rule: Rule_Compiled, tok: ^Beta_Token
 				)
 			}
 			jtms_track_firing_only(s, fkey, primary_deriv if !had_logical else INVALID_DERIVATION)
-			effects_stage_job(s, rule, act, tok, fslots, primary_deriv) or_return
+			effects_stage_job(s, rule, act, tok, fslots, decide_res, primary_deriv) or_return
 		}
 	}
 	return .None
@@ -650,6 +741,13 @@ rulebase_find_binding :: proc(rb: ^Rulebase, name: string) -> (u16, bool) {
 	return bidx, has
 }
 
+@(private)
+_Binding_Path_Map_Entry :: struct {
+	path: string,
+	bidx: u16,
+	name: string,
+}
+
 // Syncs incremental Z-set deltas from `bridge` into `s`, fires PHREAK + Agenda,
 // and optionally commits derived facts and Audit_Full provenance back to `bridge` in an atomic xitdb moment.
 session_sync_and_fire :: proc(
@@ -662,8 +760,26 @@ session_sync_and_fire :: proc(
 		return 0, .Invalid_Config
 	}
 
+	snap_arena: vmem.Arena
+	snap_core: xitdb.Core
+	snap_db: xitdb.Database
+	snap_active := false
+	if !syncer.has_synced && bridge.db != nil && bridge.db.core != nil && _core_has_disk_backing(bridge.db.core) {
+		if vmem.arena_init_growing(&snap_arena) == nil {
+			if _try_build_file_snapshot(bridge, &snap_arena, &snap_core, &snap_db) {
+				snap_active = true
+			} else {
+				vmem.arena_destroy(&snap_arena)
+			}
+		}
+	}
+	defer if snap_active {
+		vmem.arena_destroy(&snap_arena)
+		snap_active = false
+	}
+
 	sr: Sync_Result
-	delta_syncer_sync(syncer, bridge, &sr) or_return
+	_delta_syncer_sync_impl(syncer, bridge, &sr, &snap_db if snap_active else nil) or_return
 	defer sync_result_destroy(&sr)
 
 	if len(sr.deltas) > 64 {
@@ -674,31 +790,55 @@ session_sync_and_fire :: proc(
 		if len(s.facts_by_key) + len(sr.deltas) > cap(s.facts_by_key) {
 			reserve(&s.facts_by_key, len(s.facts_by_key) + len(sr.deltas))
 		}
-		if len(s.fact_alpha_mems) + len(sr.deltas) > cap(s.fact_alpha_mems) {
-			reserve(&s.fact_alpha_mems, len(s.fact_alpha_mems) + len(sr.deltas))
+		if cap(s.fact_alpha_head) < need_cap {
+			reserve(&s.fact_alpha_head, need_cap)
+		}
+		if cap(s.fact_alpha_edges) < len(s.fact_alpha_edges) + len(sr.deltas) {
+			reserve(&s.fact_alpha_edges, len(s.fact_alpha_edges) + len(sr.deltas))
 		}
 	}
 
-	// Map watched dot paths -> Rulebase source Binding_Def indices cleanly.
+	// Precompute source binding dot-paths once per sync call.
+	sr_alloc := vmem.arena_allocator(&sr.arena)
+	path_entries := make([dynamic]_Binding_Path_Map_Entry, 0, len(s.rb.bindings), context.temp_allocator)
 	path_buf: [256]u8 = ---
+	for bdef, bi in s.rb.bindings {
+		if bdef.kind != .Source {
+			continue
+		}
+		bpath := _binding_dot_path(s.rb, bdef, path_buf[:])
+		if len(bpath) == 0 {
+			continue
+		}
+		buf_copy := make([]u8, len(bpath), sr_alloc)
+		copy(buf_copy, bpath)
+		append(&path_entries, _Binding_Path_Map_Entry{
+			path = string(buf_copy),
+			bidx = u16(bi),
+			name = interner_get(&s.rb.interner, bdef.name),
+		})
+	}
+
+	snap_ptr := &snap_db if snap_active else nil
 	for d in sr.deltas {
-		for bdef, bi in s.rb.bindings {
-			if bdef.kind != .Source {
-				continue
-			}
-			bpath := _binding_dot_path(s.rb, bdef, path_buf[:])
-			if bpath != d.collection {
+		for pe in path_entries {
+			if pe.path != d.collection {
 				continue
 			}
 			switch d.kind {
 			case .Removed, .Changed_Old:
-				_ = session_retract_fact_by_key(s, interner_get(&s.rb.interner, bdef.name), d.key)
+				_ = session_retract_fact_by_key(s, pe.name, d.key)
 			case .Added, .Changed_New:
-				if _, ierr := session_insert_cursor_fact(s, u16(bi), d.key, d.new_value); ierr != nil {
+				if _, ierr := _session_insert_cursor_fact_hydrated(s, pe.bidx, d.key, d.new_value, snap_ptr); ierr != nil {
 					return 0, .Invalid_Config
 				}
 			}
 		}
+	}
+
+	if snap_active {
+		vmem.arena_destroy(&snap_arena)
+		snap_active = false
 	}
 
 	cnt, f_err := session_fire(s)

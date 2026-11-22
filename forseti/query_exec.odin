@@ -118,7 +118,7 @@ session_query :: proc(
 		if step.guard_prog >= 0 {
 			for &tok in cur {
 				fslots := _fill_vm_fact_slots(s, &tok, fact_slots_buf[:])
-				val, verr := vm_eval(&s.rb.programs[step.guard_prog], tok.vars[:], fslots, s.rb.tables, &s.rb.interner, tok.decide_results[:], &s.interner)
+				val, verr := vm_eval(&s.rb.programs[step.guard_prog], tok.vars[:], fslots, s.rb.tables, &s.rb.interner, nil, &s.interner)
 				if verr == .None && val == Value(true) {
 					append(&nxt, tok)
 				}
@@ -151,7 +151,7 @@ session_query :: proc(
 				if !eq_ok {
 					continue
 				}
-				if ext, eok := _token_extend_fact(s, ltok, f, step.field_binds); eok {
+				if ext, eok := _token_extend_fact(s, &ltok, f, step.field_binds); eok {
 					append(&nxt, ext)
 				}
 			}

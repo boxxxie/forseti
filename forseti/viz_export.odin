@@ -351,11 +351,9 @@ _collect_derivation_subgraph :: proc(
 			if s.provenance.mode != .Audit_Full {
 				continue
 			}
-			if flist, has := s.provenance.fact_derivs[cur]; has {
-				for did in flist {
-					if int(did) >= len(s.provenance.derivs) || !s.provenance.derivs[did].alive {
-						continue
-					}
+			did := provenance_fact_deriv_head(&s.provenance, cur)
+			for did != INVALID_DERIVATION {
+				if int(did) < len(s.provenance.derivs) && s.provenance.derivs[did].alive {
 					parents := provenance_parents(&s.provenance, did)
 					all_alive := true
 					for pf in parents {
@@ -364,17 +362,17 @@ _collect_derivation_subgraph :: proc(
 							break
 						}
 					}
-					if !all_alive {
-						continue
-					}
-					dset[did] = true
-					for pf in parents {
-						if !(pf in fset) {
-							fset[pf] = true
-							append(&queue, pf)
+					if all_alive {
+						dset[did] = true
+						for pf in parents {
+							if !(pf in fset) {
+								fset[pf] = true
+								append(&queue, pf)
+							}
 						}
 					}
 				}
+				did = s.provenance.deriv_next_for_fact[did]
 			}
 		}
 	} else {

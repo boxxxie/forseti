@@ -40,8 +40,12 @@ intern :: proc(s: ^String_Interner, text: string) -> (id: String_Id, err: mem.Al
 	if existing, ok := s.lookup[text]; ok {
 		return existing, nil
 	}
-	reserve(&s.strings, len(s.strings) + 1) or_return
-	reserve(&s.lookup, len(s.lookup) + 1) or_return
+	if len(s.strings) >= cap(s.strings) {
+		reserve(&s.strings, max(cap(s.strings) * 2, 64)) or_return
+	}
+	if (len(s.lookup) + 1) * 4 >= cap(s.lookup) * 3 {
+		reserve(&s.lookup, max(cap(s.lookup) * 2, 64)) or_return
+	}
 	cloned := strings.clone(text, vmem.arena_allocator(&s.arena)) or_return
 	id = String_Id(len(s.strings))
 	append(&s.strings, cloned) or_return

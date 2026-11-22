@@ -8,19 +8,21 @@ Eval_Frame_Kind :: enum u8 {
 }
 
 Eval_Frame :: struct {
-	kind:        Eval_Frame_Kind,
-	is_delta:    bool,
-	seg_id:      u32,
-	node_idx:    u32, // Relative to seg.node_start when Segment
-	sub_id:      u32,
-	beta_node:   Beta_Node_Def,
-	var_slot:    u16,
-	accum_op:    Accum_Op,
-	tokens:      [dynamic]Beta_Token,
-	outer_idx:   int,
-	sub_step:    int,
-	sub_tokens:  [dynamic]Beta_Token,
-	pass_tokens: [dynamic]Beta_Token,
+	kind:                  Eval_Frame_Kind,
+	is_delta:              bool,
+	is_partial_reconcile:  bool,
+	partial_accum_node_id: u32,
+	seg_id:                u32,
+	node_idx:              u32, // Relative to seg.node_start when Segment
+	sub_id:                u32,
+	beta_node:             Beta_Node_Def,
+	var_slot:              u16,
+	accum_op:              Accum_Op,
+	tokens:                [dynamic]Beta_Token,
+	outer_idx:             int,
+	sub_step:              int,
+	sub_tokens:            [dynamic]Beta_Token,
+	pass_tokens:           [dynamic]Beta_Token,
 }
 
 @(private)
@@ -71,8 +73,48 @@ _reconcile_rule_terminal :: proc(s: ^Session, rule_id: u32, tokens: []Beta_Token
 	agenda_cancel_rule_not_in_set(&s.agenda, rule_id, live_hashes^)
 
 	for &tok in tokens {
-		agenda_stage_activation(s, rule_id, tok)
+		agenda_stage_activation(s, rule_id, &tok)
 	}
+}
+
+@(private)
+_reconcile_rule_terminal_partial :: proc(
+	s: ^Session,
+	rule_id: u32,
+	tokens: []Beta_Token,
+	am_acc: ^Accum_Memory,
+) {
+	live_hashes := &s.reconcile_live_hashes
+	clear(live_hashes)
+	for tok in tokens {
+		live_hashes^[tok.fact_sig_hash] = true
+	}
+
+	for fid in s.partial_reconcile_fids {
+		agenda_cancel_fact_rule_not_in_set(&s.agenda, fid, rule_id, live_hashes^)
+		if nidx, has := am_acc.outer_fact_node[fid]; has {
+			node := &am_acc.outer_nodes[nidx]
+			if node.has_hash && !(node.last_hash in live_hashes^) {
+				old_h := node.last_hash
+				node.has_hash = false
+				node.last_hash = 0
+				jtms_revoke_firing(s, Firing_Key{rule_id = rule_id, tok_hash = old_h})
+			}
+		}
+	}
+
+	for &tok in tokens {
+		if tok.fact_count > 0 {
+			if nidx, has := am_acc.outer_fact_node[tok.fact_ids[0]]; has {
+				node := &am_acc.outer_nodes[nidx]
+				node.last_hash = tok.fact_sig_hash
+				node.has_hash = true
+			}
+		}
+		agenda_stage_activation(s, rule_id, &tok)
+	}
+	clear(&s.partial_reconcile_fids)
+	clear(&s.partial_reconcile_seen)
 }
 
 @(private)
@@ -110,6 +152,9 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 	}
 	scope := telemetry_span_begin(s.telemetry, .Match, "phreak_eval")
 	defer telemetry_span_end(s.telemetry, scope)
+
+	clear(&s.eval_decide_pool)
+	defer clear(&s.eval_decide_pool)
 
 	for &ef in s.eval_stack {
 		_release_eval_frame_bufs(s, &ef)
@@ -161,6 +206,7 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 				#partial switch bn.kind {
 				case .Left_Input_Adapter:
 					clear(&frame.tokens)
+					frame.is_partial_reconcile = false
 					if frame.node_idx == 0 && seg.pure_two_join {
 						sm, sm_ok := s.seg_mems[frame.seg_id]
 						join_bn := s.rb.beta_nodes[seg.node_start + 1]
@@ -169,6 +215,28 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 							telemetry_count_add(s.telemetry, .Beta_Tuples_Staged, u64(len(frame.tokens)))
 							frame.node_idx = 2
 							continue
+						}
+					} else if frame.node_idx == 0 && seg.pure_multi_join && seg.join_prefix_len >= 3 {
+						sm, sm_ok := s.seg_mems[frame.seg_id]
+						if sm_ok && _beta_join_try_delta_multi(s, sm, seg, &frame.tokens) {
+							frame.is_delta = true
+							telemetry_count_add(s.telemetry, .Beta_Tuples_Staged, u64(len(frame.tokens)))
+							frame.node_idx = u32(seg.join_prefix_len)
+							continue
+						}
+					} else if frame.node_idx == 0 && seg.delta_accum_ok {
+						sm, sm_ok := s.seg_mems[frame.seg_id]
+						accum_bn := s.rb.beta_nodes[seg.node_start + u32(seg.accum_node_idx)]
+						if sm_ok {
+							used_delta := _accum_try_delta_outer(s, sm, seg, bn, accum_bn, &frame.tokens) or_return
+							if used_delta {
+								frame.is_delta = false
+								frame.is_partial_reconcile = true
+								frame.partial_accum_node_id = accum_bn.id
+								telemetry_count_add(s.telemetry, .Beta_Tuples_Staged, u64(len(frame.tokens)))
+								frame.node_idx += 1
+								continue
+							}
 						}
 					}
 
@@ -186,12 +254,13 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 						)
 						if can_delta {
 							frame.is_delta = true
+							base_tok := Beta_Token{fact_sig_hash = 0x544f4b00}
 							for fid in delta_ids {
 								f := &s.facts[fid]
 								if !f.alive {
 									continue
 								}
-								if tok, ok := _token_extend_fact(s, Beta_Token{fact_sig_hash = 0x544f4b00}, f, bn.field_binds); ok {
+								if tok, ok := _token_extend_fact(s, &base_tok, f, bn.field_binds); ok {
 									append(&frame.tokens, tok)
 								}
 							}
@@ -206,12 +275,13 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 
 					frame.is_delta = false
 					if am_ok {
+						base_tok := Beta_Token{fact_sig_hash = 0x544f4b00}
 						for fid in am.fact_ids {
 							f := &s.facts[fid]
 							if !f.alive {
 								continue
 							}
-							if tok, ok := _token_extend_fact(s, Beta_Token{fact_sig_hash = 0x544f4b00}, f, bn.field_binds); ok {
+							if tok, ok := _token_extend_fact(s, &base_tok, f, bn.field_binds); ok {
 								append(&frame.tokens, tok)
 							}
 						}
@@ -240,7 +310,48 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 					}
 					frame.node_idx += 1
 
-				case .Decide, .Filter:
+				case .Decide:
+					if len(frame.tokens) > 0 {
+						rule_dec := s.rb.rules[seg.rule_id].decide_slots if int(seg.rule_id) < len(s.rb.rules) else u8(0)
+						need := max(int(rule_dec), int(bn.decide_slot) + 1)
+						kept := 0
+						for wi := 0; wi < len(frame.tokens); wi += 1 {
+							tok := frame.tokens[wi]
+							base := len(s.eval_decide_pool)
+							resize(&s.eval_decide_pool, base + need)
+							dec_slice := s.eval_decide_pool[base : base + need]
+							if tok.decide_count > 0 {
+								src_n := min(int(tok.decide_count), need)
+								copy(dec_slice[:src_n], s.eval_decide_pool[tok.decide_start : tok.decide_start + u32(src_n)])
+							}
+							tok.decide_start = u32(base)
+							tok.decide_count = u8(need)
+							fslots := _fill_vm_fact_slots(s, &tok, fact_slots_buf[:])
+							val, v_err := vm_eval(
+								&s.rb.programs[bn.prog_idx],
+								tok.vars[:],
+								fslots,
+								s.rb.tables,
+								&s.rb.interner,
+								dec_slice,
+								&s.interner,
+							)
+							if v_err != .None {
+								resize(&s.eval_decide_pool, base)
+								return .Vm_Eval_Failed
+							}
+							if val == Value(true) {
+								frame.tokens[kept] = tok
+								kept += 1
+							} else {
+								resize(&s.eval_decide_pool, base)
+							}
+						}
+						resize(&frame.tokens, kept)
+					}
+					frame.node_idx += 1
+
+				case .Filter:
 					if len(frame.tokens) > 0 {
 						kept := 0
 						for wi := 0; wi < len(frame.tokens); wi += 1 {
@@ -252,7 +363,7 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 								fslots,
 								s.rb.tables,
 								&s.rb.interner,
-								tok.decide_results[:],
+								_token_decide_slice(s, &tok),
 								&s.interner,
 							)
 							if v_err != .None {
@@ -277,7 +388,7 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 								fslots,
 								s.rb.tables,
 								&s.rb.interner,
-								tok.decide_results[:],
+								_token_decide_slice(s, &tok),
 								&s.interner,
 							)
 							if v_err != .None {
@@ -322,12 +433,24 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 					paused = true
 
 				case .Rule_Terminal:
-					if frame.is_delta {
+					if frame.is_partial_reconcile {
+						if am_acc, has_acc := s.accum_mems[frame.partial_accum_node_id]; has_acc {
+							_reconcile_rule_terminal_partial(s, bn.rule_id, frame.tokens[:], am_acc)
+						} else {
+							_reconcile_rule_terminal(s, bn.rule_id, frame.tokens[:])
+						}
+					} else if frame.is_delta {
 						for &tok in frame.tokens {
-							agenda_stage_activation(s, bn.rule_id, tok)
+							agenda_stage_activation(s, bn.rule_id, &tok)
 						}
 					} else {
 						_reconcile_rule_terminal(s, bn.rule_id, frame.tokens[:])
+						if seg.delta_accum_ok {
+							accum_bn := s.rb.beta_nodes[seg.node_start + u32(seg.accum_node_idx)]
+							if am_acc, has_acc := s.accum_mems[accum_bn.id]; has_acc {
+								_accum_record_terminal_hashes(am_acc, frame.tokens[:])
+							}
+						}
 					}
 					frame.node_idx = seg.node_count
 				}
@@ -355,7 +478,7 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 				if frame.sub_step < len(sub.steps) {
 					step := sub.steps[frame.sub_step]
 					nxt := _acquire_token_buf(s)
-					if step_err := _subnetwork_eval_step(s, step, frame.sub_tokens[:], &nxt); step_err != .None {
+					if step_err := _subnetwork_eval_step(s, frame.sub_id, u32(frame.sub_step), step, frame.sub_tokens[:], &nxt); step_err != .None {
 						_release_token_buf(s, &nxt)
 						return step_err
 					}

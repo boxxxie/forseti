@@ -386,3 +386,281 @@ rule final_gate {
 		delete(ef.key)
 	}
 }
+
+@(test)
+prop_three_way_join_and_multi_group_accum_differential_oracle :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 20 * time.Second)
+
+	src := `module join3_accum_oracle version "1.0"
+
+schema A { k: i64, v: i64 }
+schema B { k: i64, b: i64 }
+schema C { k: i64, c: i64 }
+schema P { id: i64, mid: i64 }
+schema Q { mid: i64, top: i64 }
+schema R { top: i64, val: i64 }
+schema G { grp: i64 }
+schema It { grp: i64, amt: i64 }
+schema Blk { k: i64 }
+
+schema Out3 { a: i64, b: i64, c: i64 }
+schema Out2 { grp: i64, v: i64 }
+schema OutF { grp: i64, av: f64 }
+schema Out1 { k: i64 }
+
+source A : A at .a[?id]
+source B : B at .b[?id]
+source C : C at .c[?id]
+source P : P at .p[?id]
+source Q : Q at .q[?id]
+source R : R at .r[?id]
+source G : G at .g[?id]
+source It : It at .it[?id]
+source Blk : Blk at .blk[?id]
+
+derived Star3 : Out3 at .star3[?id]
+derived Chain3 : Out3 at .chain3[?id]
+derived SumOut : Out2 at .sum_out[?id]
+derived MinOut : Out2 at .min_out[?id]
+derived MaxOut : Out2 at .max_out[?id]
+derived CntOut : Out2 at .cnt_out[?id]
+derived AvgOut : OutF at .avg_out[?id]
+derived OpenB : Out1 at .open_b[?id]
+
+rule star3 {
+  when {
+    ?_a := A(k: ?k, v: ?va)
+    ?_b := B(k: ?k, b: ?vb)
+    ?_c := C(k: ?k, c: ?vc)
+  }
+  then { assert Star3(a: ?va, b: ?vb, c: ?vc) }
+}
+
+rule chain3 {
+  when {
+    ?_p := P(id: ?pid, mid: ?mid)
+    ?_q := Q(mid: ?mid, top: ?top)
+    ?_r := R(top: ?top, val: ?rv)
+  }
+  then { assert Chain3(a: ?pid, b: ?top, c: ?rv) }
+}
+
+rule g_sum { when { ?_g := G(grp: ?g); ?s := sum(?a) from It(grp: ?g, amt: ?a) } then { assert SumOut(grp: ?g, v: ?s) } }
+rule g_min { when { ?_g := G(grp: ?g); ?mn := min(?a) from It(grp: ?g, amt: ?a) } then { assert MinOut(grp: ?g, v: ?mn) } }
+rule g_max { when { ?_g := G(grp: ?g); ?mx := max(?a) from It(grp: ?g, amt: ?a) } then { assert MaxOut(grp: ?g, v: ?mx) } }
+rule g_cnt { when { ?_g := G(grp: ?g); ?cnt := count(?a) from It(grp: ?g, amt: ?a) } then { assert CntOut(grp: ?g, v: ?cnt) } }
+rule g_avg { when { ?_g := G(grp: ?g); ?av := avg(?a) from It(grp: ?g, amt: ?a) } then { assert AvgOut(grp: ?g, av: ?av) } }
+
+rule open_b {
+  when {
+    ?_g := G(grp: ?k)
+    exists A(k: ?k)
+    not Blk(k: ?k)
+  }
+  then { assert OpenB(k: ?k) }
+}`
+
+	diags: forseti.Diagnostic_List
+	testing.expect_value(t, forseti.diag_list_init(&diags), nil)
+	defer forseti.diag_list_destroy(&diags)
+	ir, ir_err := forseti.compile_source(src, "join3_accum_oracle.forseti", &diags)
+	testing.expect_value(t, ir_err, nil)
+	defer forseti.ir_destroy(&ir)
+	testing.expect_value(t, diags.error_count, 0)
+
+	rb, rb_err := forseti.rulebase_compile(&ir)
+	testing.expect_value(t, rb_err, forseti.Compile_Error.None)
+	defer forseti.rulebase_destroy(&rb)
+
+	rng_state := rand.create(t.seed)
+	rng := rand.default_random_generator(&rng_state)
+
+	Ext :: struct {
+		binding: string,
+		key:     string,
+		f0:      i64,
+		f1:      i64,
+		arity:   int,
+	}
+
+	TOTAL_OPS :: 1_200 when .Address in ODIN_SANITIZER_FLAGS else 3_000
+	modes := [2]forseti.Provenance_Mode{.Audit_Full, .Fast}
+
+	for mode in modes {
+		inc_sess := new(forseti.Session)
+		testing.expect_value(t, forseti.session_init(inc_sess, &rb, forseti.Session_Config{provenance_mode = mode}), forseti.Session_Error.None)
+		defer {
+			forseti.session_destroy(inc_sess)
+			free(inc_sess)
+		}
+
+		exts := make([dynamic]Ext, 0, 128)
+		defer {
+			for ef in exts {
+				delete(ef.key)
+			}
+			delete(exts)
+		}
+
+		oracle_cmp :: proc(t: ^testing.T, inc_sess: ^forseti.Session, rb: ^forseti.Rulebase, exts: []Ext) -> bool {
+			oracle := new(forseti.Session)
+			testing.expect_value(t, forseti.session_init(oracle, rb, forseti.Session_Config{provenance_mode = .Support_Only}), forseti.Session_Error.None)
+			defer {
+				forseti.session_destroy(oracle)
+				free(oracle)
+			}
+			for ef in exts {
+				if ef.arity == 1 {
+					_, _ = forseti.session_insert_fact(oracle, ef.binding, ef.key, {ef.f0})
+				} else {
+					_, _ = forseti.session_insert_fact(oracle, ef.binding, ef.key, {ef.f0, ef.f1})
+				}
+			}
+			_, f_err := forseti.session_fire(oracle)
+			testing.expect_value(t, f_err, forseti.Session_Error.None)
+			actual := _collect_canonical_derived_set(inc_sess, rb)
+			expected := _collect_canonical_derived_set(oracle, rb)
+			ok := len(actual) == len(expected)
+			if ok {
+				for k in actual {
+					if !(k in expected) {
+						ok = false
+						break
+					}
+				}
+			}
+			if !ok {
+				testing.expectf(t, false, "oracle mismatch (inc=%d vs oracle=%d)\nactual=%v\nexpected=%v", len(actual), len(expected), actual, expected)
+			}
+			free_all(context.temp_allocator)
+			return ok
+		}
+
+		// Seed initial groups G(0..2).
+		for g := i64(0); g < 3; g += 1 {
+			gk := fmt.aprintf("g:%d", g)
+			_, _ = forseti.session_insert_fact(inc_sess, "G", gk, {g})
+			append(&exts, Ext{binding = "G", key = gk, f0 = g, arity = 1})
+		}
+
+		seq := 0
+		key_seq := 0
+		failed := false
+		for step := 0; step < TOTAL_OPS && !failed; step += 1 {
+			op := rand.int_max(14, rng)
+			switch op {
+			case 0, 1: // insert/replace star A/B/C
+				bins := [3]string{"A", "B", "C"}
+				b := bins[rand.int_max(3, rng)]
+				key_seq += 1
+				k := fmt.aprintf("%s:%d", b, key_seq)
+				f0 := i64(rand.int_max(3, rng))
+				f1 := i64(rand.int_max(4, rng) + 1)
+				_, _ = forseti.session_insert_fact(inc_sess, b, k, {f0, f1})
+				append(&exts, Ext{binding = b, key = k, f0 = f0, f1 = f1, arity = 2})
+			case 2, 3: // insert chain P/Q/R
+				bins := [3]string{"P", "Q", "R"}
+				b := bins[rand.int_max(3, rng)]
+				key_seq += 1
+				k := fmt.aprintf("%s:%d", b, key_seq)
+				f0 := i64(rand.int_max(3, rng))
+				f1 := i64(rand.int_max(3, rng))
+				_, _ = forseti.session_insert_fact(inc_sess, b, k, {f0, f1})
+				append(&exts, Ext{binding = b, key = k, f0 = f0, f1 = f1, arity = 2})
+			case 4, 5: // insert It
+				key_seq += 1
+				k := fmt.aprintf("it:%d", key_seq)
+				g := i64(rand.int_max(3, rng))
+				amt := i64(rand.int_max(5, rng) * 10 - 10)
+				_, _ = forseti.session_insert_fact(inc_sess, "It", k, {g, amt})
+				append(&exts, Ext{binding = "It", key = k, f0 = g, f1 = amt, arity = 2})
+			case 6: // modify random 2-arity fact (changes both key/group and value)
+				if len(exts) > 0 {
+					idx := rand.int_max(len(exts), rng)
+					ef := &exts[idx]
+					if ef.arity == 2 {
+						new_f0 := i64(rand.int_max(3, rng))
+						new_f1 := i64(rand.int_max(5, rng) * 10)
+						_ = forseti.session_modify_fact_by_key(inc_sess, ef.binding, ef.key, {new_f0, new_f1})
+						ef.f0 = new_f0
+						ef.f1 = new_f1
+					}
+				}
+			case 7: // retract random non-G fact or Blk toggle
+				if len(exts) > 3 {
+					idx := rand.int_max(len(exts), rng)
+					ef := exts[idx]
+					if ef.binding != "G" {
+						_ = forseti.session_retract_fact_by_key(inc_sess, ef.binding, ef.key)
+						delete(ef.key)
+						unordered_remove(&exts, idx)
+					}
+				}
+			case 8: // toggle Blk or G
+				n := i64(rand.int_max(3, rng))
+				k := fmt.aprintf("blk:%d", n)
+				found_i := -1
+				for ef, i in exts {
+					if ef.binding == "Blk" && ef.key == k {
+						found_i = i
+						break
+					}
+				}
+				if found_i >= 0 {
+					_ = forseti.session_retract_fact_by_key(inc_sess, "Blk", k)
+					delete(exts[found_i].key)
+					unordered_remove(&exts, found_i)
+					delete(k)
+				} else {
+					_, _ = forseti.session_insert_fact(inc_sess, "Blk", k, {n})
+					append(&exts, Ext{binding = "Blk", key = k, f0 = n, arity = 1})
+				}
+			case 9: // rare burst (> 64 inserts) once every ~1000 ops to exercise delta window overflow fallback
+				if step == TOTAL_OPS / 2 {
+					for b := 0; b < 70; b += 1 {
+						key_seq += 1
+						k := fmt.aprintf("burst:%d", key_seq)
+						g := i64(b % 3)
+						amt := i64(b % 5)
+						_, _ = forseti.session_insert_fact(inc_sess, "It", k, {g, amt})
+						append(&exts, Ext{binding = "It", key = k, f0 = g, f1 = amt, arity = 2})
+					}
+				}
+			case 10, 11, 12, 13: // fire + oracle compare
+				_, fe := forseti.session_fire(inc_sess)
+				testing.expect_value(t, fe, forseti.Session_Error.None)
+				seq += 1
+				stride := 1 if seq <= 60 else 15
+				if step == TOTAL_OPS - 1 || seq % stride == 0 {
+					if !oracle_cmp(t, inc_sess, &rb, exts[:]) {
+						failed = true
+					}
+				}
+			}
+
+			// Bound live working set cleanly while keeping non-G diversity.
+			for len(exts) > 28 {
+				rm_idx := -1
+				for ef, i in exts {
+					if ef.binding != "G" {
+						rm_idx = i
+						break
+					}
+				}
+				if rm_idx < 0 {
+					break
+				}
+				ef := exts[rm_idx]
+				_ = forseti.session_retract_fact_by_key(inc_sess, ef.binding, ef.key)
+				delete(ef.key)
+				unordered_remove(&exts, rm_idx)
+			}
+		}
+
+		if !failed {
+			_, fe := forseti.session_fire(inc_sess)
+			testing.expect_value(t, fe, forseti.Session_Error.None)
+			testing.expect(t, oracle_cmp(t, inc_sess, &rb, exts[:]))
+		}
+	}
+}

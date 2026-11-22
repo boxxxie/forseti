@@ -93,12 +93,24 @@ _activate_alpha_terminal :: proc(s: ^Session, fid: Fact_Id, tid: u32) {
 	am.insert_epoch += 1
 	am.version += 1
 
-	list, had_list := &s.fact_alpha_mems[fid]
-	if !had_list {
-		s.fact_alpha_mems[fid] = make([dynamic]u32, 0, 4, s.allocator)
-		list = &s.fact_alpha_mems[fid]
+	for len(s.fact_alpha_head) <= int(fid) {
+		append(&s.fact_alpha_head, -1)
 	}
-	append(list, tid)
+	eidx: i32
+	if len(s.free_fact_alpha_edges) > 0 {
+		eidx = pop(&s.free_fact_alpha_edges)
+		s.fact_alpha_edges[eidx] = Fact_Alpha_Edge{
+			alpha_id = tid,
+			next     = s.fact_alpha_head[fid],
+		}
+	} else {
+		eidx = i32(len(s.fact_alpha_edges))
+		append(&s.fact_alpha_edges, Fact_Alpha_Edge{
+			alpha_id = tid,
+			next     = s.fact_alpha_head[fid],
+		})
+	}
+	s.fact_alpha_head[fid] = eidx
 
 	telemetry_count_add(s.telemetry, .Alpha_Hits, 1)
 
@@ -191,11 +203,21 @@ alpha_eval_insert_fact :: proc(s: ^Session, fid: Fact_Id) {
 
 @(private)
 alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
-	tids, has := s.fact_alpha_mems[fid]
-	if !has {
+	if int(fid) >= len(s.fact_alpha_head) {
 		return
 	}
-	for tid in tids {
+	cur := s.fact_alpha_head[fid]
+	if cur < 0 {
+		return
+	}
+	s.fact_alpha_head[fid] = -1
+	for cur >= 0 {
+		edge := s.fact_alpha_edges[cur]
+		nxt := edge.next
+		tid := edge.alpha_id
+		append(&s.free_fact_alpha_edges, cur)
+		cur = nxt
+
 		am, ok := s.alpha_mems[tid]
 		if !ok {
 			continue
@@ -247,9 +269,6 @@ alpha_eval_retract_fact :: proc(s: ^Session, fid: Fact_Id) {
 				_mark_segment_dirty(s, sm)
 			}
 		}
-	}
-	if list_ptr, ok_p := &s.fact_alpha_mems[fid]; ok_p {
-		clear(list_ptr)
 	}
 }
 

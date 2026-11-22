@@ -1,6 +1,7 @@
 package forseti
 
 import "core:mem"
+import vmem "core:mem/virtual"
 
 Firing_Key :: struct {
 	rule_id:  u32,
@@ -8,47 +9,68 @@ Firing_Key :: struct {
 }
 
 Justification :: struct {
-	id:             u32,
-	rule_id:        u32,
-	firing_key:     Firing_Key,
-	derived_fact:   Fact_Id,
-	deriv_id:       Derivation_Id,
-	inline_parents: [4]Fact_Id,
-	parent_start:   u32,
-	parent_count:   u16,
-	proof_height:   u32,
-	alive:          bool,
+	id:              u32,
+	rule_id:         u32,
+	firing_key:      Firing_Key,
+	derived_fact:    Fact_Id,
+	deriv_id:        Derivation_Id,
+	next_for_fact:   u32,
+	next_for_firing: u32,
+	inline_parents:  [4]Fact_Id,
+	parent_start:    u32,
+	parent_count:    u16,
+	proof_height:    u32,
+	alive:           bool,
+}
+
+Premise_Edge :: struct {
+	jid:  u32,
+	next: i32,
+}
+
+Firing_Deriv_Edge :: struct {
+	did:  Derivation_Id,
+	next: i32,
 }
 
 Active_Firing :: struct {
-	key:        Firing_Key,
-	rule_id:    u32,
-	just_ids:   [dynamic]u32,
-	deriv_ids:  [dynamic]Derivation_Id,
-	alive:      bool,
+	key:              Firing_Key,
+	rule_id:          u32,
+	just_head:        u32,
+	deriv_id:         Derivation_Id,
+	extra_deriv_head: i32,
+	alive:            bool,
 }
 
 Jtms_State :: struct {
-	justs:              [dynamic]Justification,
-	free_justs:         [dynamic]u32,
-	just_parents:       [dynamic]Fact_Id,
-	fact_justs:         map[Fact_Id][dynamic]u32, // derived_fact -> list of justification IDs supporting it
-	premise_to_justs:   map[Fact_Id][dynamic]u32, // premise_fact -> list of justification IDs depending on it
-	active_firings:     map[Firing_Key]Active_Firing,
-	rule_firings:       map[u32][dynamic]Firing_Key,
-	cascade_depth:      int,
-	scratch_in_cone:    map[Fact_Id]bool,
-	scratch_cone_list:  [dynamic]Fact_Id,
-	scratch_bfs:        [dynamic]Fact_Id,
-	scratch_grounded:   map[Fact_Id]bool,
-	scratch_best_h:     map[Fact_Id]u32,
-	scratch_best_deriv: map[Fact_Id]Derivation_Id,
-	scratch_worklist:   [dynamic]Fact_Id,
-	scratch_to_retract: [dynamic]Fact_Id,
-	scratch_affected:   [dynamic]Fact_Id,
-	scratch_revoke_keys: [dynamic]Firing_Key,
-	scratch_dead_justs: [dynamic]u32,
-	allocator:          mem.Allocator,
+	justs:                  [dynamic]Justification,
+	free_justs:             [dynamic]u32,
+	just_parents:           [dynamic]Fact_Id,
+	fact_just_head:         [dynamic]u32, // derived_fact -> intrusive head of Justification.next_for_fact (0 = none)
+	premise_just_head:      [dynamic]i32, // premise_fact -> head edge index in premise_edges (-1 = none)
+	premise_edges:          [dynamic]Premise_Edge,
+	free_premise_edges:     [dynamic]i32,
+	active_firings:         map[Firing_Key]Active_Firing,
+	firing_deriv_edges:     [dynamic]Firing_Deriv_Edge,
+	free_firing_deriv_edges:[dynamic]i32,
+	rule_firings:           map[u32][dynamic]Firing_Key,
+	cascade_depth:          int,
+	scratch_gen:            u32,
+	sweep_gen:              u32,
+	scratch_cone_gen:       [dynamic]u32,
+	scratch_ground_gen:     [dynamic]u32,
+	scratch_sweep_gen:      [dynamic]u32,
+	scratch_sweep_fact_gen: [dynamic]u32,
+	scratch_cone_list:      [dynamic]Fact_Id,
+	scratch_bfs:            [dynamic]Fact_Id,
+	scratch_best_h:         [dynamic]u32,
+	scratch_best_deriv:     [dynamic]Derivation_Id,
+	scratch_worklist:       [dynamic]Fact_Id,
+	scratch_to_retract:     [dynamic]Fact_Id,
+	scratch_affected:       [dynamic]Fact_Id,
+	scratch_revoke_keys:    [dynamic]Firing_Key,
+	scratch_dead_justs:     [dynamic]u32,
+	allocator:              mem.Allocator,
 }
 
 @(private)
@@ -58,16 +80,23 @@ jtms_init :: proc(j: ^Jtms_State, allocator: mem.Allocator) {
 	j.justs = make([dynamic]Justification, 1, 16, allocator) // slot 0 = sentinel
 	j.free_justs = make([dynamic]u32, 0, 16, allocator)
 	j.just_parents = make([dynamic]Fact_Id, 0, 32, allocator)
-	j.fact_justs = make(map[Fact_Id][dynamic]u32, 16, allocator)
-	j.premise_to_justs = make(map[Fact_Id][dynamic]u32, 16, allocator)
+	j.fact_just_head = make([dynamic]u32, 1, 16, allocator)
+	j.premise_just_head = make([dynamic]i32, 1, 16, allocator)
+	j.premise_just_head[0] = -1
+	j.premise_edges = make([dynamic]Premise_Edge, 0, 16, allocator)
+	j.free_premise_edges = make([dynamic]i32, 0, 16, allocator)
 	j.active_firings = make(map[Firing_Key]Active_Firing, 16, allocator)
+	j.firing_deriv_edges = make([dynamic]Firing_Deriv_Edge, 0, 8, allocator)
+	j.free_firing_deriv_edges = make([dynamic]i32, 0, 8, allocator)
 	j.rule_firings = make(map[u32][dynamic]Firing_Key, 8, allocator)
-	j.scratch_in_cone = make(map[Fact_Id]bool, 16, allocator)
+	j.scratch_cone_gen = make([dynamic]u32, 1, 16, allocator)
+	j.scratch_ground_gen = make([dynamic]u32, 1, 16, allocator)
+	j.scratch_sweep_gen = make([dynamic]u32, 1, 16, allocator)
+	j.scratch_sweep_fact_gen = make([dynamic]u32, 1, 16, allocator)
 	j.scratch_cone_list = make([dynamic]Fact_Id, 0, 16, allocator)
 	j.scratch_bfs = make([dynamic]Fact_Id, 0, 16, allocator)
-	j.scratch_grounded = make(map[Fact_Id]bool, 16, allocator)
-	j.scratch_best_h = make(map[Fact_Id]u32, 16, allocator)
-	j.scratch_best_deriv = make(map[Fact_Id]Derivation_Id, 16, allocator)
+	j.scratch_best_h = make([dynamic]u32, 1, 16, allocator)
+	j.scratch_best_deriv = make([dynamic]Derivation_Id, 1, 16, allocator)
 	j.scratch_worklist = make([dynamic]Fact_Id, 0, 16, allocator)
 	j.scratch_to_retract = make([dynamic]Fact_Id, 0, 16, allocator)
 	j.scratch_affected = make([dynamic]Fact_Id, 0, 16, allocator)
@@ -80,18 +109,12 @@ jtms_destroy :: proc(j: ^Jtms_State) {
 	if j == nil || j.allocator.procedure == nil {
 		return
 	}
-	for _, list in j.fact_justs {
-		delete(list)
-	}
-	delete(j.fact_justs)
-	for _, list in j.premise_to_justs {
-		delete(list)
-	}
-	delete(j.premise_to_justs)
-	for _, af in j.active_firings {
-		delete(af.just_ids)
-		delete(af.deriv_ids)
-	}
+	delete(j.fact_just_head)
+	delete(j.free_premise_edges)
+	delete(j.premise_edges)
+	delete(j.premise_just_head)
+	delete(j.free_firing_deriv_edges)
+	delete(j.firing_deriv_edges)
 	delete(j.active_firings)
 	for _, flist in j.rule_firings {
 		delete(flist)
@@ -104,10 +127,12 @@ jtms_destroy :: proc(j: ^Jtms_State) {
 	delete(j.scratch_worklist)
 	delete(j.scratch_best_deriv)
 	delete(j.scratch_best_h)
-	delete(j.scratch_grounded)
 	delete(j.scratch_bfs)
 	delete(j.scratch_cone_list)
-	delete(j.scratch_in_cone)
+	delete(j.scratch_sweep_fact_gen)
+	delete(j.scratch_sweep_gen)
+	delete(j.scratch_ground_gen)
+	delete(j.scratch_cone_gen)
 	delete(j.just_parents)
 	delete(j.free_justs)
 	delete(j.justs)
@@ -126,12 +151,70 @@ _just_parents :: proc "contextless" (j_state: ^Jtms_State, j: ^Justification) ->
 }
 
 @(private)
-_swap_remove_u32 :: proc(list: ^[dynamic]u32, val: u32) {
-	for entry, i in list^ {
-		if entry == val {
-			unordered_remove(list, i)
-			return
+_jtms_sweep_dead_fact_justs :: proc(j_state: ^Jtms_State, df: Fact_Id) {
+	if int(df) >= len(j_state.fact_just_head) {
+		return
+	}
+	prev := u32(0)
+	cur := j_state.fact_just_head[df]
+	for cur != 0 {
+		nxt := j_state.justs[cur].next_for_fact
+		if !j_state.justs[cur].alive {
+			j_state.justs[cur].next_for_fact = 0
+			if prev == 0 {
+				j_state.fact_just_head[df] = nxt
+			} else {
+				j_state.justs[prev].next_for_fact = nxt
+			}
+		} else {
+			prev = cur
 		}
+		cur = nxt
+	}
+}
+
+@(private)
+_jtms_sweep_dead_firing_justs :: proc(j_state: ^Jtms_State, head: ^u32) {
+	prev := u32(0)
+	cur := head^
+	for cur != 0 {
+		nxt := j_state.justs[cur].next_for_firing
+		if !j_state.justs[cur].alive {
+			j_state.justs[cur].next_for_firing = 0
+			if prev == 0 {
+				head^ = nxt
+			} else {
+				j_state.justs[prev].next_for_firing = nxt
+			}
+		} else {
+			prev = cur
+		}
+		cur = nxt
+	}
+}
+
+@(private)
+_jtms_sweep_dead_premise_justs :: proc(j_state: ^Jtms_State, pf: Fact_Id) {
+	if int(pf) >= len(j_state.premise_just_head) {
+		return
+	}
+	prev := i32(-1)
+	cur := j_state.premise_just_head[pf]
+	for cur >= 0 {
+		edge := j_state.premise_edges[cur]
+		nxt := edge.next
+		if !j_state.justs[edge.jid].alive {
+			if prev < 0 {
+				j_state.premise_just_head[pf] = nxt
+			} else {
+				j_state.premise_edges[prev].next = nxt
+			}
+			j_state.premise_edges[cur] = {}
+			append(&j_state.free_premise_edges, cur)
+		} else {
+			prev = cur
+		}
+		cur = nxt
 	}
 }
 
@@ -140,25 +223,59 @@ _jtms_recycle_dead_justs :: proc(s: ^Session, dead_ids: []u32) {
 	if s.provenance.mode != .Fast || len(dead_ids) == 0 {
 		return
 	}
+	j_state := &s.jtms
+	need := len(s.facts)
+	if len(j_state.scratch_sweep_gen) < need {
+		resize(&j_state.scratch_sweep_gen, need)
+	}
+	if len(j_state.scratch_sweep_fact_gen) < need {
+		resize(&j_state.scratch_sweep_fact_gen, need)
+	}
+	j_state.sweep_gen += 1
+	if j_state.sweep_gen == 0 {
+		mem.zero_slice(j_state.scratch_sweep_gen[:])
+		mem.zero_slice(j_state.scratch_sweep_fact_gen[:])
+		j_state.sweep_gen = 1
+	}
+	gen := j_state.sweep_gen
+
 	for jid in dead_ids {
-		if int(jid) >= len(s.jtms.justs) {
+		if int(jid) >= len(j_state.justs) {
 			continue
 		}
-		j := &s.jtms.justs[jid]
+		j := &j_state.justs[jid]
 		if j.derived_fact == INVALID_FACT {
 			continue
 		}
-		if fj, has_fj := &s.jtms.fact_justs[j.derived_fact]; has_fj {
-			_swap_remove_u32(fj, jid)
+		df := j.derived_fact
+		if int(df) < len(j_state.scratch_sweep_fact_gen) && j_state.scratch_sweep_fact_gen[df] != gen {
+			j_state.scratch_sweep_fact_gen[df] = gen
+			_jtms_sweep_dead_fact_justs(j_state, df)
 		}
-		for pf in _just_parents(&s.jtms, j) {
-			if pj, has_pj := &s.jtms.premise_to_justs[pf]; has_pj {
-				_swap_remove_u32(pj, jid)
+		if af, has_af := &j_state.active_firings[j.firing_key]; has_af && af.just_head != 0 {
+			_jtms_sweep_dead_firing_justs(j_state, &af.just_head)
+		}
+		for pf in _just_parents(j_state, j) {
+			if int(pf) < len(j_state.scratch_sweep_gen) && j_state.scratch_sweep_gen[pf] != gen {
+				j_state.scratch_sweep_gen[pf] = gen
+				_jtms_sweep_dead_premise_justs(j_state, pf)
 			}
+		}
+	}
+
+	for jid in dead_ids {
+		if int(jid) >= len(j_state.justs) {
+			continue
+		}
+		j := &j_state.justs[jid]
+		if j.derived_fact == INVALID_FACT {
+			continue
 		}
 		j.alive = false
 		j.derived_fact = INVALID_FACT
-		append(&s.jtms.free_justs, jid)
+		j.next_for_fact = 0
+		j.next_for_firing = 0
+		append(&j_state.free_justs, jid)
 	}
 }
 
@@ -205,18 +322,18 @@ _find_matching_logical_fact :: proc(
 	norm_fields: []Value,
 	chash: u64,
 ) -> (fid: Fact_Id, ok: bool) {
-	bucket, has := s.logical_buckets[chash]
+	cand, has := s.logical_buckets[chash]
 	if !has {
 		return INVALID_FACT, false
 	}
-	for cand in bucket {
+	for cand != INVALID_FACT {
 		cf := &s.facts[cand]
-		if !cf.alive || cf.origin != .Logical || cf.binding_idx != binding_idx {
-			continue
+		if cf.alive && cf.origin == .Logical && cf.binding_idx == binding_idx {
+			if _fact_fields_equal(s, cf.fields, norm_fields) {
+				return cand, true
+			}
 		}
-		if _fact_fields_equal(s, cf.fields, norm_fields) {
-			return cand, true
-		}
+		cand = cf.next_logical
 	}
 	return INVALID_FACT, false
 }
@@ -224,16 +341,71 @@ _find_matching_logical_fact :: proc(
 @(private)
 jtms_remove_logical_bucket_entry :: proc(s: ^Session, fid: Fact_Id) {
 	f := &s.facts[fid]
-	bucket, has := &s.logical_buckets[f.content_hash]
+	head, has := s.logical_buckets[f.content_hash]
 	if !has {
+		f.next_logical = INVALID_FACT
 		return
 	}
-	for entry, i in bucket^ {
-		if entry == fid {
-			unordered_remove(bucket, i)
-			break
+	if head == fid {
+		nxt := f.next_logical
+		f.next_logical = INVALID_FACT
+		if nxt == INVALID_FACT {
+			delete_key(&s.logical_buckets, f.content_hash)
+		} else {
+			s.logical_buckets[f.content_hash] = nxt
 		}
+		return
 	}
+	prev := head
+	cur := s.facts[prev].next_logical
+	for cur != INVALID_FACT {
+		if cur == fid {
+			s.facts[prev].next_logical = f.next_logical
+			f.next_logical = INVALID_FACT
+			return
+		}
+		prev = cur
+		cur = s.facts[cur].next_logical
+	}
+}
+
+@(private)
+_jtms_recycle_firing_deriv_edges :: proc(j: ^Jtms_State, af: ^Active_Firing) {
+	cur := af.extra_deriv_head
+	af.extra_deriv_head = -1
+	for cur >= 0 {
+		nxt := j.firing_deriv_edges[cur].next
+		j.firing_deriv_edges[cur] = {}
+		append(&j.free_firing_deriv_edges, cur)
+		cur = nxt
+	}
+	af.deriv_id = INVALID_DERIVATION
+}
+
+@(private)
+_jtms_active_firing_add_deriv :: proc(j: ^Jtms_State, af: ^Active_Firing, deriv_id: Derivation_Id) {
+	if deriv_id == INVALID_DERIVATION {
+		return
+	}
+	if af.deriv_id == INVALID_DERIVATION {
+		af.deriv_id = deriv_id
+		return
+	}
+	eidx: i32
+	if len(j.free_firing_deriv_edges) > 0 {
+		eidx = pop(&j.free_firing_deriv_edges)
+		j.firing_deriv_edges[eidx] = Firing_Deriv_Edge{
+			did  = deriv_id,
+			next = af.extra_deriv_head,
+		}
+	} else {
+		eidx = i32(len(j.firing_deriv_edges))
+		append(&j.firing_deriv_edges, Firing_Deriv_Edge{
+			did  = deriv_id,
+			next = af.extra_deriv_head,
+		})
+	}
+	af.extra_deriv_head = eidx
 }
 
 @(private)
@@ -241,17 +413,18 @@ _jtms_register_firing :: proc(s: ^Session, fkey: Firing_Key) -> ^Active_Firing {
 	if existing, has := &s.jtms.active_firings[fkey]; has {
 		if !existing.alive {
 			existing.alive = true
-			clear(&existing.just_ids)
-			clear(&existing.deriv_ids)
+			existing.just_head = 0
+			_jtms_recycle_firing_deriv_edges(&s.jtms, existing)
 		}
 		return existing
 	}
 	s.jtms.active_firings[fkey] = Active_Firing{
-		key       = fkey,
-		rule_id   = fkey.rule_id,
-		just_ids  = make([dynamic]u32, 0, 2, s.allocator),
-		deriv_ids = make([dynamic]Derivation_Id, 0, 2, s.allocator),
-		alive     = true,
+		key              = fkey,
+		rule_id          = fkey.rule_id,
+		just_head        = 0,
+		deriv_id         = INVALID_DERIVATION,
+		extra_deriv_head = -1,
+		alive            = true,
 	}
 	rlist, has_r := &s.jtms.rule_firings[fkey.rule_id]
 	if !has_r {
@@ -266,9 +439,7 @@ _jtms_register_firing :: proc(s: ^Session, fkey: Firing_Key) -> ^Active_Firing {
 @(private)
 jtms_track_firing_only :: proc(s: ^Session, fkey: Firing_Key, deriv_id := INVALID_DERIVATION) {
 	af := _jtms_register_firing(s, fkey)
-	if deriv_id != INVALID_DERIVATION {
-		append(&af.deriv_ids, deriv_id)
-	}
+	_jtms_active_firing_add_deriv(&s.jtms, af, deriv_id)
 }
 
 @(private)
@@ -347,11 +518,13 @@ jtms_assert_logical :: proc(
 		ef := &s.facts[fid]
 
 		// Check if already justified by the exact same firing_key while alive.
-		if fjusts, has_fj := s.jtms.fact_justs[fid]; has_fj {
-			for jid in fjusts {
+		if int(fid) < len(s.jtms.fact_just_head) {
+			jid := s.jtms.fact_just_head[fid]
+			for jid != 0 {
 				if s.jtms.justs[jid].alive && s.jtms.justs[jid].firing_key == fkey {
 					return fid, false, false, s.jtms.justs[jid].deriv_id, .None
 				}
+				jid = s.jtms.justs[jid].next_for_fact
 			}
 		}
 		ef.support_count += 1
@@ -373,10 +546,7 @@ jtms_assert_logical :: proc(
 			rf := &s.facts[fid]
 			stored_fields := rf.fields
 			if len(stored_fields) != need_len {
-				if stored_fields != nil {
-					delete(stored_fields, s.allocator)
-				}
-				stored_fields = make([]Value, need_len, s.allocator)
+				stored_fields = make([]Value, need_len, vmem.arena_allocator(&s.arena))
 			}
 			copy(stored_fields, norm_fields)
 
@@ -402,7 +572,7 @@ jtms_assert_logical :: proc(
 			if k_err != nil {
 				return INVALID_FACT, false, false, INVALID_DERIVATION, .Alloc_Failed
 			}
-			stored_fields := make([]Value, need_len, s.allocator)
+			stored_fields := make([]Value, need_len, vmem.arena_allocator(&s.arena))
 			copy(stored_fields, norm_fields)
 
 			fid = Fact_Id(len(s.facts))
@@ -420,15 +590,18 @@ jtms_assert_logical :: proc(
 				content_hash  = chash,
 				origin        = .Logical,
 			})
+			for len(s.fact_alpha_head) <= int(fid) {
+				append(&s.fact_alpha_head, -1)
+			}
 			s.facts_by_key[Fact_Lookup_Key{binding_idx = binding_idx, key = key_id}] = fid
 		}
 
-		bucket, has_b := &s.logical_buckets[chash]
-		if !has_b {
-			s.logical_buckets[chash] = make([dynamic]Fact_Id, 0, 2, s.allocator)
-			bucket = &s.logical_buckets[chash]
+		old_head := INVALID_FACT
+		if oh, has_b := s.logical_buckets[chash]; has_b {
+			old_head = oh
 		}
-		append(bucket, fid)
+		s.facts[fid].next_logical = old_head
+		s.logical_buckets[chash] = fid
 	}
 
 	deriv_id = provenance_record(
@@ -462,57 +635,68 @@ jtms_assert_logical :: proc(
 		}
 	}
 
+	for len(s.jtms.fact_just_head) <= int(fid) {
+		append(&s.jtms.fact_just_head, 0)
+	}
+	af := _jtms_register_firing(s, fkey)
+
 	jid: u32
 	if s.provenance.mode == .Fast && len(s.jtms.free_justs) > 0 {
 		jid = pop(&s.jtms.free_justs)
 		s.jtms.justs[jid] = Justification{
-			id             = jid,
-			rule_id        = rule_id,
-			firing_key     = fkey,
-			derived_fact   = fid,
-			deriv_id       = deriv_id,
-			inline_parents = inline_buf,
-			parent_start   = p_start,
-			parent_count   = pcnt,
-			proof_height   = new_height,
-			alive          = true,
+			id              = jid,
+			rule_id         = rule_id,
+			firing_key      = fkey,
+			derived_fact    = fid,
+			deriv_id        = deriv_id,
+			next_for_fact   = s.jtms.fact_just_head[fid],
+			next_for_firing = af.just_head,
+			inline_parents  = inline_buf,
+			parent_start    = p_start,
+			parent_count    = pcnt,
+			proof_height    = new_height,
+			alive           = true,
 		}
 	} else {
 		jid = u32(len(s.jtms.justs))
 		append(&s.jtms.justs, Justification{
-			id             = jid,
-			rule_id        = rule_id,
-			firing_key     = fkey,
-			derived_fact   = fid,
-			deriv_id       = deriv_id,
-			inline_parents = inline_buf,
-			parent_start   = p_start,
-			parent_count   = pcnt,
-			proof_height   = new_height,
-			alive          = true,
+			id              = jid,
+			rule_id         = rule_id,
+			firing_key      = fkey,
+			derived_fact    = fid,
+			deriv_id        = deriv_id,
+			next_for_fact   = s.jtms.fact_just_head[fid],
+			next_for_firing = af.just_head,
+			inline_parents  = inline_buf,
+			parent_start    = p_start,
+			parent_count    = pcnt,
+			proof_height    = new_height,
+			alive           = true,
 		})
 	}
-
-	fj_list, has_fj := &s.jtms.fact_justs[fid]
-	if !has_fj {
-		s.jtms.fact_justs[fid] = make([dynamic]u32, 0, 2, s.allocator)
-		fj_list = &s.jtms.fact_justs[fid]
-	}
-	append(fj_list, jid)
+	s.jtms.fact_just_head[fid] = jid
+	af.just_head = jid
+	_jtms_active_firing_add_deriv(&s.jtms, af, deriv_id)
 
 	for pf in valid_parents[:int(pcnt)] {
-		pj_list, has_pj := &s.jtms.premise_to_justs[pf]
-		if !has_pj {
-			s.jtms.premise_to_justs[pf] = make([dynamic]u32, 0, 4, s.allocator)
-			pj_list = &s.jtms.premise_to_justs[pf]
+		for len(s.jtms.premise_just_head) <= int(pf) {
+			append(&s.jtms.premise_just_head, -1)
 		}
-		append(pj_list, jid)
-	}
-
-	af := _jtms_register_firing(s, fkey)
-	append(&af.just_ids, jid)
-	if deriv_id != INVALID_DERIVATION {
-		append(&af.deriv_ids, deriv_id)
+		eidx: i32
+		if len(s.jtms.free_premise_edges) > 0 {
+			eidx = pop(&s.jtms.free_premise_edges)
+			s.jtms.premise_edges[eidx] = Premise_Edge{
+				jid  = jid,
+				next = s.jtms.premise_just_head[pf],
+			}
+		} else {
+			eidx = i32(len(s.jtms.premise_edges))
+			append(&s.jtms.premise_edges, Premise_Edge{
+				jid  = jid,
+				next = s.jtms.premise_just_head[pf],
+			})
+		}
+		s.jtms.premise_just_head[pf] = eidx
 	}
 
 	if is_new {
@@ -541,46 +725,78 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 		s.jtms.cascade_depth -= 1
 	}
 
-	// Step 1: Collect reachable forward cone S of currently-alive Logical facts downstream of `seed_facts`.
-	in_cone: map[Fact_Id]bool
+	need := len(s.facts)
+	gen: u32
+	cone_gen: []u32
+	ground_gen: []u32
+	best_h: []u32
+	best_deriv: []Derivation_Id
 	cone_list: [dynamic]Fact_Id
 	bfs: [dynamic]Fact_Id
+
 	if top_level {
-		clear(&s.jtms.scratch_in_cone)
-		clear(&s.jtms.scratch_cone_list)
-		clear(&s.jtms.scratch_bfs)
-		in_cone = s.jtms.scratch_in_cone
-		cone_list = s.jtms.scratch_cone_list
-		bfs = s.jtms.scratch_bfs
+		j_state := &s.jtms
+		if len(j_state.scratch_cone_gen) < need {
+			resize(&j_state.scratch_cone_gen, need)
+		}
+		if len(j_state.scratch_ground_gen) < need {
+			resize(&j_state.scratch_ground_gen, need)
+		}
+		if len(j_state.scratch_best_h) < need {
+			resize(&j_state.scratch_best_h, need)
+		}
+		if len(j_state.scratch_best_deriv) < need {
+			resize(&j_state.scratch_best_deriv, need)
+		}
+		j_state.scratch_gen += 1
+		if j_state.scratch_gen == 0 {
+			mem.zero_slice(j_state.scratch_cone_gen[:])
+			mem.zero_slice(j_state.scratch_ground_gen[:])
+			j_state.scratch_gen = 1
+		}
+		gen = j_state.scratch_gen
+		cone_gen = j_state.scratch_cone_gen[:]
+		ground_gen = j_state.scratch_ground_gen[:]
+		best_h = j_state.scratch_best_h[:]
+		best_deriv = j_state.scratch_best_deriv[:]
+		clear(&j_state.scratch_cone_list)
+		clear(&j_state.scratch_bfs)
+		cone_list = j_state.scratch_cone_list
+		bfs = j_state.scratch_bfs
 	} else {
-		in_cone = make(map[Fact_Id]bool, 16, context.temp_allocator)
+		gen = 1
+		cone_gen = make([]u32, need, context.temp_allocator)
+		ground_gen = make([]u32, need, context.temp_allocator)
+		best_h = make([]u32, need, context.temp_allocator)
+		best_deriv = make([]Derivation_Id, need, context.temp_allocator)
 		cone_list = make([dynamic]Fact_Id, 0, 16, context.temp_allocator)
 		bfs = make([dynamic]Fact_Id, 0, 16, context.temp_allocator)
 	}
 	defer if top_level {
-		s.jtms.scratch_in_cone = in_cone
 		s.jtms.scratch_cone_list = cone_list
 		s.jtms.scratch_bfs = bfs
 	}
 
+	// Step 1: Collect reachable forward cone S of currently-alive Logical facts downstream of `seed_facts`.
 	for sf in seed_facts {
 		if sf == INVALID_FACT || int(sf) >= len(s.facts) {
 			continue
 		}
 		if s.facts[sf].alive && s.facts[sf].origin == .Logical {
-			if !(sf in in_cone) {
-				in_cone[sf] = true
+			if cone_gen[sf] != gen {
+				cone_gen[sf] = gen
 				append(&cone_list, sf)
 				append(&bfs, sf)
 			}
 		} else if !s.facts[sf].alive {
-			// If seed itself was retracted externally, its direct dependents enter the cone via premise_to_justs.
-			if pjusts, has_pj := s.jtms.premise_to_justs[sf]; has_pj {
-				for jid in pjusts {
+			// If seed itself was retracted externally, its direct dependents enter the cone via premise_just_head.
+			if int(sf) < len(s.jtms.premise_just_head) {
+				for eidx := s.jtms.premise_just_head[sf]; eidx >= 0; eidx = s.jtms.premise_edges[eidx].next {
+					jid := s.jtms.premise_edges[eidx].jid
 					df := s.jtms.justs[jid].derived_fact
 					if df != INVALID_FACT && int(df) < len(s.facts) && s.facts[df].alive && s.facts[df].origin == .Logical {
-						if !(df in in_cone) {
-							in_cone[df] = true
+						if cone_gen[df] != gen {
+							cone_gen[df] = gen
 							append(&cone_list, df)
 							append(&bfs, df)
 						}
@@ -592,15 +808,15 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 
 	for bi := 0; bi < len(bfs); bi += 1 {
 		cur := bfs[bi]
-		if pjusts, has_pj := s.jtms.premise_to_justs[cur]; has_pj {
-			for jid in pjusts {
-				j := s.jtms.justs[jid]
-				df := j.derived_fact
+		if int(cur) < len(s.jtms.premise_just_head) {
+			for eidx := s.jtms.premise_just_head[cur]; eidx >= 0; eidx = s.jtms.premise_edges[eidx].next {
+				jid := s.jtms.premise_edges[eidx].jid
+				df := s.jtms.justs[jid].derived_fact
 				if df == INVALID_FACT || int(df) >= len(s.facts) {
 					continue
 				}
-				if s.facts[df].alive && s.facts[df].origin == .Logical && !(df in in_cone) {
-					in_cone[df] = true
+				if s.facts[df].alive && s.facts[df].origin == .Logical && cone_gen[df] != gen {
+					cone_gen[df] = gen
 					append(&cone_list, df)
 					append(&bfs, df)
 				}
@@ -612,34 +828,19 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 		return
 	}
 
-	// Step 2 & 3: Re-compute minimal grounded support bottom-up from outside `in_cone` -> fixes diamonds & breaks ghost cycles!
-	grounded: map[Fact_Id]bool
-	best_h: map[Fact_Id]u32
-	best_deriv: map[Fact_Id]Derivation_Id
+	// Step 2 & 3: Re-compute minimal grounded support bottom-up from outside cone -> fixes diamonds & breaks ghost cycles!
 	worklist: [dynamic]Fact_Id
 	to_retract: [dynamic]Fact_Id
 	if top_level {
-		clear(&s.jtms.scratch_grounded)
-		clear(&s.jtms.scratch_best_h)
-		clear(&s.jtms.scratch_best_deriv)
 		clear(&s.jtms.scratch_worklist)
 		clear(&s.jtms.scratch_to_retract)
-		grounded = s.jtms.scratch_grounded
-		best_h = s.jtms.scratch_best_h
-		best_deriv = s.jtms.scratch_best_deriv
 		worklist = s.jtms.scratch_worklist
 		to_retract = s.jtms.scratch_to_retract
 	} else {
-		grounded = make(map[Fact_Id]bool, len(cone_list), context.temp_allocator)
-		best_h = make(map[Fact_Id]u32, len(cone_list), context.temp_allocator)
-		best_deriv = make(map[Fact_Id]Derivation_Id, len(cone_list), context.temp_allocator)
 		worklist = make([dynamic]Fact_Id, 0, len(cone_list), context.temp_allocator)
 		to_retract = make([dynamic]Fact_Id, 0, len(cone_list), context.temp_allocator)
 	}
 	defer if top_level {
-		s.jtms.scratch_grounded = grounded
-		s.jtms.scratch_best_h = best_h
-		s.jtms.scratch_best_deriv = best_deriv
 		s.jtms.scratch_worklist = worklist
 		s.jtms.scratch_to_retract = to_retract
 	}
@@ -647,9 +848,10 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 	_eval_just_grounded :: proc(
 		s: ^Session,
 		j: ^Justification,
-		in_cone: map[Fact_Id]bool,
-		grounded: map[Fact_Id]bool,
-		best_h: map[Fact_Id]u32,
+		gen: u32,
+		cone_gen: []u32,
+		ground_gen: []u32,
+		best_h: []u32,
 	) -> (ok: bool, height: u32) {
 		if !j.alive {
 			return false, 0
@@ -660,8 +862,8 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 				return false, 0
 			}
 			ph := s.facts[pf].proof_height
-			if pf in in_cone {
-				if !(pf in grounded) {
+			if int(pf) < len(cone_gen) && cone_gen[pf] == gen {
+				if ground_gen[pf] != gen {
 					return false, 0
 				}
 				ph = best_h[pf]
@@ -673,16 +875,16 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 		return true, max_p + 1
 	}
 
-	// Initial pass: seed facts justified purely from outside `in_cone`.
+	// Initial pass: seed facts justified purely from outside cone.
 	for cf in cone_list {
-		if fjusts, has_fj := s.jtms.fact_justs[cf]; has_fj {
-			for jid in fjusts {
+		if int(cf) < len(s.jtms.fact_just_head) {
+			for jid := s.jtms.fact_just_head[cf]; jid != 0; jid = s.jtms.justs[jid].next_for_fact {
 				j := &s.jtms.justs[jid]
-				ok, h := _eval_just_grounded(s, j, in_cone, grounded, best_h)
+				ok, h := _eval_just_grounded(s, j, gen, cone_gen, ground_gen, best_h)
 				if ok {
-					prev_g := cf in grounded
+					prev_g := ground_gen[cf] == gen
 					if !prev_g || h < best_h[cf] {
-						grounded[cf] = true
+						ground_gen[cf] = gen
 						best_h[cf] = h
 						best_deriv[cf] = j.deriv_id
 						if !prev_g {
@@ -697,18 +899,19 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 	// Step 4: Propagate groundedness forward cleanly inside the cone (min proof_height convergence).
 	for wi := 0; wi < len(worklist); wi += 1 {
 		pf := worklist[wi]
-		if pjusts, has_pj := s.jtms.premise_to_justs[pf]; has_pj {
-			for jid in pjusts {
+		if int(pf) < len(s.jtms.premise_just_head) {
+			for eidx := s.jtms.premise_just_head[pf]; eidx >= 0; eidx = s.jtms.premise_edges[eidx].next {
+				jid := s.jtms.premise_edges[eidx].jid
 				j := &s.jtms.justs[jid]
 				df := j.derived_fact
-				if !(df in in_cone) {
+				if df == INVALID_FACT || int(df) >= len(cone_gen) || cone_gen[df] != gen {
 					continue
 				}
-				ok, h := _eval_just_grounded(s, j, in_cone, grounded, best_h)
+				ok, h := _eval_just_grounded(s, j, gen, cone_gen, ground_gen, best_h)
 				if ok {
-					prev_g := df in grounded
+					prev_g := ground_gen[df] == gen
 					if !prev_g || h < best_h[df] {
-						grounded[df] = true
+						ground_gen[df] = gen
 						best_h[df] = h
 						best_deriv[df] = j.deriv_id
 						append(&worklist, df)
@@ -720,7 +923,7 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 
 	// Step 5: Any fact in `cone_list` still not grounded has zero acyclic support -> retract atomically!
 	for cf in cone_list {
-		if cf in grounded {
+		if ground_gen[cf] == gen {
 			f := &s.facts[cf]
 			f.proof_height = best_h[cf]
 			if bd := best_deriv[cf]; bd != INVALID_DERIVATION {
@@ -728,11 +931,11 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 			}
 			// Recompute exact alive support_count.
 			cnt := i32(0)
-			if fjusts, has_fj := s.jtms.fact_justs[cf]; has_fj {
-				for jid in fjusts {
+			if int(cf) < len(s.jtms.fact_just_head) {
+				for jid := s.jtms.fact_just_head[cf]; jid != 0; jid = s.jtms.justs[jid].next_for_fact {
 					j := &s.jtms.justs[jid]
 					if j.alive {
-						ok, jh := _eval_just_grounded(s, j, in_cone, grounded, best_h)
+						ok, jh := _eval_just_grounded(s, j, gen, cone_gen, ground_gen, best_h)
 						if ok {
 							cnt += 1
 							j.proof_height = jh
@@ -776,8 +979,8 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 		}
 		jtms_remove_logical_bucket_entry(s, rf)
 
-		if fjusts, has_fj := s.jtms.fact_justs[rf]; has_fj {
-			for jid in fjusts {
+		if int(rf) < len(s.jtms.fact_just_head) {
+			for jid := s.jtms.fact_just_head[rf]; jid != 0; jid = s.jtms.justs[jid].next_for_fact {
 				j := &s.jtms.justs[jid]
 				if j.alive {
 					j.alive = false
@@ -792,8 +995,9 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 			}
 		}
 		// Mark outgoing justifications & rule firings dead so refraction stays clean.
-		if pjusts, has_pj := s.jtms.premise_to_justs[rf]; has_pj {
-			for jid in pjusts {
+		if int(rf) < len(s.jtms.premise_just_head) {
+			for eidx := s.jtms.premise_just_head[rf]; eidx >= 0; eidx = s.jtms.premise_edges[eidx].next {
+				jid := s.jtms.premise_edges[eidx].jid
 				j := &s.jtms.justs[jid]
 				if j.alive {
 					j.alive = false
@@ -851,8 +1055,9 @@ jtms_retract_cascades_for_fact :: proc(s: ^Session, fid: Fact_Id) {
 	}
 
 	fast_mode := s.provenance.mode == .Fast
-	if pjusts, has_pj := s.jtms.premise_to_justs[fid]; has_pj {
-		for jid in pjusts {
+	if int(fid) < len(s.jtms.premise_just_head) {
+		for eidx := s.jtms.premise_just_head[fid]; eidx >= 0; eidx = s.jtms.premise_edges[eidx].next {
+			jid := s.jtms.premise_edges[eidx].jid
 			j := &s.jtms.justs[jid]
 			if j.alive {
 				j.alive = false
@@ -901,8 +1106,8 @@ jtms_revoke_firing :: proc(s: ^Session, fkey: Firing_Key) {
 		affected = s.jtms.scratch_affected
 		dead_justs = &s.jtms.scratch_dead_justs
 	} else {
-		affected = make([dynamic]Fact_Id, 0, len(af.just_ids), context.temp_allocator)
-		tmp_dead_justs = make([dynamic]u32, 0, len(af.just_ids), context.temp_allocator)
+		affected = make([dynamic]Fact_Id, 0, 8, context.temp_allocator)
+		tmp_dead_justs = make([dynamic]u32, 0, 8, context.temp_allocator)
 		dead_justs = &tmp_dead_justs
 	}
 	defer if use_scratch {
@@ -910,7 +1115,7 @@ jtms_revoke_firing :: proc(s: ^Session, fkey: Firing_Key) {
 	}
 
 	fast_mode := s.provenance.mode == .Fast
-	for jid in af.just_ids {
+	for jid := af.just_head; jid != 0; jid = s.jtms.justs[jid].next_for_firing {
 		j := &s.jtms.justs[jid]
 		if j.alive {
 			j.alive = false
@@ -924,11 +1129,16 @@ jtms_revoke_firing :: proc(s: ^Session, fkey: Firing_Key) {
 			}
 		}
 	}
+	if af.deriv_id != INVALID_DERIVATION {
+		provenance_mark_retracted(&s.provenance, af.deriv_id)
+	}
+	for eidx := af.extra_deriv_head; eidx >= 0; eidx = s.jtms.firing_deriv_edges[eidx].next {
+		provenance_mark_retracted(&s.provenance, s.jtms.firing_deriv_edges[eidx].did)
+	}
+	_jtms_recycle_firing_deriv_edges(&s.jtms, af)
+
 	if fast_mode && len(dead_justs^) > 0 {
 		_jtms_recycle_dead_justs(s, dead_justs^[:])
-	}
-	for did in af.deriv_ids {
-		provenance_mark_retracted(&s.provenance, did)
 	}
 	if len(affected) > 0 {
 		jtms_cascade_from_affected_facts(s, affected[:])

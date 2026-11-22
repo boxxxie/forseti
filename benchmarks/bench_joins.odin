@@ -229,6 +229,54 @@ _bench_three_way_join_cold :: proc(b: ^hugi.Bencher) {
 }
 
 @(private = "file")
+_bench_three_way_join_incremental :: proc(b: ^hugi.Bencher) {
+	n := max(hugi.param(b), 10)
+	rb, ok := compile_benchmark_source(_BENCH_THREE_WAY_SRC, "bench_three_way_inc.forseti")
+	if !ok {
+		return
+	}
+	defer {
+		forseti.rulebase_destroy(rb)
+		free(rb)
+	}
+
+	s := new(forseti.Session)
+	_ = forseti.session_init(s, rb, forseti.Session_Config{provenance_mode = .Fast})
+	defer {
+		forseti.session_destroy(s)
+		free(s)
+	}
+
+	for i := 0; i < n; i += 1 {
+		k := fmt.tprintf("k:%06d", i)
+		d := fmt.tprintf("d:%06d", i)
+		ksid := bench_intern(s, k)
+		dsid := bench_intern(s, d)
+		ov := [2]forseti.Value{ksid, dsid}
+		dv := [2]forseti.Value{ksid, dsid}
+		cv := [3]forseti.Value{ksid, dsid, i64(10 + (i % 50))}
+		_, _ = forseti.session_insert_fact(s, "Org", k, ov[:])
+		_, _ = forseti.session_insert_fact(s, "Dept", k, dv[:])
+		_, _ = forseti.session_insert_fact(s, "Contract", k, cv[:])
+	}
+	_, _ = forseti.session_fire(s)
+	free_all(context.temp_allocator)
+
+	probe_k := bench_intern(s, "probe3:0")
+	probe_d := bench_intern(s, "d:000000")
+	probe_cv := [3]forseti.Value{probe_k, probe_d, i64(25)}
+
+	hugi.set_items(b, 2)
+	for hugi.step(b) {
+		_, _ = forseti.session_insert_fact(s, "Contract", "probe3:0", probe_cv[:])
+		f1, _ := forseti.session_fire(s)
+		_ = forseti.session_retract_fact_by_key(s, "Contract", "probe3:0")
+		f2, _ := forseti.session_fire(s)
+		_ = hugi.black_box(f1 + f2)
+	}
+}
+
+@(private = "file")
 _bench_skewed_fanout_join :: proc(b: ^hugi.Bencher) {
 	n := max(hugi.param(b), 10)
 	rb, ok := compile_benchmark_source(BENCH_JOIN_POLICY_SRC, "bench_joins.forseti")
@@ -412,6 +460,7 @@ register_join_benchmarks :: proc(suite: ^hugi.Suite) {
 	hugi.group_bench(g, "phreak_hot_match_zero_alloc", _bench_phreak_hot_match, zero_alloc = true)
 	hugi.group_bench(g, "parameterized_query", _bench_parameterized_query)
 	hugi.group_bench(g, "three_way_join_cold", _bench_three_way_join_cold)
+	hugi.group_bench(g, "three_way_join_incremental", _bench_three_way_join_incremental)
 	hugi.group_bench(g, "skewed_fanout_join", _bench_skewed_fanout_join)
 	hugi.group_bench(g, "incremental_join_insert_retract", _bench_incremental_join_insert_retract)
 	hugi.group_bench(g, "incremental_join_audit_full", _bench_incremental_join_audit_full)

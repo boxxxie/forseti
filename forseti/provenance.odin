@@ -32,11 +32,17 @@ Derivation :: struct {
 INVALID_TABLE_IDX :: max(u16)
 INVALID_ROW_ID    :: max(u16)
 
+Fact_Deriv_List :: struct {
+	head: Derivation_Id,
+	tail: Derivation_Id,
+}
+
 Provenance_Store :: struct {
 	mode:                   Provenance_Mode,
 	derivs:                 #soa[dynamic]Derivation,
+	deriv_next_for_fact:    [dynamic]Derivation_Id,
 	parent_facts:           [dynamic]Fact_Id,
-	fact_derivs:            map[Fact_Id][dynamic]Derivation_Id,
+	fact_deriv_lists:       [dynamic]Fact_Deriv_List,
 	rule_derivs:            map[u32][dynamic]Derivation_Id,
 	last_tx_derivs:         [dynamic]Derivation_Id,
 	dirty_retracted_derivs: [dynamic]Derivation_Id,
@@ -55,8 +61,9 @@ provenance_init :: proc(p: ^Provenance_Store, mode: Provenance_Mode, allocator: 
 		return
 	}
 	p.derivs = make(#soa[dynamic]Derivation, 1, 16, allocator) // slot 0 = INVALID_DERIVATION sentinel
+	p.deriv_next_for_fact = make([dynamic]Derivation_Id, 1, 16, allocator)
 	p.parent_facts = make([dynamic]Fact_Id, 0, 32, allocator)
-	p.fact_derivs = make(map[Fact_Id][dynamic]Derivation_Id, 16, allocator)
+	p.fact_deriv_lists = make([dynamic]Fact_Deriv_List, 1, 16, allocator)
 	p.rule_derivs = make(map[u32][dynamic]Derivation_Id, 16, allocator)
 	p.last_tx_derivs = make([dynamic]Derivation_Id, 0, 16, allocator)
 	p.dirty_retracted_derivs = make([dynamic]Derivation_Id, 0, 8, allocator)
@@ -69,10 +76,7 @@ provenance_destroy :: proc(p: ^Provenance_Store) {
 	if p == nil || p.allocator.procedure == nil {
 		return
 	}
-	for _, list in p.fact_derivs {
-		delete(list)
-	}
-	delete(p.fact_derivs)
+	delete(p.fact_deriv_lists)
 	for _, list in p.rule_derivs {
 		delete(list)
 	}
@@ -80,8 +84,17 @@ provenance_destroy :: proc(p: ^Provenance_Store) {
 	delete(p.dirty_retracted_derivs)
 	delete(p.last_tx_derivs)
 	delete(p.parent_facts)
+	delete(p.deriv_next_for_fact)
 	delete(p.derivs)
 	p^ = {}
+}
+
+@(private)
+provenance_fact_deriv_head :: #force_inline proc "contextless" (p: ^Provenance_Store, fid: Fact_Id) -> Derivation_Id {
+	if p == nil || p.mode != .Audit_Full || fid == INVALID_FACT || int(fid) >= len(p.fact_deriv_lists) {
+		return INVALID_DERIVATION
+	}
+	return p.fact_deriv_lists[fid].head
 }
 
 @(private)
@@ -131,12 +144,20 @@ provenance_record :: proc(
 		alive        = true,
 	})
 
-	flist, has_f := &p.fact_derivs[derived_fact]
-	if !has_f {
-		p.fact_derivs[derived_fact] = make([dynamic]Derivation_Id, 0, 2, p.allocator)
-		flist = &p.fact_derivs[derived_fact]
+	append(&p.deriv_next_for_fact, INVALID_DERIVATION)
+	if derived_fact != INVALID_FACT {
+		if int(derived_fact) >= len(p.fact_deriv_lists) {
+			resize(&p.fact_deriv_lists, int(derived_fact) + 1)
+		}
+		lst := &p.fact_deriv_lists[derived_fact]
+		if lst.head == INVALID_DERIVATION {
+			lst.head = did
+			lst.tail = did
+		} else {
+			p.deriv_next_for_fact[lst.tail] = did
+			lst.tail = did
+		}
 	}
-	append(flist, did)
 
 	rlist, has_r := &p.rule_derivs[rule_id]
 	if !has_r {

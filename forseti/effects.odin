@@ -102,6 +102,7 @@ effects_stage_job :: proc(
 	act: Compiled_Action,
 	tok: ^Beta_Token,
 	fslots: []Vm_Fact_Binding,
+	decide_results: []Decision_Result,
 	parent_deriv_id: Derivation_Id,
 ) -> Session_Error {
 	a := s.allocator
@@ -118,7 +119,7 @@ effects_stage_job :: proc(
 				fslots,
 				s.rb.tables,
 				&s.rb.interner,
-				tok.decide_results[:],
+				decide_results,
 				&s.interner,
 			)
 			if verr != .None {

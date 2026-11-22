@@ -1,6 +1,7 @@
 package forseti
 
 import "base:runtime"
+import "core:mem"
 import xitdb "xitdb:."
 
 RUNTIME_STRING_BIT :: u32(0x80000000)
@@ -1056,21 +1057,28 @@ vm_eval :: proc(
 		}
 	}
 	table := VM_DISPATCH_TABLE
-	vm := Vm_State{
-		vars           = vars,
-		fact_slots     = fact_slots,
-		consts         = prog.consts,
-		field_refs     = prog.field_refs,
-		decide_calls   = prog.decide_calls,
-		ranges         = prog.ranges,
-		decide_results = eff_decide,
-		tables         = tables,
-		interner       = interner,
-		sess_interner  = sess_interner,
-		dispatch       = &table,
-		saved_ctx      = context,
-		steps_left     = step_limit,
+	vm: Vm_State = ---
+	reg_n := int(prog.max_regs)
+	if reg_n <= 0 || reg_n > len(vm.regs) {
+		mem.zero_slice(vm.regs[:]) // safe fallback for hand-built Bytecode_Program in unit tests
+	} else {
+		mem.zero_slice(vm.regs[:reg_n])
 	}
+	vm.vars = vars
+	vm.fact_slots = fact_slots
+	vm.consts = prog.consts
+	vm.field_refs = prog.field_refs
+	vm.decide_calls = prog.decide_calls
+	vm.ranges = prog.ranges
+	vm.decide_results = eff_decide
+	vm.tables = tables
+	vm.interner = interner
+	vm.sess_interner = sess_interner
+	vm.dispatch = &table
+	vm.saved_ctx = context
+	vm.steps_left = step_limit
+	vm.result = nil
+	vm.err = .None
 	vm.dispatch[prog.code[0].op](&vm, raw_data(prog.code))
 	if vm.err != .None {
 		return {}, vm.err

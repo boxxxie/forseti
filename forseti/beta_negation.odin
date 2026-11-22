@@ -19,10 +19,25 @@ _neg_get_or_create_mem :: proc(s: ^Session, node_id: u32) -> ^Not_Exists_Memory 
 	return nm
 }
 
+@(private)
+_sub_beta_get_or_create_mem :: proc(s: ^Session, sub_key: u64) -> ^Beta_Memory {
+	if bm, has := s.sub_beta_mems[sub_key]; has {
+		return bm
+	}
+	bm := new(Beta_Memory, s.allocator)
+	_beta_mem_init(bm, u32(sub_key & 0xffffffff), s.allocator)
+	s.sub_beta_mems[sub_key] = bm
+	s.live_memories_count += 1
+	_record_live_memory_watermark(s)
+	return bm
+}
+
 // Evaluates a single Subnetwork_Def step across `cur` tokens -> `nxt` tokens.
 @(private)
 _subnetwork_eval_step :: proc(
 	s: ^Session,
+	sub_id: u32,
+	step_idx: u32,
 	step: Subnetwork_Step,
 	cur: []Beta_Token,
 	nxt: ^[dynamic]Beta_Token,
@@ -38,6 +53,54 @@ _subnetwork_eval_step :: proc(
 		if !am_ok || len(am.fact_ids) == 0 {
 			return .None
 		}
+		if len(step.join_keys) > 0 {
+			sub_key := (u64(sub_id) << 32) | u64(step_idx)
+			bm := _sub_beta_get_or_create_mem(s, sub_key)
+			syn_bn := Beta_Node_Def{
+				id           = step_idx,
+				alpha_mem_id = step.alpha_mem_id,
+				join_keys    = step.join_keys,
+				field_binds  = step.field_binds,
+			}
+			_beta_sync_right_index(s, bm, syn_bn, am)
+			for &ltok in cur {
+				h := u64(0x4a4f494e)
+				for jk in step.join_keys {
+					lv := ltok.vars[jk.left_var_slot]
+					h = _hash_combine64(h, _hash_value_key(s, lv))
+				}
+				head, found := bm.right_idx.heads[h]
+				if !found {
+					continue
+				}
+				node_idx := head
+				for node_idx >= 0 {
+					node := bm.right_idx.nodes[node_idx]
+					node_idx = node.next
+					telemetry_count_add(s.telemetry, .Beta_Joins, 1)
+					rf := &s.facts[node.fid]
+					if !rf.alive {
+						continue
+					}
+					eq_all := true
+					for jk in step.join_keys {
+						lv := ltok.vars[jk.left_var_slot]
+						rv, r_ok := fact_get_field(s, rf, jk.right_field_idx)
+						if !r_ok || !_join_values_equal(s, lv, rv) {
+							eq_all = false
+							break
+						}
+					}
+					if eq_all {
+						if ext, ok := _token_extend_fact(s, &ltok, rf, step.field_binds); ok {
+							append(nxt, ext)
+						}
+					}
+				}
+			}
+			return .None
+		}
+
 		for &ltok in cur {
 			for fid in am.fact_ids {
 				rf := &s.facts[fid]
@@ -45,19 +108,8 @@ _subnetwork_eval_step :: proc(
 					continue
 				}
 				telemetry_count_add(s.telemetry, .Beta_Joins, 1)
-				eq_all := true
-				for jk in step.join_keys {
-					lv := ltok.vars[jk.left_var_slot]
-					rv, r_ok := fact_get_field(s, rf, jk.right_field_idx)
-					if !r_ok || !_join_values_equal(s, lv, rv) {
-						eq_all = false
-						break
-					}
-				}
-				if eq_all {
-					if ext, ok := _token_extend_fact(s, ltok, rf, step.field_binds); ok {
-						append(nxt, ext)
-					}
+				if ext, ok := _token_extend_fact(s, &ltok, rf, step.field_binds); ok {
+					append(nxt, ext)
 				}
 			}
 		}
@@ -77,7 +129,7 @@ _subnetwork_eval_step :: proc(
 				fslots,
 				s.rb.tables,
 				&s.rb.interner,
-				tok.decide_results[:],
+				_token_decide_slice(s, &tok),
 				&s.interner,
 			)
 			if verr != .None {
@@ -110,9 +162,9 @@ subnetwork_eval_for_token :: proc(
 	nxt := make([dynamic]Beta_Token, 0, 8, context.temp_allocator)
 	append(&cur, outer_tok)
 
-	for step in sub.steps {
+	for step, si in sub.steps {
 		clear(&nxt)
-		_subnetwork_eval_step(s, step, cur[:], &nxt) or_return
+		_subnetwork_eval_step(s, sub.id, u32(si), step, cur[:], &nxt) or_return
 		cur, nxt = nxt, cur
 		if len(cur) == 0 {
 			break

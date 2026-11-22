@@ -252,3 +252,67 @@ spec_safe_v2_vs_fast_memory_guardrails :: proc(t: ^testing.T) {
 	)
 	then_store_error_is(&w, xitdb.Xitdb_Error.Invalid_Hash_Size)
 }
+
+@(test)
+spec_cold_disk_hydrate_nested_projection_and_incremental_resync :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	src := `module cold_hydrate_disk version "1.0"
+
+schema Organization {
+  name: string,
+  domain: string,
+  employees: i64,
+  active: bool
+}
+
+source RawOrg : Organization at .orgs.raw[?id]
+derived CanonOrg : Organization at .orgs.canon[?id]
+
+rule canonicalize {
+  when {
+    ?_raw := RawOrg(name: ?nm, domain: ?dom, employees: ?emp, active: true)
+    where ?emp >= 50
+  }
+  then {
+    assert CanonOrg(name: ?nm, domain: ?dom, employees: ?emp, active: true)
+  }
+}`
+
+	given_external_policy(&w, "ch", src, "cold_hydrate.forseti")
+	upon_compiling_policy(&w, "ch")
+	then_compilation_has_zero_diagnostics(&w, "ch")
+	upon_compiling_rulebase(&w, "ch", "rb")
+
+	given_attached_file_store(&w, "disk_seed", "hydrate_reopen.xit", forseti.Xitdb_Config{mode = .Safe_V2})
+	upon_committing_mdm_orgs(&w, "disk_seed", {
+		{id = "org:1", name = "Alpine AG", country = "DE", domain = "alpine.de", employees = 200, active = true, locked_fields = {"domain"}},
+		{id = "org:2", name = "Boutique", country = "FR", domain = "btq.fr", employees = 12, active = true},
+		{id = "org:3", name = "Pacific Ltd", country = "JP", domain = "pacific.jp", employees = 420, active = true, locked_fields = {"name"}},
+	})
+
+	// Reopen persisted disk store cleanly, watch .orgs.raw, and hydrate via transient snapshot!
+	upon_reopening_attached_file_store(&w, "disk_seed", "disk", "hydrate_reopen.xit", forseti.Xitdb_Config{mode = .Safe_V2})
+	given_watched_collection(&w, "disk", ".orgs.raw")
+	given_session(&w, "rb", "s")
+	upon_syncing_store_and_firing(&w, "disk", "s", "cold_sync", commit_derived = true)
+	then_rules_fired_count_is(&w, "cold_sync", 2)
+	then_session_has_derived_fact(&w, "s", "CanonOrg", {"Alpine AG", "alpine.de", i64(200), true})
+	then_session_has_derived_fact(&w, "s", "CanonOrg", {"Pacific Ltd", "pacific.jp", i64(420), true})
+	then_store_collection_has_record_count_and_field(&w, "disk", ".orgs.canon", 2, "name", "Alpine AG")
+
+	// Nested fields not eagerly hydrated still resolve lazily against live bridge.db after snap_arena destruction!
+	then_lazy_field_equals(&w, "disk", 0, ".orgs.raw", "org:1", {"address", "country"}, "DE")
+	then_lazy_field_equals(&w, "disk", 0, ".orgs.raw", "org:1", {"locked_fields", "domain"}, true)
+
+	// Commit an incremental update after cold disk hydration and sync again!
+	upon_committing_mdm_orgs(&w, "disk", {
+		{id = "org:2", name = "Boutique Grown", country = "FR", domain = "btq.fr", employees = 150, active = true},
+	})
+	upon_syncing_store_and_firing(&w, "disk", "s", "inc_sync", commit_derived = true)
+	then_rules_fired_count_is(&w, "inc_sync", 1)
+	then_session_has_derived_fact(&w, "s", "CanonOrg", {"Boutique Grown", "btq.fr", i64(150), true})
+	then_store_collection_has_record_count_and_field(&w, "disk", ".orgs.canon", 3, "name", "Boutique Grown")
+}

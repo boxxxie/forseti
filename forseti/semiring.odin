@@ -192,28 +192,25 @@ _pick_best_alive_derivation :: proc(s: ^Session, fid: Fact_Id) -> (did: Derivati
 		}
 	}
 
-	flist, has := s.provenance.fact_derivs[fid]
-	if !has {
-		return INVALID_DERIVATION, false
-	}
 	best_h := max(u32)
-	for cand_did in flist {
+	cand_did := provenance_fact_deriv_head(&s.provenance, fid)
+	for cand_did != INVALID_DERIVATION {
 		d := s.provenance.derivs[cand_did]
-		if !d.alive {
-			continue
-		}
-		parents_alive := true
-		for pf in provenance_parents(&s.provenance, cand_did) {
-			if pf == INVALID_FACT || int(pf) >= len(s.facts) || !s.facts[pf].alive {
-				parents_alive = false
-				break
+		if d.alive {
+			parents_alive := true
+			for pf in provenance_parents(&s.provenance, cand_did) {
+				if pf == INVALID_FACT || int(pf) >= len(s.facts) || !s.facts[pf].alive {
+					parents_alive = false
+					break
+				}
+			}
+			if parents_alive && d.proof_height < best_h {
+				best_h = d.proof_height
+				did = cand_did
+				ok = true
 			}
 		}
-		if parents_alive && d.proof_height < best_h {
-			best_h = d.proof_height
-			did = cand_did
-			ok = true
-		}
+		cand_did = s.provenance.deriv_next_for_fact[cand_did]
 	}
 	return did, ok
 }
@@ -680,9 +677,12 @@ impact :: proc(
 	}
 	for i := 0; i < len(trans_list); i += 1 {
 		cur := trans_list[i]
-		if pjusts, has_pj := s.jtms.premise_to_justs[cur]; has_pj {
-			for jid in pjusts {
-				j := s.jtms.justs[jid]
+		if int(cur) < len(s.jtms.premise_just_head) {
+			pe := s.jtms.premise_just_head[cur]
+			for pe >= 0 {
+				edge := s.jtms.premise_edges[pe]
+				pe = edge.next
+				j := s.jtms.justs[edge.jid]
 				if !j.alive {
 					continue
 				}
@@ -713,12 +713,12 @@ _is_base_or_uncond :: proc(s: ^Session, fid: Fact_Id) -> bool {
 	if f.origin != .Logical {
 		return true
 	}
-	if flist, has := s.provenance.fact_derivs[fid]; has {
-		for did in flist {
-			if s.provenance.derivs[did].alive {
-				return false
-			}
+	did := provenance_fact_deriv_head(&s.provenance, fid)
+	for did != INVALID_DERIVATION {
+		if s.provenance.derivs[did].alive {
+			return false
 		}
+		did = s.provenance.deriv_next_for_fact[did]
 	}
 	return true
 }
@@ -778,50 +778,47 @@ _eval_why_sets :: proc(
 	visited^[fid] = true
 	defer delete_key(visited, fid)
 
-	if flist, has := s.provenance.fact_derivs[fid]; has {
-		for did in flist {
-			d := s.provenance.derivs[did]
-			if !d.alive {
-				continue
-			}
+	did := provenance_fact_deriv_head(&s.provenance, fid)
+	for did != INVALID_DERIVATION {
+		d := s.provenance.derivs[did]
+		if d.alive {
 			parents := provenance_parents(&s.provenance, did)
 			if len(parents) == 0 {
 				unit := make([dynamic]Fact_Id, 1, 1, context.temp_allocator)
 				unit[0] = fid
 				append(&out, unit)
-				continue
-			}
-			// Check all parents alive
-			all_ok := true
-			for pf in parents {
-				if pf == INVALID_FACT || int(pf) >= len(s.facts) || !s.facts[pf].alive {
-					all_ok = false
-					break
+			} else {
+				// Check all parents alive
+				all_ok := true
+				for pf in parents {
+					if pf == INVALID_FACT || int(pf) >= len(s.facts) || !s.facts[pf].alive {
+						all_ok = false
+						break
+					}
 				}
-			}
-			if !all_ok {
-				continue
-			}
-
-			prod := make([dynamic][dynamic]Fact_Id, 1, 4, context.temp_allocator)
-			prod[0] = make([dynamic]Fact_Id, 0, 2, context.temp_allocator)
-			valid_d := true
-			for pf in parents {
-				sub := _eval_why_sets(s, pf, visited)
-				if len(sub) == 0 {
-					valid_d = false
-					break
-				}
-				prod = _merge_why_sets(prod, sub)
-			}
-			if valid_d {
-				for ps in prod {
-					if len(out) < 64 {
-						append(&out, ps)
+				if all_ok {
+					prod := make([dynamic][dynamic]Fact_Id, 1, 4, context.temp_allocator)
+					prod[0] = make([dynamic]Fact_Id, 0, 2, context.temp_allocator)
+					valid_d := true
+					for pf in parents {
+						sub := _eval_why_sets(s, pf, visited)
+						if len(sub) == 0 {
+							valid_d = false
+							break
+						}
+						prod = _merge_why_sets(prod, sub)
+					}
+					if valid_d {
+						for ps in prod {
+							if len(out) < 64 {
+								append(&out, ps)
+							}
+						}
 					}
 				}
 			}
 		}
+		did = s.provenance.deriv_next_for_fact[did]
 	}
 	return out
 }
@@ -843,12 +840,10 @@ _eval_how_expr :: proc(
 	defer delete_key(visited, fid)
 
 	terms := make([dynamic]string, 0, 4, context.temp_allocator)
-	if flist, has := s.provenance.fact_derivs[fid]; has {
-		for did in flist {
-			d := s.provenance.derivs[did]
-			if !d.alive {
-				continue
-			}
+	did := provenance_fact_deriv_head(&s.provenance, fid)
+	for did != INVALID_DERIVATION {
+		d := s.provenance.derivs[did]
+		if d.alive {
 			parents := provenance_parents(&s.provenance, did)
 			all_ok := true
 			for pf in parents {
@@ -857,25 +852,25 @@ _eval_how_expr :: proc(
 					break
 				}
 			}
-			if !all_ok {
-				continue
-			}
-			rname := interner_get(&s.rb.interner, s.rb.rules[d.rule_id].name) if int(d.rule_id) < len(s.rb.rules) else "rule"
-			if len(parents) == 0 {
-				append(&terms, rname)
-			} else {
-				pb := strings.builder_make(context.temp_allocator)
-				fmt.sbprintf(&pb, "%s(", rname)
-				for pf, i in parents {
-					if i > 0 {
-						strings.write_string(&pb, " * ")
+			if all_ok {
+				rname := interner_get(&s.rb.interner, s.rb.rules[d.rule_id].name) if int(d.rule_id) < len(s.rb.rules) else "rule"
+				if len(parents) == 0 {
+					append(&terms, rname)
+				} else {
+					pb := strings.builder_make(context.temp_allocator)
+					fmt.sbprintf(&pb, "%s(", rname)
+					for pf, i in parents {
+						if i > 0 {
+							strings.write_string(&pb, " * ")
+						}
+						strings.write_string(&pb, _eval_how_expr(s, pf, visited))
 					}
-					strings.write_string(&pb, _eval_how_expr(s, pf, visited))
+					strings.write_byte(&pb, ')')
+					append(&terms, strings.to_string(pb))
 				}
-				strings.write_byte(&pb, ')')
-				append(&terms, strings.to_string(pb))
 			}
 		}
+		did = s.provenance.deriv_next_for_fact[did]
 	}
 	if len(terms) == 0 {
 		return "0"
@@ -907,12 +902,10 @@ _eval_viterbi :: proc(
 	best_h := max(u32)
 	best_path: [dynamic]Fact_Id
 
-	if flist, has := s.provenance.fact_derivs[fid]; has {
-		for did in flist {
-			d := s.provenance.derivs[did]
-			if !d.alive {
-				continue
-			}
+	did := provenance_fact_deriv_head(&s.provenance, fid)
+	for did != INVALID_DERIVATION {
+		d := s.provenance.derivs[did]
+		if d.alive {
 			parents := provenance_parents(&s.provenance, did)
 			all_ok := true
 			for pf in parents {
@@ -921,38 +914,37 @@ _eval_viterbi :: proc(
 					break
 				}
 			}
-			if !all_ok {
-				continue
-			}
-			cand_score := 0.9
-			cand_h := u32(0)
-			cand_path := make([dynamic]Fact_Id, 0, 4, context.temp_allocator)
-			valid := true
-			for pf in parents {
-				ps, ph, pp := _eval_viterbi(s, pf, visited)
-				if ps <= 0.0 {
-					valid = false
-					break
+			if all_ok {
+				cand_score := 0.9
+				cand_h := u32(0)
+				cand_path := make([dynamic]Fact_Id, 0, 4, context.temp_allocator)
+				valid := true
+				for pf in parents {
+					ps, ph, pp := _eval_viterbi(s, pf, visited)
+					if ps <= 0.0 {
+						valid = false
+						break
+					}
+					cand_score *= ps
+					if ph > cand_h {
+						cand_h = ph
+					}
+					for x in pp {
+						append(&cand_path, x)
+					}
 				}
-				cand_score *= ps
-				if ph > cand_h {
-					cand_h = ph
+				if valid {
+					cand_h += 1
+					append(&cand_path, fid)
+					if cand_score > best_score {
+						best_score = cand_score
+						best_h = cand_h
+						best_path = cand_path
+					}
 				}
-				for x in pp {
-					append(&cand_path, x)
-				}
-			}
-			if !valid {
-				continue
-			}
-			cand_h += 1
-			append(&cand_path, fid)
-			if cand_score > best_score {
-				best_score = cand_score
-				best_h = cand_h
-				best_path = cand_path
 			}
 		}
+		did = s.provenance.deriv_next_for_fact[did]
 	}
 
 	if best_score < 0.0 {
