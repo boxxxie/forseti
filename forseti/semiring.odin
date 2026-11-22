@@ -1,6 +1,7 @@
 package forseti
 
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:strings"
 
@@ -516,7 +517,11 @@ _write_json_fact_field_value :: proc(b: ^strings.Builder, s: ^Session, val: Valu
 	case i64:
 		fmt.sbprintf(b, "%d", v)
 	case f64:
-		fmt.sbprintf(b, "%v", v)
+		if math.is_nan(v) || math.is_inf(v, 0) {
+			strings.write_string(b, "null")
+		} else {
+			fmt.sbprintf(b, "%v", v)
+		}
 	case String_Id:
 		write_json_escaped_string(b, session_string(s, v))
 	case Entity_Id:

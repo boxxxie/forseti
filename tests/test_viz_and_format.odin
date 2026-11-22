@@ -1,5 +1,7 @@
 package forseti_tests
 
+import "core:encoding/json"
+import "core:math"
 import "core:strings"
 import "core:testing"
 import "../forseti"
@@ -28,6 +30,12 @@ rule reach_base {
     where ?g.ok == true
   }
   then { assert Reach(src: ?x, dst: ?y) }
+}
+
+rule reach_special {
+  when {
+    ?_s := Edge(src: "x|y\"\\z", dst: ?_d)
+  }
 }
 
 rule reach_rec {
@@ -60,12 +68,14 @@ rule reach_rec {
 	testing.expect_value(t, dot1, dot2)
 	testing.expect(t, strings.contains(dot1, "reach_base"))
 	testing.expect(t, strings.contains(dot1, "check_edge"))
+	testing.expect(t, strings.contains(dot1, `label="= 'x|y\"\\z'"`))
 
 	mmd1, m1_err := forseti.export_rulebase_mermaid(&rb)
 	testing.expect_value(t, m1_err, nil)
 	defer delete(mmd1)
 	testing.expect(t, strings.contains(mmd1, "flowchart LR"))
 	testing.expect(t, strings.contains(mmd1, "-. decide .->"))
+	testing.expect(t, strings.contains(mmd1, `-->|"= 'x&#124;y'\z'"|`))
 
 	sess := new(forseti.Session)
 	testing.expect_value(t, forseti.session_init(sess, &rb), forseti.Session_Error.None)
@@ -127,4 +137,55 @@ test_format_json_outputs_and_escaping :: proc(t: ^testing.T) {
 
 	b := forseti.rulebase_binding_dot_path(nil, 0, nil)
 	testing.expect_value(t, b, "")
+}
+
+@(test)
+test_format_json_nonfinite_float_serializes_as_null :: proc(t: ^testing.T) {
+	src := `module json_f64 version "1.0"
+schema Metric { score: f64 }
+derived OutMetric : Metric at .metrics[?id]`
+
+	diags: forseti.Diagnostic_List
+	testing.expect_value(t, forseti.diag_list_init(&diags), nil)
+	defer forseti.diag_list_destroy(&diags)
+
+	ir, c_err := forseti.compile_source(src, "json_f64.forseti", &diags)
+	testing.expect_value(t, c_err, nil)
+	defer forseti.ir_destroy(&ir)
+	testing.expect_value(t, diags.error_count, 0)
+
+	rb, rb_err := forseti.rulebase_compile(&ir)
+	testing.expect_value(t, rb_err, forseti.Compile_Error.None)
+	defer forseti.rulebase_destroy(&rb)
+
+	sess := new(forseti.Session)
+	testing.expect_value(t, forseti.session_init(sess, &rb), forseti.Session_Error.None)
+	defer {
+		forseti.session_destroy(sess)
+		free(sess)
+	}
+
+	_, _ = forseti.session_insert_fact(sess, "OutMetric", "m_nan", {math.nan_f64()})
+	_, _ = forseti.session_insert_fact(sess, "OutMetric", "m_inf", {math.inf_f64(1)})
+
+	out_json, f_err := forseti.session_format_run_output(sess, 0, -1, as_json = true)
+	testing.expect_value(t, f_err, nil)
+	defer delete(out_json)
+
+	parsed, p_err := json.parse_string(strings.trim_space(out_json), parse_integers = true)
+	testing.expect_value(t, p_err, nil)
+	if p_err == nil {
+		defer json.destroy_value(parsed)
+		obj, is_obj := parsed.(json.Object)
+		testing.expect(t, is_obj)
+		if is_obj {
+			arr, is_arr := obj["derived"].(json.Array)
+			testing.expect(t, is_arr && len(arr) == 2)
+			for item in arr {
+				fobj := item.(json.Object)["fields"].(json.Object)
+				_, is_null := fobj["score"].(json.Null)
+				testing.expect(t, is_null)
+			}
+		}
+	}
 }

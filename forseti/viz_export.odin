@@ -33,6 +33,8 @@ _write_mermaid_escaped :: proc(b: ^strings.Builder, s: string) {
 		switch ch {
 		case '"':
 			strings.write_string(b, `'`)
+		case '|':
+			strings.write_string(b, "&#124;")
 		case '\n', '\r':
 			strings.write_byte(b, ' ')
 		case '`':
@@ -68,7 +70,7 @@ _sort_eq_entries :: proc(buckets: ^map[Value_Key]u32, alloc: mem.Allocator) -> (
 }
 
 @(private)
-_write_value_key_label :: proc(b: ^strings.Builder, rb: ^Rulebase, k: Value_Key) {
+_write_value_key_label :: proc(b: ^strings.Builder, rb: ^Rulebase, k: Value_Key, for_mermaid: bool) {
 	switch k.kind {
 	case .Bool:
 		strings.write_string(b, "true" if k.raw != 0 else "false")
@@ -77,7 +79,14 @@ _write_value_key_label :: proc(b: ^strings.Builder, rb: ^Rulebase, k: Value_Key)
 	case .F64:
 		fmt.sbprintf(b, "%v", transmute(f64)k.raw)
 	case .String:
-		fmt.sbprintf(b, "'%s'", interner_get(&rb.interner, String_Id(u32(k.raw))))
+		strings.write_byte(b, '\'')
+		s := interner_get(&rb.interner, String_Id(u32(k.raw)))
+		if for_mermaid {
+			_write_mermaid_escaped(b, s)
+		} else {
+			_write_dot_escaped(b, s)
+		}
+		strings.write_byte(b, '\'')
 	case .Entity:
 		fmt.sbprintf(b, "entity:%d", k.raw)
 	case .Time:
@@ -147,7 +156,7 @@ export_rulebase_dot :: proc(
 		eqs := _sort_eq_entries(an.eq_buckets, allocator) or_return
 		for e in eqs {
 			fmt.sbprintf(&b, `  an_%d -> an_%d [label="= `, an.id, e.child)
-			_write_value_key_label(&b, rb, e.key)
+			_write_value_key_label(&b, rb, e.key, for_mermaid = false)
 			strings.write_string(&b, "\"];\n")
 		}
 		delete(eqs, allocator)
@@ -252,7 +261,7 @@ export_rulebase_mermaid :: proc(
 		eqs := _sort_eq_entries(an.eq_buckets, allocator) or_return
 		for e in eqs {
 			fmt.sbprintf(&b, `  an_%d -->|"= `, an.id)
-			_write_value_key_label(&b, rb, e.key)
+			_write_value_key_label(&b, rb, e.key, for_mermaid = true)
 			fmt.sbprintf(&b, `"| an_%d`, e.child)
 			strings.write_byte(&b, '\n')
 		}
@@ -396,6 +405,9 @@ _collect_derivation_subgraph :: proc(
 	}
 
 	flist := make([]Fact_Id, len(fset), alloc) or_return
+	defer if err != nil {
+		delete(flist, alloc)
+	}
 	fi := 0
 	for fid in fset {
 		flist[fi] = fid
