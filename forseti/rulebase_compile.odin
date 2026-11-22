@@ -676,6 +676,7 @@ compile_pattern_clause :: proc(
 	bound_vars: ^map[String_Id]u16,
 	next_var: ^u16,
 	fact_descs: ^[dynamic]Vm_Fact_Slot_Desc,
+	decide_descs: []Vm_Decide_Slot_Desc = nil,
 ) -> (
 	alpha_id: u32,
 	binding_idx: u16,
@@ -793,21 +794,26 @@ compile_pattern_clause :: proc(
 		}
 
 		// Residual field expression evaluated against already-bound vars & current fact.
-		// Compile `expr_rhs == cur_fact.field_name` cleanly via VM.
+		// Compile `cur_fact.field_name <op> expr_rhs` cleanly via VM.
 		clear(&ctx.var_map)
 		for k, v in bound_vars^ {
+			if v > u16(max(u8)) {
+				return 0, 0, nil, nil, nil, .Vm_Compile_Failed
+			}
 			ctx.var_map[k] = u8(v)
 		}
 		env := Vm_Compile_Env{
-			ir         = ctx.ir,
-			tables     = ctx.rb.tables,
-			var_names  = ctx.var_map,
-			fact_descs = fact_descs[:],
+			ir           = ctx.ir,
+			tables       = ctx.rb.tables,
+			var_names    = ctx.var_map,
+			fact_descs   = fact_descs[:],
+			decide_descs = decide_descs,
 		}
-		if err := vm_compile_expr_to_scratch(&ctx.vm_compiler, &env, fb.expr); err != .None {
+		if err := vm_compile_field_residual_to_scratch(&ctx.vm_compiler, &env, pat_slot, i16(fidx), fb.name, ftype, fb.expr); err != .None {
 			return 0, 0, nil, nil, nil, .Vm_Compile_Failed
 		}
-		_ = pat_slot
+		pidx := _intern_scratch_program(ctx)
+		append(res_list, pidx)
 	}
 
 	alpha_id = insert_alpha_chain(ctx, bidx, preds^[:], bind_list^[:])
@@ -853,9 +859,11 @@ rulebase_compile :: proc(
 			return {}, .Alloc_Failed
 		}
 	}
-	for s in ir.interner.strings[1:] {
-		if _, ierr := intern(&rb.interner, s); ierr != nil {
-			return {}, .Alloc_Failed
+	if len(ir.interner.strings) > 1 {
+		for s in ir.interner.strings[1:] {
+			if _, ierr := intern(&rb.interner, s); ierr != nil {
+				return {}, .Alloc_Failed
+			}
 		}
 	}
 

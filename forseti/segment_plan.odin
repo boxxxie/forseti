@@ -77,11 +77,24 @@ _append_alpha_sub :: proc(ctx: ^Rb_Build_Ctx, alpha_mem_id: u32, seg_id: u32, bi
 }
 
 @(private)
+_fill_var_map :: proc(ctx: ^Rb_Build_Ctx, vars: map[String_Id]u16) -> Compile_Error {
+	clear(&ctx.var_map)
+	for k, v in vars {
+		if v > u16(max(u8)) {
+			return .Vm_Compile_Failed
+		}
+		ctx.var_map[k] = u8(v)
+	}
+	return .None
+}
+
+@(private)
 _collect_expr_outer_vars :: proc(
 	ir: ^Rulebase_IR,
 	eid: Expr_Id,
 	outer_vars: map[String_Id]u16,
 	outer_fact_descs: []Vm_Fact_Slot_Desc,
+	outer_decide_descs: []Vm_Decide_Slot_Desc,
 	out_slots: ^[dynamic]u16,
 	uses_outer_fact: ^bool,
 ) {
@@ -107,17 +120,23 @@ _collect_expr_outer_vars :: proc(
 					return
 				}
 			}
+			for odd in outer_decide_descs {
+				if odd.var_name != EMPTY_STRING && odd.var_name == e.str_id {
+					uses_outer_fact^ = true
+					return
+				}
+			}
 		}
 	case .Unary, .Field_Access:
-		_collect_expr_outer_vars(ir, e.lhs, outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+		_collect_expr_outer_vars(ir, e.lhs, outer_vars, outer_fact_descs, outer_decide_descs, out_slots, uses_outer_fact)
 	case .Binary, .Range:
-		_collect_expr_outer_vars(ir, e.lhs, outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
-		_collect_expr_outer_vars(ir, e.rhs, outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+		_collect_expr_outer_vars(ir, e.lhs, outer_vars, outer_fact_descs, outer_decide_descs, out_slots, uses_outer_fact)
+		_collect_expr_outer_vars(ir, e.rhs, outer_vars, outer_fact_descs, outer_decide_descs, out_slots, uses_outer_fact)
 	case .Cell_Cmp:
-		_collect_expr_outer_vars(ir, e.rhs, outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+		_collect_expr_outer_vars(ir, e.rhs, outer_vars, outer_fact_descs, outer_decide_descs, out_slots, uses_outer_fact)
 	case .In_List, .Call:
 		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
-			_collect_expr_outer_vars(ir, ir.extra_exprs[i], outer_vars, outer_fact_descs, out_slots, uses_outer_fact)
+			_collect_expr_outer_vars(ir, ir.extra_exprs[i], outer_vars, outer_fact_descs, outer_decide_descs, out_slots, uses_outer_fact)
 		}
 	case .Invalid, .Lit_Bool, .Lit_Int, .Lit_Float, .Lit_String, .Ident, .Wildcard:
 	}
@@ -162,14 +181,18 @@ _compile_subnetwork :: proc(
 	for cl in sub_clauses {
 		#partial switch cl.kind {
 		case .Pattern:
+			if len(sub_fact_descs) > int(max(u8)) {
+				return 0, .Too_Many_Patterns
+			}
 			fslot := u8(len(sub_fact_descs))
-			alpha_id, bidx, binds, joins, _, c_err := compile_pattern_clause(
+			alpha_id, bidx, binds, joins, res_progs, c_err := compile_pattern_clause(
 				ctx,
 				cl,
 				fslot,
 				&sub_vars,
 				&sub_next_var,
 				&sub_fact_descs,
+				outer_decide_descs,
 			)
 			if c_err != .None {
 				return 0, c_err
@@ -178,6 +201,11 @@ _compile_subnetwork :: proc(
 			for jk in joins {
 				if jk.left_var_slot < outer_next_var {
 					add_group_slot(&group_slots, jk.left_var_slot)
+				}
+			}
+			if len(res_progs) > 0 {
+				for fb in cl.fields {
+					_collect_expr_outer_vars(ctx.ir, fb.expr, outer_vars, outer_fact_descs, outer_decide_descs, &group_slots, &uses_outer_fact)
 				}
 			}
 			append(&steps, Subnetwork_Step{
@@ -189,13 +217,16 @@ _compile_subnetwork :: proc(
 				field_binds  = binds,
 				guard_prog   = -1,
 			})
+			for pidx in res_progs {
+				append(&steps, Subnetwork_Step{
+					kind       = .Where,
+					guard_prog = i32(pidx),
+				})
+			}
 
 		case .Where:
-			_collect_expr_outer_vars(ctx.ir, cl.expr, outer_vars, outer_fact_descs, &group_slots, &uses_outer_fact)
-			clear(&ctx.var_map)
-			for k, v in sub_vars {
-				ctx.var_map[k] = u8(v)
-			}
+			_collect_expr_outer_vars(ctx.ir, cl.expr, outer_vars, outer_fact_descs, outer_decide_descs, &group_slots, &uses_outer_fact)
+			_fill_var_map(ctx, sub_vars) or_return
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
@@ -223,7 +254,7 @@ _compile_subnetwork :: proc(
 
 	if is_accum {
 		if accum_expr != INVALID_EXPR && int(accum_expr) < len(ctx.ir.exprs) {
-			_collect_expr_outer_vars(ctx.ir, accum_expr, outer_vars, outer_fact_descs, &group_slots, &uses_outer_fact)
+			_collect_expr_outer_vars(ctx.ir, accum_expr, outer_vars, outer_fact_descs, outer_decide_descs, &group_slots, &uses_outer_fact)
 			ae := ctx.ir.exprs[accum_expr]
 			if ae.kind == .Var {
 				for fd, fi in sub_fact_descs {
@@ -234,10 +265,7 @@ _compile_subnetwork :: proc(
 				}
 			}
 			if acc_expr_fslot < 0 {
-				clear(&ctx.var_map)
-				for k, v in sub_vars {
-					ctx.var_map[k] = u8(v)
-				}
+				_fill_var_map(ctx, sub_vars) or_return
 				env := Vm_Compile_Env{
 					ir           = ctx.ir,
 					tables       = ctx.rb.tables,
@@ -254,11 +282,8 @@ _compile_subnetwork :: proc(
 		}
 
 		if accum_guard != INVALID_EXPR {
-			_collect_expr_outer_vars(ctx.ir, accum_guard, outer_vars, outer_fact_descs, &group_slots, &uses_outer_fact)
-			clear(&ctx.var_map)
-			for k, v in sub_vars {
-				ctx.var_map[k] = u8(v)
-			}
+			_collect_expr_outer_vars(ctx.ir, accum_guard, outer_vars, outer_fact_descs, outer_decide_descs, &group_slots, &uses_outer_fact)
+			_fill_var_map(ctx, sub_vars) or_return
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
@@ -319,17 +344,18 @@ build_compiled_rule :: proc(
 	for cl in rdef.when_clauses {
 		#partial switch cl.kind {
 		case .Pattern:
-			if pat_idx >= MAX_RULE_PATTERNS {
+			if pat_idx >= MAX_RULE_PATTERNS || len(fact_descs^) > int(max(u8)) {
 				return {}, .Too_Many_Patterns
 			}
 			fslot := u8(len(fact_descs^))
-			alpha_id, _, binds, joins, _, c_err := compile_pattern_clause(
+			alpha_id, _, binds, joins, res_progs, c_err := compile_pattern_clause(
 				ctx,
 				cl,
 				fslot,
 				bound_vars,
 				&next_var,
 				fact_descs,
+				decide_descs^[:],
 			)
 			if c_err != .None {
 				return {}, c_err
@@ -351,6 +377,13 @@ build_compiled_rule :: proc(
 				join_keys    = joins,
 				field_binds  = binds,
 			})
+			for rp in res_progs {
+				append(&ctx.beta_nodes, Beta_Node_Def{
+					id       = u32(len(ctx.beta_nodes)),
+					kind     = .Filter,
+					prog_idx = rp,
+				})
+			}
 			pat_idx += 1
 
 		case .Not, .Exists:
@@ -399,6 +432,9 @@ build_compiled_rule :: proc(
 			})
 
 		case .Decide:
+			if len(decide_descs^) > int(max(u8)) {
+				return {}, .Vm_Compile_Failed
+			}
 			dslot := u8(len(decide_descs^))
 			tidx, tok := ctx.rb.table_by_name[cl.target]
 			if !tok {
@@ -407,10 +443,7 @@ build_compiled_rule :: proc(
 			if first_decide_table == INVALID_TABLE_IDX {
 				first_decide_table = u16(tidx)
 			}
-			clear(&ctx.var_map)
-			for k, v in bound_vars^ {
-				ctx.var_map[k] = u8(v)
-			}
+			_fill_var_map(ctx, bound_vars^) or_return
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
@@ -434,10 +467,7 @@ build_compiled_rule :: proc(
 			})
 
 		case .Where:
-			clear(&ctx.var_map)
-			for k, v in bound_vars^ {
-				ctx.var_map[k] = u8(v)
-			}
+			_fill_var_map(ctx, bound_vars^) or_return
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
@@ -456,10 +486,7 @@ build_compiled_rule :: proc(
 			})
 
 		case .Let:
-			clear(&ctx.var_map)
-			for k, v in bound_vars^ {
-				ctx.var_map[k] = u8(v)
-			}
+			_fill_var_map(ctx, bound_vars^) or_return
 			env := Vm_Compile_Env{
 				ir           = ctx.ir,
 				tables       = ctx.rb.tables,
@@ -523,10 +550,7 @@ build_compiled_rule :: proc(
 	seg_ids[0] = seg_id
 
 	// Compile actions
-	clear(&ctx.var_map)
-	for k, v in bound_vars^ {
-		ctx.var_map[k] = u8(v)
-	}
+	_fill_var_map(ctx, bound_vars^) or_return
 	actions := make([]Compiled_Action, len(rdef.then_actions), ctx.alloc)
 	for act, ai in rdef.then_actions {
 		ca := Compiled_Action{
@@ -674,8 +698,11 @@ build_compiled_query :: proc(
 	for cl in qdef.when_clauses {
 		#partial switch cl.kind {
 		case .Pattern:
+			if len(fact_descs^) > int(max(u8)) {
+				return {}, .Too_Many_Patterns
+			}
 			fslot := u8(len(fact_descs^))
-			alpha_id, bidx, binds, joins, _, c_err := compile_pattern_clause(
+			alpha_id, bidx, binds, joins, res_progs, c_err := compile_pattern_clause(
 				ctx,
 				cl,
 				fslot,
@@ -694,11 +721,13 @@ build_compiled_query :: proc(
 				field_binds  = binds,
 				guard_prog   = -1,
 			})
-		case .Where:
-			clear(&ctx.var_map)
-			for k, v in bound_vars^ {
-				ctx.var_map[k] = u8(v)
+			for rp in res_progs {
+				append(&steps, Query_Step{
+					guard_prog = i32(rp),
+				})
 			}
+		case .Where:
+			_fill_var_map(ctx, bound_vars^) or_return
 			env := Vm_Compile_Env{
 				ir         = ctx.ir,
 				tables     = ctx.rb.tables,
@@ -719,7 +748,7 @@ build_compiled_query :: proc(
 	vnames := make([]String_Id, next_var, ctx.alloc)
 	for k, slot in bound_vars^ {
 		if int(slot) < len(vnames) {
-			kstr := ir_string(ctx.ir, k)
+			kstr := interner_get(&ctx.rb.interner, k)
 			if len(kstr) > 0 && kstr[0] == '?' {
 				vnames[slot] = k
 			} else if vnames[slot] == EMPTY_STRING {

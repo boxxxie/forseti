@@ -115,15 +115,17 @@ _vm_eval_cmp_values :: proc "contextless" (
 		}
 	}
 	if ia, a_ok := value_to_i64(a); a_ok {
-		if ib, b_ok := value_to_i64(b); b_ok {
-			#partial switch op {
-			case .Eq:  return ia == ib, .None
-			case .Neq: return ia != ib, .None
-			case .Lt:  return ia < ib, .None
-			case .Lte: return ia <= ib, .None
-			case .Gt:  return ia > ib, .None
-			case .Gte: return ia >= ib, .None
-			}
+		ib, b_ok := value_to_i64(b)
+		if !b_ok {
+			return false, .Type_Mismatch
+		}
+		#partial switch op {
+		case .Eq:  return ia == ib, .None
+		case .Neq: return ia != ib, .None
+		case .Lt:  return ia < ib, .None
+		case .Lte: return ia <= ib, .None
+		case .Gt:  return ia > ib, .None
+		case .Gte: return ia >= ib, .None
 		}
 	}
 	if ba, a_ok := a.(bool); a_ok {
@@ -162,10 +164,28 @@ _vm_eval_cmp_values :: proc "contextless" (
 		case:      return false, .Type_Mismatch
 		}
 	}
+	if eva, a_ok := a.(Enum_Val); a_ok {
+		evb, b_ok := b.(Enum_Val)
+		if !b_ok {
+			return false, .Type_Mismatch
+		}
+		#partial switch op {
+		case .Eq:  return eva == evb, .None
+		case .Neq: return eva != evb, .None
+		case:      return false, .Type_Mismatch
+		}
+	}
 	if sa, a_ok := a.(String_Id); a_ok {
 		sb, b_ok := b.(String_Id)
 		if !b_ok {
 			return false, .Type_Mismatch
+		}
+		if sa == String_Id(INVALID_ID) || sb == String_Id(INVALID_ID) {
+			#partial switch op {
+			case .Eq:  return false, .None
+			case .Neq: return true, .None
+			case:      return false, .Type_Mismatch
+			}
 		}
 		if sa == sb && (op == .Eq || op == .Neq) {
 			return op == .Eq, .None
@@ -181,7 +201,14 @@ _vm_eval_cmp_values :: proc "contextless" (
 		case .Gte: return ta >= tb, .None
 		}
 	}
-	return a == b if op == .Eq else a != b, .None
+	if a == nil && b == nil {
+		#partial switch op {
+		case .Eq:  return true, .None
+		case .Neq: return false, .None
+		case:      return false, .Type_Mismatch
+		}
+	}
+	return false, .Type_Mismatch
 }
 
 @(private)
@@ -255,13 +282,17 @@ _vm_helper_load_field :: proc "contextless" (vm: ^Vm_State, dst: u8, ref_idx: u1
 	}
 	if sid, is_s := raw_val.(String_Id); is_s {
 		txt := interner_get(&tmp_int, sid)
+		if len(txt) == 0 {
+			vm.regs[dst] = EMPTY_STRING
+			return
+		}
 		if vm.interner != nil {
 			if rb_sid, has := vm.interner.lookup[txt]; has {
 				vm.regs[dst] = rb_sid
 				return
 			}
 		}
-		vm.regs[dst] = EMPTY_STRING
+		vm.regs[dst] = String_Id(INVALID_ID)
 	} else {
 		vm.regs[dst] = raw_val
 	}
@@ -304,9 +335,12 @@ _vm_helper_decide_call :: proc "contextless" (vm: ^Vm_State, dst: u8, desc_idx: 
 		if res.output_set[oi] {
 			if sid, is_s := res.outputs[oi].(String_Id); is_s {
 				txt := interner_get(&ct.interner, sid)
-				if mapped, m_err := intern_session_string(vm.interner, vm.sess_interner, txt); m_err == nil {
-					res.outputs[oi] = mapped
+				mapped, m_err := intern_session_string(vm.interner, vm.sess_interner, txt)
+				if m_err != nil {
+					vm.err = .Missing_Field
+					return
 				}
+				res.outputs[oi] = mapped
 			}
 		}
 	}
@@ -327,9 +361,11 @@ _op_halt :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
 _op_load_const :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
 	ins := pc[0]
 	idx := (u16(ins.lhs) << 8) | u16(ins.rhs)
-	if int(idx) < len(vm.consts) {
-		vm.regs[ins.dst] = vm.consts[idx]
+	if int(idx) >= len(vm.consts) {
+		vm.err = .Missing_Field
+		return
 	}
+	vm.regs[ins.dst] = vm.consts[idx]
 	vm.steps_left -= 1
 	if vm.steps_left <= 0 {
 		vm.err = .Step_Limit_Exceeded
@@ -346,9 +382,11 @@ _op_load_const :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
 @(private)
 _op_load_var :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
 	ins := pc[0]
-	if int(ins.lhs) < len(vm.vars) {
-		vm.regs[ins.dst] = vm.vars[ins.lhs]
+	if int(ins.lhs) >= len(vm.vars) {
+		vm.err = .Missing_Field
+		return
 	}
+	vm.regs[ins.dst] = vm.vars[ins.lhs]
 	vm.steps_left -= 1
 	if vm.steps_left <= 0 {
 		vm.err = .Step_Limit_Exceeded

@@ -167,20 +167,23 @@ vm_program_destroy :: proc(p: ^Bytecode_Program) {
 }
 
 @(private)
-vmc_add_const :: proc(c: ^Vm_Compiler, v: Value) -> u16 {
+vmc_add_const :: proc(c: ^Vm_Compiler, v: Value) -> (u16, Vm_Error) {
 	for existing, i in c.consts {
 		if existing == v {
-			return u16(i)
+			return u16(i), .None
 		}
+	}
+	if len(c.consts) > int(max(u16)) {
+		return 0, .Unsupported_Expr
 	}
 	idx := u16(len(c.consts))
 	append(&c.consts, v)
-	return idx
+	return idx, .None
 }
 
 @(private)
 vmc_emit_load_const :: proc(c: ^Vm_Compiler, dst: u8, v: Value) -> Vm_Error {
-	idx := vmc_add_const(c, v)
+	idx := vmc_add_const(c, v) or_return
 	append(&c.code, Instruction{
 		op  = .Load_Const,
 		dst = dst,
@@ -257,6 +260,9 @@ vmc_compile_field_access :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err
 				if !col_ok {
 					return 0, .Missing_Field
 				}
+				if di > int(max(u8)) || col_idx > int(max(u8)) {
+					return 0, .Unsupported_Expr
+				}
 				r, r_ok := reg_alloc(&c.ra)
 				if !r_ok {
 					return 0, .Register_Overflow
@@ -275,12 +281,18 @@ vmc_compile_field_access :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err
 	// Check bound pattern fact slots (e.g. `?raw.employees` or `?raw.address.country`).
 	for fd, fi in c.env.fact_descs {
 		if fd.var_name == base_expr.str_id {
+			if len(c.field_refs) > int(max(u16)) || fi > int(max(u8)) {
+				return 0, .Unsupported_Expr
+			}
 			field_idx := i16(-1)
 			exp_type := Type_Kind.Unknown
 			if len(segs) == 1 && u32(fd.schema_id) != INVALID_ID && int(fd.schema_id) < len(c.env.ir.schemas) {
 				schema := c.env.ir.schemas[fd.schema_id]
 				for f, sfi in schema.fields {
 					if f.name == segs[0] {
+						if sfi > int(max(i16)) {
+							return 0, .Unsupported_Expr
+						}
 						field_idx = i16(sfi)
 						exp_type = f.type.kind
 						break
@@ -345,7 +357,10 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 		if !ok {
 			return 0, .Register_Overflow
 		}
-		vmc_emit_load_const(c, r, e.bool_val)
+		if cerr := vmc_emit_load_const(c, r, e.bool_val); cerr != .None {
+			reg_free(&c.ra, r)
+			return 0, cerr
+		}
 		return r, .None
 
 	case .Lit_Int:
@@ -353,7 +368,10 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 		if !ok {
 			return 0, .Register_Overflow
 		}
-		vmc_emit_load_const(c, r, e.int_val)
+		if cerr := vmc_emit_load_const(c, r, e.int_val); cerr != .None {
+			reg_free(&c.ra, r)
+			return 0, cerr
+		}
 		return r, .None
 
 	case .Lit_Float:
@@ -361,7 +379,10 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 		if !ok {
 			return 0, .Register_Overflow
 		}
-		vmc_emit_load_const(c, r, e.float_val)
+		if cerr := vmc_emit_load_const(c, r, e.float_val); cerr != .None {
+			reg_free(&c.ra, r)
+			return 0, cerr
+		}
 		return r, .None
 
 	case .Lit_String:
@@ -369,7 +390,10 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 		if !ok {
 			return 0, .Register_Overflow
 		}
-		vmc_emit_load_const(c, r, e.str_id)
+		if cerr := vmc_emit_load_const(c, r, e.str_id); cerr != .None {
+			reg_free(&c.ra, r)
+			return 0, cerr
+		}
 		return r, .None
 
 	case .Var:
@@ -423,6 +447,10 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 			reg_free(&c.ra, rhs_r)
 
 			skip := len(c.code) - (jmp_idx + 1)
+			if skip > int(max(u16)) {
+				reg_free(&c.ra, res_r)
+				return 0, .Unsupported_Expr
+			}
 			c.code[jmp_idx].lhs = u8(skip >> 8)
 			c.code[jmp_idx].rhs = u8(skip & 0xff)
 			return res_r, .None
@@ -474,7 +502,10 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 			if !ok {
 				return 0, .Register_Overflow
 			}
-			vmc_emit_load_const(c, r, false)
+			if cerr := vmc_emit_load_const(c, r, false); cerr != .None {
+				reg_free(&c.ra, r)
+				return 0, cerr
+			}
 			return r, .None
 		}
 		// Compare e.lhs against each extra expression with short-circuit OR.
@@ -484,7 +515,11 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 			reg_free(&c.ra, lhs_r)
 			return 0, .Register_Overflow
 		}
-		vmc_emit_load_const(c, res_r, false)
+		if cerr := vmc_emit_load_const(c, res_r, false); cerr != .None {
+			reg_free(&c.ra, lhs_r)
+			reg_free(&c.ra, res_r)
+			return 0, cerr
+		}
 		end_start := len(c.tmp_end_jmps)
 
 		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
@@ -502,6 +537,12 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 		}
 		for ji in c.tmp_end_jmps[end_start:] {
 			skip := len(c.code) - (ji + 1)
+			if skip > int(max(u16)) {
+				resize(&c.tmp_end_jmps, end_start)
+				reg_free(&c.ra, lhs_r)
+				reg_free(&c.ra, res_r)
+				return 0, .Unsupported_Expr
+			}
 			c.code[ji].lhs = u8(skip >> 8)
 			c.code[ji].rhs = u8(skip & 0xff)
 		}
@@ -593,6 +634,239 @@ vm_compile_expr_reusable :: proc(
 	return _finalize_vm_program(c, alloc), .None
 }
 
+@(private)
+_expr_is_field_matcher :: proc(ir: ^Rulebase_IR, eid: Expr_Id) -> bool {
+	if eid == INVALID_EXPR || int(eid) >= len(ir.exprs) {
+		return false
+	}
+	e := ir.exprs[eid]
+	#partial switch e.kind {
+	case .Cell_Cmp, .Range, .In_List:
+		return true
+	case .Binary:
+		if e.binary_op == .And || e.binary_op == .Or {
+			return _expr_is_field_matcher(ir, e.lhs) || _expr_is_field_matcher(ir, e.rhs)
+		}
+	}
+	return false
+}
+
+@(private)
+_vmc_compile_field_match :: proc(
+	c: ^Vm_Compiler,
+	field_reg: u8,
+	field_type: Type_Kind,
+	eid: Expr_Id,
+) -> (res_reg: u8, err: Vm_Error) {
+	if eid == INVALID_EXPR || int(eid) >= len(c.env.ir.exprs) {
+		return 0, .Unsupported_Expr
+	}
+	e := c.env.ir.exprs[eid]
+	#partial switch e.kind {
+	case .Wildcard:
+		r, rok := reg_alloc(&c.ra)
+		if !rok {
+			return 0, .Register_Overflow
+		}
+		if cerr := vmc_emit_load_const(c, r, true); cerr != .None {
+			reg_free(&c.ra, r)
+			return 0, cerr
+		}
+		return r, .None
+
+	case .Cell_Cmp:
+		op: Opcode
+		#partial switch e.binary_op {
+		case .Eq:  op = .Eq
+		case .Neq: op = .Neq
+		case .Lt:  op = .Lt
+		case .Lte: op = .Lte
+		case .Gt:  op = .Gt
+		case .Gte: op = .Gte
+		case:
+			return 0, .Unsupported_Expr
+		}
+		rhs_r := vmc_compile_expr(c, e.rhs) or_return
+		dst, ok := reg_alloc(&c.ra)
+		if !ok {
+			reg_free(&c.ra, rhs_r)
+			return 0, .Register_Overflow
+		}
+		append(&c.code, Instruction{op = op, dst = dst, lhs = field_reg, rhs = rhs_r})
+		reg_free(&c.ra, rhs_r)
+		return dst, .None
+
+	case .Range:
+		lo_r := vmc_compile_expr(c, e.lhs) or_return
+		res_r, rok := reg_alloc(&c.ra)
+		if !rok {
+			reg_free(&c.ra, lo_r)
+			return 0, .Register_Overflow
+		}
+		append(&c.code, Instruction{op = .Gte, dst = res_r, lhs = field_reg, rhs = lo_r})
+		reg_free(&c.ra, lo_r)
+
+		jmp_idx := len(c.code)
+		append(&c.code, Instruction{op = .Jmp_If_False, dst = res_r, lhs = 0, rhs = 0})
+
+		hi_r, hi_err := vmc_compile_expr(c, e.rhs)
+		if hi_err != .None {
+			reg_free(&c.ra, res_r)
+			return 0, hi_err
+		}
+		hi_op := Opcode.Lte if e.inclusive else Opcode.Lt
+		append(&c.code, Instruction{op = hi_op, dst = res_r, lhs = field_reg, rhs = hi_r})
+		reg_free(&c.ra, hi_r)
+
+		skip := len(c.code) - (jmp_idx + 1)
+		if skip > int(max(u16)) {
+			reg_free(&c.ra, res_r)
+			return 0, .Unsupported_Expr
+		}
+		c.code[jmp_idx].lhs = u8(skip >> 8)
+		c.code[jmp_idx].rhs = u8(skip & 0xff)
+		return res_r, .None
+
+	case .In_List:
+		if e.extra_span.count == 0 {
+			r, rok := reg_alloc(&c.ra)
+			if !rok {
+				return 0, .Register_Overflow
+			}
+			if cerr := vmc_emit_load_const(c, r, false); cerr != .None {
+				reg_free(&c.ra, r)
+				return 0, cerr
+			}
+			return r, .None
+		}
+		res_r, rok := reg_alloc(&c.ra)
+		if !rok {
+			return 0, .Register_Overflow
+		}
+		if cerr := vmc_emit_load_const(c, res_r, false); cerr != .None {
+			reg_free(&c.ra, res_r)
+			return 0, cerr
+		}
+		end_start := len(c.tmp_end_jmps)
+		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
+			cand_res, cerr := _vmc_compile_field_match(c, field_reg, field_type, c.env.ir.extra_exprs[i])
+			if cerr != .None {
+				resize(&c.tmp_end_jmps, end_start)
+				reg_free(&c.ra, res_r)
+				return 0, cerr
+			}
+			append(&c.code, Instruction{op = .Move, dst = res_r, lhs = cand_res})
+			reg_free(&c.ra, cand_res)
+			append(&c.tmp_end_jmps, len(c.code))
+			append(&c.code, Instruction{op = .Jmp_If_True, dst = res_r, lhs = 0, rhs = 0})
+		}
+		for ji in c.tmp_end_jmps[end_start:] {
+			skip := len(c.code) - (ji + 1)
+			if skip > int(max(u16)) {
+				resize(&c.tmp_end_jmps, end_start)
+				reg_free(&c.ra, res_r)
+				return 0, .Unsupported_Expr
+			}
+			c.code[ji].lhs = u8(skip >> 8)
+			c.code[ji].rhs = u8(skip & 0xff)
+		}
+		resize(&c.tmp_end_jmps, end_start)
+		return res_r, .None
+
+	case .Binary:
+		if (e.binary_op == .And || e.binary_op == .Or) && (field_type != .Bool || _expr_is_field_matcher(c.env.ir, eid)) {
+			res_r := _vmc_compile_field_match(c, field_reg, field_type, e.lhs) or_return
+			jmp_idx := len(c.code)
+			jmp_op := Opcode.Jmp_If_False if e.binary_op == .And else Opcode.Jmp_If_True
+			append(&c.code, Instruction{op = jmp_op, dst = res_r, lhs = 0, rhs = 0})
+
+			rhs_r, r_err := _vmc_compile_field_match(c, field_reg, field_type, e.rhs)
+			if r_err != .None {
+				reg_free(&c.ra, res_r)
+				return 0, r_err
+			}
+			append(&c.code, Instruction{op = .Move, dst = res_r, lhs = rhs_r})
+			reg_free(&c.ra, rhs_r)
+
+			skip := len(c.code) - (jmp_idx + 1)
+			if skip > int(max(u16)) {
+				reg_free(&c.ra, res_r)
+				return 0, .Unsupported_Expr
+			}
+			c.code[jmp_idx].lhs = u8(skip >> 8)
+			c.code[jmp_idx].rhs = u8(skip & 0xff)
+			return res_r, .None
+		}
+	}
+
+	rhs_r := vmc_compile_expr(c, eid) or_return
+	dst, ok := reg_alloc(&c.ra)
+	if !ok {
+		reg_free(&c.ra, rhs_r)
+		return 0, .Register_Overflow
+	}
+	append(&c.code, Instruction{op = .Eq, dst = dst, lhs = field_reg, rhs = rhs_r})
+	reg_free(&c.ra, rhs_r)
+	return dst, .None
+}
+
+// Compiles a residual pattern field constraint against `fact_slot`.`field_name` into scratch bytecode.
+@(private)
+vm_compile_field_residual_to_scratch :: proc(
+	c: ^Vm_Compiler,
+	env: ^Vm_Compile_Env,
+	fact_slot: u8,
+	field_idx: i16,
+	field_name: String_Id,
+	field_type: Type_Kind,
+	eid: Expr_Id,
+) -> (err: Vm_Error) {
+	if c == nil || env == nil || env.ir == nil {
+		return .Unsupported_Expr
+	}
+	sub_alloc := c.scratch_alloc if c.scratch_alloc.procedure != nil else context.temp_allocator
+	_vm_compiler_reset_for_compile(c, env, sub_alloc)
+	defer if err != .None {
+		_vm_compiler_free_scratch_subs(c)
+	}
+
+	if len(c.field_refs) > int(max(u16)) {
+		return .Unsupported_Expr
+	}
+	fname_str := ir_string(env.ir, field_name)
+	str_segs := make([]string, 1, sub_alloc)
+	str_segs[0] = fname_str
+	seg_hashes := make([]Prehashed_Key, 1, sub_alloc)
+	seg_hashes[0] = prehashed_key_make(fname_str)
+	ref_idx := u16(len(c.field_refs))
+	append(&c.field_refs, Field_Access_Desc{
+		fact_slot     = fact_slot,
+		field_idx     = field_idx,
+		segments      = str_segs,
+		seg_hashes    = seg_hashes,
+		expected_type = field_type,
+	})
+	field_reg, rok := reg_alloc(&c.ra)
+	if !rok {
+		return .Register_Overflow
+	}
+	append(&c.code, Instruction{
+		op  = .Load_Field,
+		dst = field_reg,
+		lhs = u8(ref_idx >> 8),
+		rhs = u8(ref_idx & 0xff),
+	})
+
+	res_reg, cerr := _vmc_compile_field_match(c, field_reg, field_type, eid)
+	reg_free(&c.ra, field_reg)
+	if cerr != .None {
+		return cerr
+	}
+	append(&c.code, Instruction{op = .Halt, dst = res_reg, lhs = 0, rhs = 0})
+	reg_free(&c.ra, res_reg)
+	return .None
+}
+
 // Compiles a single Expr_IR into a standalone register-recycled Bytecode_Program ending with .Halt.
 vm_compile_expr :: proc(
 	env: ^Vm_Compile_Env,
@@ -634,9 +908,12 @@ vm_compile_decide_to_scratch :: proc(
 	arg_specs := make([]Decide_Arg_Spec, len(args), sub_alloc)
 	for fb, i in args {
 		col_idx, cok := find_table_col_idx(tbl.inputs, fb.name)
-		if !cok {
+		if !cok || col_idx > int(max(u8)) {
+			for j := 0; j < i; j += 1 {
+				reg_free(&c.ra, arg_specs[j].reg)
+			}
 			delete(arg_specs, sub_alloc)
-			return .Missing_Field
+			return .Missing_Field if !cok else .Unsupported_Expr
 		}
 		r, r_err := vmc_compile_expr(c, fb.expr)
 		if r_err != .None {
@@ -652,6 +929,13 @@ vm_compile_decide_to_scratch :: proc(
 		}
 	}
 
+	if len(c.decide_calls) > int(max(u8)) {
+		for spec in arg_specs {
+			reg_free(&c.ra, spec.reg)
+		}
+		delete(arg_specs, sub_alloc)
+		return .Unsupported_Expr
+	}
 	desc_idx := u8(len(c.decide_calls))
 	append(&c.decide_calls, Decide_Call_Desc{
 		table_idx   = tidx,
