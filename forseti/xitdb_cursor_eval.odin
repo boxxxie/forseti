@@ -74,6 +74,9 @@ decode_slot_to_value :: proc(
 	case .Int:
 		#partial switch expected_type {
 		case .I32:
+			if slot.value < i64(min(i32)) || slot.value > i64(max(i32)) {
+				return nil, false, .Unsupported_Value_Type
+			}
 			return i32(slot.value), true, nil
 		case .Time:
 			return Time_Ns(slot.value), true, nil
@@ -87,10 +90,19 @@ decode_slot_to_value :: proc(
 		case .Entity:
 			return Entity_Id(u), true, nil
 		case .Time:
-			return Time_Ns(slot.value), true, nil
+			if u > u64(max(i64)) {
+				return nil, false, .Unsupported_Value_Type
+			}
+			return Time_Ns(i64(u)), true, nil
 		case .I32:
-			return i32(slot.value), true, nil
+			if u > u64(max(i32)) {
+				return nil, false, .Unsupported_Value_Type
+			}
+			return i32(u), true, nil
 		case:
+			if u > u64(max(i64)) {
+				return nil, false, .Unsupported_Value_Type
+			}
 			return i64(u), true, nil
 		}
 

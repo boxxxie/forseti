@@ -69,8 +69,8 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			moment_wc: ^xitdb.Write_Cursor,
 			col_maps: ^map[u16]xitdb.Write_Hash_Map,
 			bi: u16,
-		) -> (xitdb.Write_Hash_Map, xitdb.Error) {
-			if existing, has := col_maps^[bi]; has {
+		) -> (^xitdb.Write_Hash_Map, xitdb.Error) {
+			if existing, has := &col_maps^[bi]; has {
 				return existing, nil
 			}
 			path_keys := s.rb.binding_path_hashes[bi]
@@ -82,7 +82,8 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 				return {}, .Write_Failed
 			}
 			col_maps^[bi] = cm
-			return cm, nil
+			stored, _ := &col_maps^[bi]
+			return stored, nil
 		}
 
 		for lk in s.retracted_derived_keys {
@@ -90,9 +91,12 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			if has_cur && s.facts[cur_fid].alive {
 				continue
 			}
+			if int(lk.binding_idx) >= len(s.rb.binding_path_hashes) || len(s.rb.binding_path_hashes[lk.binding_idx]) == 0 {
+				continue
+			}
 			cm := get_derived_col(s, moment_wc, &col_maps, lk.binding_idx) or_return
 			kstr := session_string(s, lk.key)
-			_, _ = xitdb.hash_map_remove(&cm, kstr)
+			_, _ = xitdb.hash_map_remove(cm, kstr)
 		}
 
 		for fid in s.dirty_derived_fids {
@@ -108,10 +112,13 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			if bdef.kind != .Derived {
 				continue
 			}
+			if int(bi) >= len(s.rb.binding_path_hashes) || len(s.rb.binding_path_hashes[bi]) == 0 {
+				continue
+			}
 			cm := get_derived_col(s, moment_wc, &col_maps, bi) or_return
 			schema := s.rb.schemas[bdef.schema_id]
 			fhashes := s.rb.schema_field_hashes[bdef.schema_id]
-			_write_derived_fact_record(s, &cm, f, schema, fhashes) or_return
+			_write_derived_fact_record(s, cm, f, schema, fhashes) or_return
 		}
 	} else {
 		for bdef, bi in s.rb.bindings {
@@ -339,7 +346,7 @@ session_commit_derived_and_audit :: proc(s: ^Session, bridge: ^Store_Bridge) -> 
 					continue
 				}
 				f := &s.facts[fid]
-				if !f.alive || int(f.binding_idx) >= len(s.rb.bindings) || s.rb.bindings[f.binding_idx].kind != .Derived {
+				if !f.alive || int(f.binding_idx) >= len(s.rb.bindings) || s.rb.bindings[f.binding_idx].kind != .Derived || int(f.binding_idx) >= len(s.rb.binding_path_hashes) || len(s.rb.binding_path_hashes[f.binding_idx]) == 0 {
 					continue
 				}
 				s.committed_derived[Fact_Lookup_Key{binding_idx = f.binding_idx, key = f.key}] = true
@@ -347,10 +354,7 @@ session_commit_derived_and_audit :: proc(s: ^Session, bridge: ^Store_Bridge) -> 
 		} else {
 			clear(&s.committed_derived)
 			for &f in s.facts {
-				if !f.alive || int(f.binding_idx) >= len(s.rb.bindings) || s.rb.bindings[f.binding_idx].kind != .Derived {
-					continue
-				}
-				if len(s.rb.binding_path_hashes[f.binding_idx]) == 0 {
+				if !f.alive || int(f.binding_idx) >= len(s.rb.bindings) || s.rb.bindings[f.binding_idx].kind != .Derived || int(f.binding_idx) >= len(s.rb.binding_path_hashes) || len(s.rb.binding_path_hashes[f.binding_idx]) == 0 {
 					continue
 				}
 				s.committed_derived[Fact_Lookup_Key{binding_idx = f.binding_idx, key = f.key}] = true

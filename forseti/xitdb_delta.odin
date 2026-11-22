@@ -344,16 +344,37 @@ _emit_delta :: proc(
 }
 
 @(private)
+_Pending_Key_Op :: struct {
+	wc:     ^Watched_Collection,
+	key:    string,
+	fp:     u64,
+	delete: bool,
+}
+
+@(private)
+_Pending_Wc_State :: struct {
+	wc:                   ^Watched_Collection,
+	set_has_prev:         bool,
+	has_prev:             bool,
+	set_prev_slot:        bool,
+	prev_collection_slot: xitdb.Slot,
+}
+
+@(private)
 _sync_full_scan :: proc(
-	s: ^Delta_Syncer,
 	wc: ^Watched_Collection,
 	col_cur: xitdb.Read_Cursor,
 	has_col: bool,
 	is_resync: bool,
 	out: ^Sync_Result,
+	pending_ops: ^[dynamic]_Pending_Key_Op,
 	scratch: mem.Allocator,
 ) -> Store_Error {
-	seen := make(map[string]struct{}, 16, scratch)
+	need_seen := is_resync && len(wc.logical_keys) > 0
+	seen: map[string]struct{}
+	if need_seen {
+		seen = make(map[string]struct{}, max(len(wc.logical_keys) * 2, 16), scratch)
+	}
 	if has_col {
 		sp, sp_err := xitdb.cursor_resolved(col_cur)
 		if sp_err != nil {
@@ -383,38 +404,64 @@ _sync_full_scan :: proc(
 				k_str := string(kbytes)
 				fp := _cursor_content_fingerprint(vc, scratch) or_return
 
-				k_scratch, ks_err := strings.clone(k_str, scratch)
-				if ks_err != nil {
-					return ks_err
+				k_scratch: string
+				if need_seen {
+					ks, ks_err := strings.clone(k_str, scratch)
+					if ks_err != nil {
+						return ks_err
+					}
+					k_scratch = ks
+					seen[k_scratch] = {}
 				}
-				seen[k_scratch] = {}
 
 				if is_resync {
 					if old_fp, existed := wc.logical_keys[k_str]; existed {
 						if old_fp != fp {
-							_update_logical_key_fp(s, wc, k_str, fp) or_return
+							if k_scratch == "" && len(k_str) > 0 {
+								ks, ks_err := strings.clone(k_str, scratch)
+								if ks_err != nil {
+									return ks_err
+								}
+								k_scratch = ks
+							}
+							if _, a_err := append(pending_ops, _Pending_Key_Op{wc = wc, key = k_scratch, fp = fp}); a_err != nil {
+								return a_err
+							}
 							_emit_delta(out, wc.path, k_str, .Changed_Old, {}, vc) or_return
 							_emit_delta(out, wc.path, k_str, .Changed_New, {}, vc) or_return
 						}
 						continue
 					}
 				}
-				_update_logical_key_fp(s, wc, k_str, fp) or_return
+				if k_scratch == "" && len(k_str) > 0 {
+					ks, ks_err := strings.clone(k_str, scratch)
+					if ks_err != nil {
+						return ks_err
+					}
+					k_scratch = ks
+				}
+				if _, a_err := append(pending_ops, _Pending_Key_Op{wc = wc, key = k_scratch, fp = fp}); a_err != nil {
+					return a_err
+				}
 				_emit_delta(out, wc.path, k_str, .Added, {}, vc) or_return
 			}
 		}
 	}
 
 	if is_resync && len(wc.logical_keys) > 0 {
-		removed := make([dynamic]string, 0, 8, scratch)
+		removed := make([dynamic]string, 0, len(wc.logical_keys), scratch)
 		for k in wc.logical_keys {
 			if !(k in seen) {
-				append(&removed, k)
+				if _, a_err := append(&removed, k); a_err != nil {
+					return a_err
+				}
 			}
 		}
 		for rk in removed {
 			_emit_delta(out, wc.path, rk, .Removed, {}, {}) or_return
-			_delete_logical_key(s, wc, rk)
+			if _, a_err := append(pending_ops, _Pending_Key_Op{wc = wc, key = rk, delete = true}); a_err != nil {
+				return a_err
+			}
 		}
 	}
 	return nil
@@ -484,6 +531,9 @@ delta_syncer_sync :: proc(
 	}
 	out.was_compacted = compacted
 
+	pending_ops := make([dynamic]_Pending_Key_Op, 0, max(len(s.watched) * 16, 16), scratch)
+	pending_wc := make([dynamic]_Pending_Wc_State, 0, len(s.watched), scratch)
+
 	for &wc in s.watched {
 		cur_col_cur, cur_ok, cc_err := store_resolve_path_prehashed(cur_m_cur, wc.path_keys)
 		if cc_err != nil {
@@ -499,9 +549,16 @@ delta_syncer_sync :: proc(
 		}
 
 		if !s.has_synced || !wc.has_prev || compacted {
-			_sync_full_scan(s, &wc, cur_col_cur, cur_ok, s.has_synced && wc.has_prev, out, scratch) or_return
-			wc.has_prev = true
-			wc.prev_collection_slot = cur_col_slot
+			_sync_full_scan(&wc, cur_col_cur, cur_ok, s.has_synced && wc.has_prev, out, &pending_ops, scratch) or_return
+			if _, a_err := append(&pending_wc, _Pending_Wc_State{
+				wc                   = &wc,
+				set_has_prev         = true,
+				has_prev             = true,
+				set_prev_slot        = true,
+				prev_collection_slot = cur_col_slot,
+			}); a_err != nil {
+				return a_err
+			}
 			continue
 		}
 
@@ -516,17 +573,35 @@ delta_syncer_sync :: proc(
 		}
 		if !prev_ok && !cur_ok {
 			out.slots_skipped += 1
-			wc.prev_collection_slot = {}
+			if _, a_err := append(&pending_wc, _Pending_Wc_State{
+				wc                   = &wc,
+				set_prev_slot        = true,
+				prev_collection_slot = {},
+			}); a_err != nil {
+				return a_err
+			}
 			continue
 		}
 		if !prev_ok && cur_ok {
-			_sync_full_scan(s, &wc, cur_col_cur, true, false, out, scratch) or_return
-			wc.prev_collection_slot = cur_col_slot
+			_sync_full_scan(&wc, cur_col_cur, true, false, out, &pending_ops, scratch) or_return
+			if _, a_err := append(&pending_wc, _Pending_Wc_State{
+				wc                   = &wc,
+				set_prev_slot        = true,
+				prev_collection_slot = cur_col_slot,
+			}); a_err != nil {
+				return a_err
+			}
 			continue
 		}
 		if prev_ok && !cur_ok {
-			_sync_full_scan(s, &wc, {}, false, true, out, scratch) or_return
-			wc.prev_collection_slot = {}
+			_sync_full_scan(&wc, {}, false, true, out, &pending_ops, scratch) or_return
+			if _, a_err := append(&pending_wc, _Pending_Wc_State{
+				wc                   = &wc,
+				set_prev_slot        = true,
+				prev_collection_slot = {},
+			}); a_err != nil {
+				return a_err
+			}
 			continue
 		}
 
@@ -544,19 +619,47 @@ delta_syncer_sync :: proc(
 			switch ch.op {
 			case .Added:
 				fp := _cursor_content_fingerprint(ch.new_value, scratch) or_return
-				_update_logical_key_fp(s, &wc, k_str, fp) or_return
+				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, fp = fp}); a_err != nil {
+					return a_err
+				}
 				_emit_delta(out, wc.path, k_str, .Added, {}, ch.new_value) or_return
 			case .Removed:
-				_delete_logical_key(s, &wc, k_str)
+				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, delete = true}); a_err != nil {
+					return a_err
+				}
 				_emit_delta(out, wc.path, k_str, .Removed, ch.old_value, {}) or_return
 			case .Changed:
 				fp := _cursor_content_fingerprint(ch.new_value, scratch) or_return
-				_update_logical_key_fp(s, &wc, k_str, fp) or_return
+				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, fp = fp}); a_err != nil {
+					return a_err
+				}
 				_emit_delta(out, wc.path, k_str, .Changed_Old, ch.old_value, ch.new_value) or_return
 				_emit_delta(out, wc.path, k_str, .Changed_New, ch.old_value, ch.new_value) or_return
 			}
 		}
-		wc.prev_collection_slot = cur_col_slot
+		if _, a_err := append(&pending_wc, _Pending_Wc_State{
+			wc                   = &wc,
+			set_prev_slot        = true,
+			prev_collection_slot = cur_col_slot,
+		}); a_err != nil {
+			return a_err
+		}
+	}
+
+	for op in pending_ops {
+		if op.delete {
+			_delete_logical_key(s, op.wc, op.key)
+		} else {
+			_update_logical_key_fp(s, op.wc, op.key, op.fp) or_return
+		}
+	}
+	for pwc in pending_wc {
+		if pwc.set_has_prev {
+			pwc.wc.has_prev = pwc.has_prev
+		}
+		if pwc.set_prev_slot {
+			pwc.wc.prev_collection_slot = pwc.prev_collection_slot
+		}
 	}
 
 	s.has_synced = true

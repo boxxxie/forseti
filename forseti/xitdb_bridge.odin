@@ -462,12 +462,14 @@ store_lookup_record_prehashed :: proc(
 		res, ok := mc.?
 		return res, ok, nil
 	case .Sorted_Set:
-		ss := xitdb.Read_Sorted_Set{cursor = col_cur}
-		contains, c_err := xitdb.sorted_set_contains(ss, pk.key)
+		res, c_err := xitdb.cursor_read_path(col_cur, []xitdb.Path_Part{
+			xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Key{key = transmute([]u8)pk.key}},
+		})
 		if c_err != nil {
 			return {}, false, xitdb_to_store_err(c_err)
 		}
-		return col_cur, contains, nil
+		entry_cur, entry_found := res.?
+		return entry_cur, entry_found, nil
 	case:
 		return {}, false, .Not_A_Collection
 	}
@@ -510,12 +512,14 @@ store_lookup_record :: proc(
 		res, ok := mc.?
 		return res, ok, nil
 	case .Sorted_Set:
-		ss := xitdb.Read_Sorted_Set{cursor = col_cur}
-		contains, c_err := xitdb.sorted_set_contains(ss, key)
+		res, c_err := xitdb.cursor_read_path(col_cur, []xitdb.Path_Part{
+			xitdb.Sorted_Map_Get{target = xitdb.Sorted_Map_Get_Key{key = transmute([]u8)key}},
+		})
 		if c_err != nil {
 			return {}, false, xitdb_to_store_err(c_err)
 		}
-		return col_cur, contains, nil
+		entry_cur, entry_found := res.?
+		return entry_cur, entry_found, nil
 	case:
 		return {}, false, .Not_A_Collection
 	}
@@ -644,14 +648,17 @@ store_sorted_prefix_scan :: proc(
 		}
 
 		key_bytes: []u8
+		heap_key: []u8
+		defer delete(heap_key)
 		kb, k_err := xitdb.cursor_read_bytes_buf(kc, stack_buf[:])
 		if k_err == nil {
 			key_bytes = kb.value
 		} else if k_err == .Stream_Too_Long {
-			raw, r_err := xitdb.cursor_read_bytes(kc, 0, context.temp_allocator)
+			raw, r_err := xitdb.cursor_read_bytes(kc, 0, context.allocator)
 			if r_err != nil {
 				return xitdb_to_store_err(r_err)
 			}
+			heap_key = raw
 			key_bytes = raw
 		} else {
 			return xitdb_to_store_err(k_err)
