@@ -629,6 +629,27 @@ _binding_dot_path :: proc(rb: ^Rulebase, bdef: Binding_Def, buf: []u8) -> string
 	return string(buf[:n])
 }
 
+// Formats the dot-separated collection path (e.g. ".orgs.raw") for `binding_idx` into `buf`.
+rulebase_binding_dot_path :: proc(rb: ^Rulebase, binding_idx: u16, buf: []u8) -> string {
+	if rb == nil || int(binding_idx) >= len(rb.bindings) {
+		return ""
+	}
+	return _binding_dot_path(rb, rb.bindings[binding_idx], buf)
+}
+
+// Resolves a binding index by name on a compiled Rulebase.
+rulebase_find_binding :: proc(rb: ^Rulebase, name: string) -> (u16, bool) {
+	if rb == nil {
+		return 0, false
+	}
+	sid, ok := rb.interner.lookup[name]
+	if !ok {
+		return 0, false
+	}
+	bidx, has := rb.binding_by_name[sid]
+	return bidx, has
+}
+
 // Syncs incremental Z-set deltas from `bridge` into `s`, fires PHREAK + Agenda,
 // and optionally commits derived facts and Audit_Full provenance back to `bridge` in an atomic xitdb moment.
 session_sync_and_fire :: proc(

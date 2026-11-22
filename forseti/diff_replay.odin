@@ -2,6 +2,7 @@ package forseti
 
 import "core:fmt"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 
 Diff_Fact_Change :: struct {
@@ -206,4 +207,116 @@ diff_replay :: proc(
 	}
 
 	return session_diff_replay(base_sess, parent_bridge, candidate_rb, watched_paths, allocator)
+}
+
+@(private)
+_sort_diff_changes :: proc(src: []Diff_Fact_Change, alloc: mem.Allocator) -> (sorted: []Diff_Fact_Change, err: mem.Allocator_Error) {
+	if len(src) == 0 {
+		return nil, nil
+	}
+	sorted = make([]Diff_Fact_Change, len(src), alloc) or_return
+	copy(sorted, src)
+	slice.sort_by(sorted, proc(a, b: Diff_Fact_Change) -> bool {
+		if a.binding_name != b.binding_name {
+			return a.binding_name < b.binding_name
+		}
+		return a.summary < b.summary
+	})
+	return sorted, nil
+}
+
+@(require_results)
+diff_replay_format_human :: proc(
+	rep: ^Diff_Replay_Report,
+	allocator := context.allocator,
+) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	if rep == nil {
+		strings.write_string(&b, "<no diff replay report>\n")
+		return strings.to_string(b), nil
+	}
+
+	added_s := _sort_diff_changes(rep.added, allocator) or_return
+	defer delete(added_s, allocator)
+	removed_s := _sort_diff_changes(rep.removed, allocator) or_return
+	defer delete(removed_s, allocator)
+
+	fmt.sbprintf(
+		&b,
+		"Diff replay: added=%d removed=%d unchanged=%d baseline_decisions=%d candidate_decisions=%d overlay_bytes=%d parent_moments=%d->%d\n",
+		len(added_s),
+		len(removed_s),
+		rep.unchanged_count,
+		rep.baseline_decisions,
+		rep.candidate_decisions,
+		rep.overlay_owned_bytes,
+		rep.parent_moments_before,
+		rep.parent_moments_after,
+	)
+	for c in added_s {
+		fmt.sbprintf(&b, "  + [%s] %s\n", c.binding_name, c.summary)
+	}
+	for c in removed_s {
+		fmt.sbprintf(&b, "  - [%s] %s\n", c.binding_name, c.summary)
+	}
+	return strings.to_string(b), nil
+}
+
+@(require_results)
+diff_replay_format_json :: proc(
+	rep: ^Diff_Replay_Report,
+	allocator := context.allocator,
+) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	if rep == nil {
+		strings.write_string(&b, `{"added":[],"removed":[],"added_count":0,"removed_count":0,"unchanged_count":0,"baseline_decisions":0,"candidate_decisions":0,"overlay_owned_bytes":0,"parent_moments_before":0,"parent_moments_after":0}`)
+		return strings.to_string(b), nil
+	}
+
+	added_s := _sort_diff_changes(rep.added, allocator) or_return
+	defer delete(added_s, allocator)
+	removed_s := _sort_diff_changes(rep.removed, allocator) or_return
+	defer delete(removed_s, allocator)
+
+	_write_changes :: proc(sb: ^strings.Builder, items: []Diff_Fact_Change) {
+		for c, i in items {
+			if i > 0 {
+				strings.write_byte(sb, ',')
+			}
+			strings.write_string(sb, `{"binding":`)
+			write_json_escaped_string(sb, c.binding_name)
+			strings.write_string(sb, `,"summary":`)
+			write_json_escaped_string(sb, c.summary)
+			strings.write_byte(sb, '}')
+		}
+	}
+
+	strings.write_string(&b, `{"added":[`)
+	_write_changes(&b, added_s)
+	strings.write_string(&b, `],"removed":[`)
+	_write_changes(&b, removed_s)
+	fmt.sbprintf(
+		&b,
+		`],"added_count":%d,"removed_count":%d,"unchanged_count":%d,"baseline_decisions":%d,"candidate_decisions":%d,"overlay_owned_bytes":%d,"parent_moments_before":%d,"parent_moments_after":%d`,
+		len(added_s),
+		len(removed_s),
+		rep.unchanged_count,
+		rep.baseline_decisions,
+		rep.candidate_decisions,
+		rep.overlay_owned_bytes,
+		rep.parent_moments_before,
+		rep.parent_moments_after,
+	)
+	strings.write_byte(&b, '}')
+	return strings.to_string(b), nil
 }

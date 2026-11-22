@@ -1,14 +1,24 @@
 package main
 
+import "core:encoding/json"
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:strconv"
 import "core:strings"
+import xitdb "xitdb:."
 import "../../forseti"
 
 Cli_Format :: enum u8 {
 	Human,
 	Json,
+	Jsonl,
+	Chrome_Trace,
+}
+
+Graph_Kind :: enum u8 {
+	Rulebase,
+	Derivations,
 }
 
 Cli_Options :: struct {
@@ -19,25 +29,91 @@ Cli_Options :: struct {
 	telemetry_path:     string,
 	out_path:           string,
 	pkg_name:           string,
+	facts_path:         string,
+	store_path:         string,
+	candidate_path:     string,
+	rule_name:          string,
+	rule_version:       string,
+	binding_name:       string,
+	fact_key:           string,
+	fact_id:            forseti.Fact_Id,
+	has_fact_id:        bool,
+	prov_mode:          forseti.Provenance_Mode,
+	graph_kind:         Graph_Kind,
+}
+
+Loaded_Fact_Spec :: struct {
+	binding: string,
+	key:     string,
+	fields:  json.Object,
+}
+
+Loaded_Facts_Bundle :: struct {
+	has_root: bool,
+	root:     json.Value,
+	items:    []Loaded_Fact_Spec,
+}
+
+Seed_Store_Ctx :: struct {
+	rb:     ^forseti.Rulebase,
+	bundle: ^Loaded_Facts_Bundle,
 }
 
 print_usage :: proc() {
 	fmt.println(`Usage: forseti <command> [options] <file.forseti>
 
 Commands:
-  check          Validate syntax, types, variable bindings, and lints
-  verify-tables  Run domain-partitioning static verification across all tables
-  gen            Generate standalone "contextless" Odin procedures for tables
-  ast            Parse source and print deterministic S-expression AST
-  ir             Compile source and print canonical Rulebase_IR summary
+  check           Validate syntax, types, variable bindings, and lints
+  verify-tables   Run domain-partitioning static verification across all tables
+  gen             Generate standalone "contextless" Odin procedures for tables
+  ast             Parse source and print deterministic S-expression AST
+  ir              Compile source and print canonical Rulebase_IR summary
+  run             Execute policy against --facts and/or --store and print derivations
+  explain         Print causal explanation proof tree(s) for derived facts
+  impact          Analyze direct & transitive impact of --rule <name>
+  diff-replay     Counterfactual replay comparing baseline <file> vs --candidate <file>
+  telemetry       Print or export phase timings, counters, and peak watermarks
+  export-dot      Export compiled rulebase or derivation DAG as Graphviz DOT
+  export-mermaid  Export compiled rulebase or derivation DAG as Mermaid flowchart
 
 Options:
-  --format=human|json      Output format for 'check' / 'verify-tables' (default: human)
+  --format=human|json|jsonl|chrome-trace  Output format (command-dependent)
   --warnings-as-errors     Treat compiler warnings (W*) as non-zero exit failures
-  --out <file.odin>        Output file for 'gen' (default: stdout)
-  --package <name>         Package name for generated Odin code (default: generated_tables)
-  --telemetry <out.json>   Export compile telemetry (Chrome Trace JSON, or JSONL for .jsonl)
+  --out <file>             Write command output to <file> instead of stdout
+  --package <name>         Package name for 'gen' (default: generated_tables)
+  --facts <facts.json>     JSON facts input ({"facts":[...]} or [...])
+  --store <db.xit>         Attach/open Safe_V2 xitdb file store
+  --candidate <file>       Candidate .forseti policy for 'diff-replay'
+  --rule <name>            Target rule name for 'impact'
+  --version <ver>          Optional rule version filter for 'impact'
+  --binding <name>         Filter binding name for 'explain' / '--graph=derivations'
+  --key <key>              Filter fact key for 'explain' / '--graph=derivations'
+  --fact-id <id>           Target numeric Fact_Id for 'explain' / '--graph=derivations'
+  --mode=audit|support|fast  Provenance mode for 'run'/'telemetry' (default: audit)
+  --graph=rulebase|derivations  Graph kind for 'export-dot' / 'export-mermaid'
+  --derivations            Shorthand for --graph=derivations
+  --telemetry <out.json>   Export telemetry (Chrome Trace JSON, or JSONL for .jsonl)
   -h, --help               Show this help message`)
+}
+
+parse_cli_value_arg :: proc(args: []string, idx: ^int, flag: string) -> (val: string, ok: bool) {
+	if idx^ + 1 >= len(args) {
+		fmt.eprintfln("error: %s requires an argument", flag)
+		return "", false
+	}
+	idx^ += 1
+	return args[idx^], true
+}
+
+parse_cli_format :: proc(raw: string) -> (fmt_kind: Cli_Format, ok: bool) {
+	switch raw {
+	case "human":        return .Human, true
+	case "json":         return .Json, true
+	case "jsonl":        return .Jsonl, true
+	case "chrome-trace": return .Chrome_Trace, true
+	}
+	fmt.eprintfln("error: unknown format %q (expected human, json, jsonl, or chrome-trace)", raw)
+	return .Human, false
 }
 
 parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, ok: bool) {
@@ -57,40 +133,86 @@ parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, o
 			return {}, true, true
 		} else if arg == "--warnings-as-errors" {
 			opts.warnings_as_errors = true
-		} else if arg == "--format=json" {
-			opts.format = .Json
-		} else if arg == "--format=human" {
-			opts.format = .Human
+		} else if arg == "--derivations" {
+			opts.graph_kind = .Derivations
 		} else if strings.has_prefix(arg, "--format=") {
-			fmt.eprintfln("error: unknown format %q (expected human or json)", arg[len("--format="):])
-			return {}, false, false
+			opts.format = parse_cli_format(arg[len("--format="):]) or_return
+		} else if arg == "--format" {
+			val := parse_cli_value_arg(args, &i, "--format") or_return
+			opts.format = parse_cli_format(val) or_return
 		} else if arg == "--telemetry" {
-			if i + 1 >= len(args) {
-				fmt.eprintln("error: --telemetry requires a file path argument")
-				return {}, false, false
-			}
-			i += 1
-			opts.telemetry_path = args[i]
+			opts.telemetry_path = parse_cli_value_arg(args, &i, "--telemetry") or_return
 		} else if strings.has_prefix(arg, "--telemetry=") {
 			opts.telemetry_path = arg[len("--telemetry="):]
 		} else if arg == "--out" {
-			if i + 1 >= len(args) {
-				fmt.eprintln("error: --out requires a file path argument")
-				return {}, false, false
-			}
-			i += 1
-			opts.out_path = args[i]
+			opts.out_path = parse_cli_value_arg(args, &i, "--out") or_return
 		} else if strings.has_prefix(arg, "--out=") {
 			opts.out_path = arg[len("--out="):]
 		} else if arg == "--package" {
-			if i + 1 >= len(args) {
-				fmt.eprintln("error: --package requires a package name")
-				return {}, false, false
-			}
-			i += 1
-			opts.pkg_name = args[i]
+			opts.pkg_name = parse_cli_value_arg(args, &i, "--package") or_return
 		} else if strings.has_prefix(arg, "--package=") {
 			opts.pkg_name = arg[len("--package="):]
+		} else if arg == "--facts" {
+			opts.facts_path = parse_cli_value_arg(args, &i, "--facts") or_return
+		} else if strings.has_prefix(arg, "--facts=") {
+			opts.facts_path = arg[len("--facts="):]
+		} else if arg == "--store" {
+			opts.store_path = parse_cli_value_arg(args, &i, "--store") or_return
+		} else if strings.has_prefix(arg, "--store=") {
+			opts.store_path = arg[len("--store="):]
+		} else if arg == "--candidate" {
+			opts.candidate_path = parse_cli_value_arg(args, &i, "--candidate") or_return
+		} else if strings.has_prefix(arg, "--candidate=") {
+			opts.candidate_path = arg[len("--candidate="):]
+		} else if arg == "--rule" {
+			opts.rule_name = parse_cli_value_arg(args, &i, "--rule") or_return
+		} else if strings.has_prefix(arg, "--rule=") {
+			opts.rule_name = arg[len("--rule="):]
+		} else if arg == "--version" {
+			opts.rule_version = parse_cli_value_arg(args, &i, "--version") or_return
+		} else if strings.has_prefix(arg, "--version=") {
+			opts.rule_version = arg[len("--version="):]
+		} else if arg == "--binding" {
+			opts.binding_name = parse_cli_value_arg(args, &i, "--binding") or_return
+		} else if strings.has_prefix(arg, "--binding=") {
+			opts.binding_name = arg[len("--binding="):]
+		} else if arg == "--key" {
+			opts.fact_key = parse_cli_value_arg(args, &i, "--key") or_return
+		} else if strings.has_prefix(arg, "--key=") {
+			opts.fact_key = arg[len("--key="):]
+		} else if arg == "--fact-id" || strings.has_prefix(arg, "--fact-id=") {
+			raw_id := arg[len("--fact-id="):] if strings.has_prefix(arg, "--fact-id=") else (parse_cli_value_arg(args, &i, "--fact-id") or_return)
+			v, pok := strconv.parse_u64(raw_id)
+			if !pok || v > u64(max(u32)) {
+				fmt.eprintfln("error: invalid --fact-id %q", raw_id)
+				return {}, false, false
+			}
+			opts.fact_id = forseti.Fact_Id(u32(v))
+			opts.has_fact_id = true
+		} else if strings.has_prefix(arg, "--mode=") || arg == "--mode" {
+			raw_mode := arg[len("--mode="):] if strings.has_prefix(arg, "--mode=") else (parse_cli_value_arg(args, &i, "--mode") or_return)
+			switch raw_mode {
+			case "audit", "audit-full":
+				opts.prov_mode = .Audit_Full
+			case "support", "support-only":
+				opts.prov_mode = .Support_Only
+			case "fast":
+				opts.prov_mode = .Fast
+			case:
+				fmt.eprintfln("error: unknown --mode %q (expected audit, support, or fast)", raw_mode)
+				return {}, false, false
+			}
+		} else if strings.has_prefix(arg, "--graph=") || arg == "--graph" {
+			raw_g := arg[len("--graph="):] if strings.has_prefix(arg, "--graph=") else (parse_cli_value_arg(args, &i, "--graph") or_return)
+			switch raw_g {
+			case "rulebase":
+				opts.graph_kind = .Rulebase
+			case "derivations":
+				opts.graph_kind = .Derivations
+			case:
+				fmt.eprintfln("error: unknown --graph %q (expected rulebase or derivations)", raw_g)
+				return {}, false, false
+			}
 		} else if strings.has_prefix(arg, "-") {
 			fmt.eprintfln("error: unknown option %q", arg)
 			return {}, false, false
@@ -108,6 +230,18 @@ parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, o
 		return {}, false, false
 	}
 	return opts, false, true
+}
+
+write_text_output :: proc(text: string, out_path: string) -> bool {
+	if len(out_path) > 0 {
+		if w_err := os.write_entire_file(out_path, text); w_err != nil {
+			fmt.eprintfln("error: failed writing %q: %v", out_path, w_err)
+			return false
+		}
+		return true
+	}
+	fmt.print(text)
+	return true
 }
 
 write_telemetry_file :: proc(sink: ^forseti.Telemetry_Sink, path: string) -> bool {
@@ -144,6 +278,558 @@ emit_human_diagnostics :: proc(diags: ^forseti.Diagnostic_List, src, path: strin
 	}
 }
 
+loaded_facts_destroy :: proc(b: ^Loaded_Facts_Bundle) {
+	delete(b.items)
+	if b.has_root {
+		json.destroy_value(b.root)
+	}
+	b^ = {}
+}
+
+load_facts_json :: proc(path: string) -> (bundle: Loaded_Facts_Bundle, ok: bool) {
+	if len(path) == 0 {
+		return {}, true
+	}
+	raw, r_err := os.read_entire_file(path, context.allocator)
+	if r_err != nil {
+		fmt.eprintfln("error: unable to read facts file %q: %v", path, r_err)
+		return {}, false
+	}
+	defer delete(raw)
+
+	val, p_err := json.parse_string(strings.trim_space(string(raw)), parse_integers = true, allocator = context.allocator)
+	if p_err != nil {
+		fmt.eprintfln("error: invalid JSON in %q: %v", path, p_err)
+		return {}, false
+	}
+	bundle.has_root = true
+	bundle.root = val
+
+	arr: json.Array
+	if root_arr, is_arr := val.(json.Array); is_arr {
+		arr = root_arr
+	} else if root_obj, is_obj := val.(json.Object); is_obj {
+		fv, has_facts := root_obj["facts"]
+		farr, f_is_arr := fv.(json.Array)
+		if !has_facts || !f_is_arr {
+			fmt.eprintfln("error: %q must be a JSON array or {\"facts\": [...]} object", path)
+			loaded_facts_destroy(&bundle)
+			return {}, false
+		}
+		arr = farr
+	} else {
+		fmt.eprintfln("error: %q must contain a JSON array or object", path)
+		loaded_facts_destroy(&bundle)
+		return {}, false
+	}
+
+	items := make([]Loaded_Fact_Spec, len(arr))
+	for elem, idx in arr {
+		obj, is_obj := elem.(json.Object)
+		if !is_obj {
+			fmt.eprintfln("error: facts[%d] in %q must be a JSON object", idx, path)
+			delete(items)
+			loaded_facts_destroy(&bundle)
+			return {}, false
+		}
+		bind_v, has_bind := obj["binding"]
+		bind_s, b_is_str := bind_v.(json.String)
+		key_v, has_key := obj["key"]
+		key_s, k_is_str := key_v.(json.String)
+		flds_v, has_flds := obj["fields"]
+		flds_obj, f_is_obj := flds_v.(json.Object)
+		if !has_bind || !b_is_str || !has_key || !k_is_str || !has_flds || !f_is_obj {
+			fmt.eprintfln("error: facts[%d] in %q requires string 'binding', string 'key', and object 'fields'", idx, path)
+			delete(items)
+			loaded_facts_destroy(&bundle)
+			return {}, false
+		}
+		items[idx] = Loaded_Fact_Spec{
+			binding = string(bind_s),
+			key     = string(key_s),
+			fields  = flds_obj,
+		}
+	}
+	bundle.items = items
+	return bundle, true
+}
+
+json_to_forseti_value :: proc(
+	s: ^forseti.Session,
+	kind: forseti.Type_Kind,
+	jv: json.Value,
+) -> (val: forseti.Value, ok: bool) {
+	switch kind {
+	case .Bool:
+		bv, is_b := jv.(json.Boolean)
+		if !is_b {
+			return nil, false
+		}
+		return bool(bv), true
+	case .I32:
+		if iv, is_i := jv.(json.Integer); is_i {
+			if i64(iv) < i64(min(i32)) || i64(iv) > i64(max(i32)) {
+				return nil, false
+			}
+			return i32(iv), true
+		}
+		return nil, false
+	case .I64:
+		if iv, is_i := jv.(json.Integer); is_i {
+			return i64(iv), true
+		}
+		return nil, false
+	case .F64:
+		if fv, is_f := jv.(json.Float); is_f {
+			return f64(fv), true
+		}
+		if iv, is_i := jv.(json.Integer); is_i {
+			return f64(iv), true
+		}
+		return nil, false
+	case .String, .Enum:
+		sv, is_s := jv.(json.String)
+		if !is_s {
+			return nil, false
+		}
+		sid, _ := forseti.intern_session_string(&s.rb.interner, &s.interner, string(sv))
+		return sid, true
+	case .Entity:
+		if iv, is_i := jv.(json.Integer); is_i && iv >= 0 {
+			return forseti.Entity_Id(u64(iv)), true
+		}
+		return nil, false
+	case .Time:
+		if iv, is_i := jv.(json.Integer); is_i {
+			return forseti.Time_Ns(i64(iv)), true
+		}
+		return nil, false
+	case .Unknown, .Fact, .Table_Result:
+		switch v in jv {
+		case json.Boolean:
+			return bool(v), true
+		case json.Integer:
+			return i64(v), true
+		case json.Float:
+			return f64(v), true
+		case json.String:
+			sid, _ := forseti.intern_session_string(&s.rb.interner, &s.interner, string(v))
+			return sid, true
+		case json.Null, json.Array, json.Object:
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
+seed_facts_tx_cb :: proc(wc: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+	ctx := (^Seed_Store_Ctx)(user_data)
+	path_buf: [256]u8 = ---
+	for item in ctx.bundle.items {
+		bidx, has_b := forseti.rulebase_find_binding(ctx.rb, item.binding)
+		if !has_b {
+			continue
+		}
+		bdef := ctx.rb.bindings[bidx]
+		schema := ctx.rb.schemas[bdef.schema_id]
+		dot_path := forseti.rulebase_binding_dot_path(ctx.rb, bidx, path_buf[:])
+		if len(dot_path) == 0 {
+			continue
+		}
+		col_map, cm_err := forseti.store_write_path_ensure_map(wc, dot_path)
+		if cm_err != nil {
+			return xitdb.Xitdb_Error.Write_Failed
+		}
+		rec_wc := xitdb.hash_map_put_cursor(&col_map, item.key) or_return
+		rec_m := xitdb.write_hash_map_init(rec_wc) or_return
+		for sf in schema.fields {
+			fname := forseti.interner_get(&ctx.rb.interner, sf.name)
+			jv, has_f := item.fields[fname]
+			if !has_f {
+				continue
+			}
+			#partial switch v in jv {
+			case json.Boolean:
+				if werr := forseti.write_bool_to_hash_map(&rec_m, fname, bool(v)); werr != nil {
+					return xitdb.Xitdb_Error.Write_Failed
+				}
+			case json.Integer:
+				if sf.type.kind == .Entity && v >= 0 {
+					xitdb.hash_map_put(&rec_m, fname, u64(v)) or_return
+				} else {
+					xitdb.hash_map_put(&rec_m, fname, i64(v)) or_return
+				}
+			case json.Float:
+				xitdb.hash_map_put(&rec_m, fname, f64(v)) or_return
+			case json.String:
+				xitdb.hash_map_put(&rec_m, fname, string(v)) or_return
+			}
+		}
+	}
+	return nil
+}
+
+insert_loaded_facts_direct :: proc(s: ^forseti.Session, bundle: ^Loaded_Facts_Bundle) -> bool {
+	for item in bundle.items {
+		bidx, has_b := forseti.session_find_binding(s, item.binding)
+		if !has_b {
+			fmt.eprintfln("error: unknown binding %q in facts file", item.binding)
+			return false
+		}
+		bdef := s.rb.bindings[bidx]
+		schema := s.rb.schemas[bdef.schema_id]
+		vals := make([]forseti.Value, len(schema.fields), context.temp_allocator)
+		for sf, fi in schema.fields {
+			fname := forseti.interner_get(&s.rb.interner, sf.name)
+			jv, has_f := item.fields[fname]
+			if !has_f {
+				continue
+			}
+			converted, cv_ok := json_to_forseti_value(s, sf.type.kind, jv)
+			if !cv_ok {
+				fmt.eprintfln("error: invalid value for %s.%s in key %q", item.binding, fname, item.key)
+				return false
+			}
+			vals[fi] = converted
+		}
+		_, ierr := forseti.session_insert_fact(s, item.binding, item.key, vals)
+		if ierr != .None {
+			fmt.eprintfln("error: failed inserting %s[%s]: %v", item.binding, item.key, ierr)
+			return false
+		}
+	}
+	return true
+}
+
+compile_source_to_rulebase :: proc(
+	src, file_path: string,
+	diags: ^forseti.Diagnostic_List,
+	telemetry: ^forseti.Telemetry_Sink,
+	warnings_as_errors: bool,
+) -> (
+	rb: forseti.Rulebase,
+	exit_code: int,
+	ok: bool,
+) {
+	ir, c_err := forseti.compile_source(src, file_path, diags, telemetry, context.allocator)
+	if c_err != nil {
+		fmt.eprintfln("error: compilation failed: %v", c_err)
+		return {}, 2, false
+	}
+	defer forseti.ir_destroy(&ir)
+
+	emit_human_diagnostics(diags, src, file_path)
+	if diags.error_count > 0 || (warnings_as_errors && diags.warning_count > 0) {
+		return {}, 1, false
+	}
+
+	compiled_rb, rb_err := forseti.rulebase_compile(&ir, telemetry, context.allocator)
+	if rb_err != .None {
+		forseti.rulebase_destroy(&compiled_rb)
+		fmt.eprintfln("error: rulebase compile failed: %v", rb_err)
+		return {}, 2, false
+	}
+	return compiled_rb, 0, true
+}
+
+watch_source_paths :: proc(syncer: ^forseti.Delta_Syncer, rbs: []^forseti.Rulebase) -> bool {
+	seen := make(map[string]bool, 8, context.temp_allocator)
+	buf: [256]u8 = ---
+	for rb in rbs {
+		for bdef, bi in rb.bindings {
+			if bdef.kind != .Source {
+				continue
+			}
+			p := forseti.rulebase_binding_dot_path(rb, u16(bi), buf[:])
+			if len(p) == 0 || (p in seen) {
+				continue
+			}
+			cloned := strings.clone(p, context.temp_allocator)
+			seen[cloned] = true
+			if w_err := forseti.delta_syncer_watch(syncer, cloned); w_err != nil {
+				fmt.eprintfln("error: failed watching %q: %v", cloned, w_err)
+				return false
+			}
+		}
+	}
+	return true
+}
+
+execute_session_with_inputs :: proc(
+	rb: ^forseti.Rulebase,
+	bundle: ^Loaded_Facts_Bundle,
+	store_path: string,
+	prov_mode: forseti.Provenance_Mode,
+	telemetry: ^forseti.Telemetry_Sink,
+	commit_to_store: bool,
+) -> (
+	sess: ^forseti.Session,
+	fired_count: u64,
+	committed_moment: i64,
+	has_store: bool,
+	exit_code: int,
+	ok: bool,
+) {
+	committed_moment = -1
+	sess = new(forseti.Session)
+	s_err := forseti.session_init(sess, rb, forseti.Session_Config{provenance_mode = prov_mode}, telemetry, context.allocator)
+	if s_err != .None {
+		forseti.session_destroy(sess)
+		free(sess)
+		fmt.eprintfln("error: session_init failed: %v", s_err)
+		return nil, 0, -1, false, 2, false
+	}
+
+	if len(store_path) > 0 {
+		bridge: forseti.Store_Bridge
+		if b_err := forseti.store_bridge_open_file(&bridge, store_path, forseti.Xitdb_Config{mode = .Safe_V2}, telemetry, context.allocator); b_err != nil {
+			forseti.session_destroy(sess)
+			free(sess)
+			fmt.eprintfln("error: failed opening store %q: %v", store_path, b_err)
+			return nil, 0, -1, false, 2, false
+		}
+		defer forseti.store_bridge_destroy(&bridge)
+
+		if len(bundle.items) > 0 {
+			seed_ctx := Seed_Store_Ctx{rb = rb, bundle = bundle}
+			if _, m_err := forseti.store_bridge_commit_moment(&bridge, seed_facts_tx_cb, &seed_ctx); m_err != nil {
+				forseti.session_destroy(sess)
+				free(sess)
+				fmt.eprintfln("error: failed seeding store %q: %v", store_path, m_err)
+				return nil, 0, -1, false, 2, false
+			}
+		}
+
+		syncer: forseti.Delta_Syncer
+		if d_err := forseti.delta_syncer_init(&syncer, telemetry, context.allocator); d_err != nil {
+			forseti.session_destroy(sess)
+			free(sess)
+			fmt.eprintfln("error: delta_syncer_init failed: %v", d_err)
+			return nil, 0, -1, false, 2, false
+		}
+		defer forseti.delta_syncer_destroy(&syncer)
+
+		rbs := [1]^forseti.Rulebase{rb}
+		if !watch_source_paths(&syncer, rbs[:]) {
+			forseti.session_destroy(sess)
+			free(sess)
+			return nil, 0, -1, false, 2, false
+		}
+
+		cnt, f_err := forseti.session_sync_and_fire(sess, &bridge, &syncer, commit_derived = commit_to_store)
+		if f_err != nil {
+			forseti.session_destroy(sess)
+			free(sess)
+			fmt.eprintfln("error: sync/fire failed: %v", f_err)
+			return nil, 0, -1, false, 2, false
+		}
+		fired_count = cnt
+		has_store = true
+		mc, mc_err := forseti.store_bridge_moment_count(&bridge)
+		if mc_err == nil && mc > 0 {
+			committed_moment = mc - 1
+		}
+		return sess, fired_count, committed_moment, has_store, 0, true
+	}
+
+	if len(bundle.items) > 0 {
+		if !insert_loaded_facts_direct(sess, bundle) {
+			forseti.session_destroy(sess)
+			free(sess)
+			return nil, 0, -1, false, 1, false
+		}
+	}
+	cnt, f_err := forseti.session_fire(sess)
+	if f_err != .None {
+		forseti.session_destroy(sess)
+		free(sess)
+		fmt.eprintfln("error: session_fire failed: %v", f_err)
+		return nil, 0, -1, false, 2, false
+	}
+	return sess, cnt, -1, false, 0, true
+}
+
+select_matching_fact_ids :: proc(s: ^forseti.Session, opts: Cli_Options) -> []forseti.Fact_Id {
+	if opts.has_fact_id {
+		if opts.fact_id != forseti.INVALID_FACT && int(opts.fact_id) < len(s.facts) && s.facts[opts.fact_id].alive {
+			res := make([]forseti.Fact_Id, 1, context.temp_allocator)
+			res[0] = opts.fact_id
+			return res
+		}
+		return nil
+	}
+
+	target_bidx := u16(max(u16))
+	if len(opts.binding_name) > 0 {
+		bi, ok := forseti.session_find_binding(s, opts.binding_name)
+		if !ok {
+			return nil
+		}
+		target_bidx = bi
+	}
+
+	out := make([dynamic]forseti.Fact_Id, 0, 8, context.temp_allocator)
+	for &f in s.facts {
+		if !f.alive || f.id == forseti.INVALID_FACT {
+			continue
+		}
+		if len(opts.binding_name) > 0 {
+			if f.binding_idx != target_bidx {
+				continue
+			}
+		} else if s.rb.bindings[f.binding_idx].kind != .Derived {
+			continue
+		}
+		if len(opts.fact_key) > 0 && forseti.session_string(s, f.key) != opts.fact_key {
+			continue
+		}
+		append(&out, f.id)
+	}
+	return out[:]
+}
+
+format_telemetry_human :: proc(sink: ^forseti.Telemetry_Sink) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, context.allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	fmt.sbprintf(
+		&b,
+		"Telemetry: spans=%d peak_heap=%dB peak_arena=%dB live_mem=%d\n",
+		len(sink.events),
+		sink.watermarks.peak_heap_bytes,
+		sink.watermarks.peak_arena_bytes,
+		sink.watermarks.live_session_memories,
+	)
+	for ev in sink.events {
+		fmt.sbprintf(&b, "  span [%v] %s dur_ns=%d alloc_delta=%d\n", ev.phase, ev.name, ev.duration_ns, ev.alloc_bytes_delta)
+	}
+	for c in forseti.Telemetry_Counter {
+		val := sink.counters[c]
+		if val > 0 || c == .Rules_Fired || c == .Derivations_Recorded {
+			fmt.sbprintf(&b, "  counter %-26s %d\n", forseti.telemetry_counter_names[c], val)
+		}
+	}
+	return strings.to_string(b), nil
+}
+
+run_cmd_diff_replay :: proc(
+	opts: Cli_Options,
+	base_src, file_path: string,
+	diags: ^forseti.Diagnostic_List,
+	telemetry: ^forseti.Telemetry_Sink,
+) -> int {
+	if len(opts.candidate_path) == 0 {
+		fmt.eprintln("error: diff-replay requires --candidate <candidate.forseti>")
+		return 2
+	}
+	cand_raw, c_read_err := os.read_entire_file(opts.candidate_path, context.allocator)
+	if c_read_err != nil {
+		fmt.eprintfln("error: unable to read candidate %q: %v", opts.candidate_path, c_read_err)
+		return 2
+	}
+	defer delete(cand_raw)
+	cand_src := string(cand_raw)
+
+	bundle, f_ok := load_facts_json(opts.facts_path)
+	if !f_ok {
+		return 2
+	}
+	defer loaded_facts_destroy(&bundle)
+
+	base_rb, base_code, base_ok := compile_source_to_rulebase(base_src, file_path, diags, telemetry, opts.warnings_as_errors)
+	if !base_ok {
+		return base_code
+	}
+	defer forseti.rulebase_destroy(&base_rb)
+
+	cand_diags: forseti.Diagnostic_List
+	if cd_err := forseti.diag_list_init(&cand_diags); cd_err != nil {
+		fmt.eprintfln("error: out of memory: %v", cd_err)
+		return 2
+	}
+	defer forseti.diag_list_destroy(&cand_diags)
+
+	cand_rb, cand_code, cand_ok := compile_source_to_rulebase(cand_src, opts.candidate_path, &cand_diags, telemetry, opts.warnings_as_errors)
+	if !cand_ok {
+		return cand_code
+	}
+	defer forseti.rulebase_destroy(&cand_rb)
+
+	bridge: forseti.Store_Bridge
+	if len(opts.store_path) > 0 {
+		if b_err := forseti.store_bridge_open_file(&bridge, opts.store_path, forseti.Xitdb_Config{mode = .Safe_V2}, telemetry, context.allocator); b_err != nil {
+			fmt.eprintfln("error: failed opening store %q: %v", opts.store_path, b_err)
+			return 2
+		}
+	} else {
+		if b_err := forseti.store_bridge_init_standalone(&bridge, forseti.Xitdb_Config{mode = .Safe_V2}, telemetry, context.allocator); b_err != nil {
+			fmt.eprintfln("error: failed creating store: %v", b_err)
+			return 2
+		}
+	}
+	defer forseti.store_bridge_destroy(&bridge)
+
+	if len(bundle.items) > 0 {
+		seed_ctx := Seed_Store_Ctx{rb = &base_rb, bundle = &bundle}
+		if _, m_err := forseti.store_bridge_commit_moment(&bridge, seed_facts_tx_cb, &seed_ctx); m_err != nil {
+			fmt.eprintfln("error: failed seeding facts into store: %v", m_err)
+			return 2
+		}
+	}
+
+	watch_set := make(map[string]bool, 8, context.temp_allocator)
+	watch_paths := make([dynamic]string, 0, 8, context.temp_allocator)
+	path_buf: [256]u8 = ---
+	rbs := [2]^forseti.Rulebase{&base_rb, &cand_rb}
+	for rbp in rbs {
+		for bdef, bi in rbp.bindings {
+			if bdef.kind != .Source {
+				continue
+			}
+			p := forseti.rulebase_binding_dot_path(rbp, u16(bi), path_buf[:])
+			if len(p) > 0 && !(p in watch_set) {
+				cloned := strings.clone(p, context.temp_allocator)
+				watch_set[cloned] = true
+				append(&watch_paths, cloned)
+			}
+		}
+	}
+
+	rep, d_err := forseti.diff_replay(&bridge, &base_rb, &cand_rb, watch_paths[:], telemetry, context.allocator)
+	if d_err != nil {
+		fmt.eprintfln("error: diff-replay failed: %v", d_err)
+		return 2
+	}
+	defer forseti.diff_replay_report_destroy(&rep)
+
+	out_txt: string
+	fmt_err: mem.Allocator_Error
+	if opts.format == .Json {
+		out_txt, fmt_err = forseti.diff_replay_format_json(&rep, context.allocator)
+	} else {
+		out_txt, fmt_err = forseti.diff_replay_format_human(&rep, context.allocator)
+	}
+	if fmt_err != nil {
+		fmt.eprintfln("error: formatting diff-replay output failed: %v", fmt_err)
+		return 2
+	}
+	defer delete(out_txt)
+
+	if !write_text_output(out_txt, opts.out_path) {
+		return 2
+	}
+	if opts.format == .Json && len(opts.out_path) == 0 {
+		fmt.println("")
+	}
+	if !write_telemetry_file(telemetry, opts.telemetry_path) {
+		return 2
+	}
+	return 0
+}
+
 run_cli :: proc() -> int {
 	opts, show_help, ok := parse_cli_args(os.args)
 	if !ok {
@@ -169,8 +855,9 @@ run_cli :: proc() -> int {
 	}
 	defer forseti.diag_list_destroy(&diags)
 
+	tel_enabled := len(opts.telemetry_path) > 0 || opts.subcmd == "telemetry"
 	telemetry: forseti.Telemetry_Sink
-	if t_err := forseti.telemetry_init(&telemetry, enabled = len(opts.telemetry_path) > 0); t_err != nil {
+	if t_err := forseti.telemetry_init(&telemetry, enabled = tel_enabled); t_err != nil {
 		fmt.eprintfln("error: out of memory: %v", t_err)
 		return 2
 	}
@@ -192,7 +879,12 @@ run_cli :: proc() -> int {
 				return 2
 			}
 			defer delete(json_out)
-			fmt.println(json_out)
+			if !write_text_output(json_out, opts.out_path) {
+				return 2
+			}
+			if len(opts.out_path) == 0 {
+				fmt.println("")
+			}
 		} else {
 			emit_human_diagnostics(&diags, src, opts.file_path)
 			if len(diags.items) == 0 {
@@ -233,15 +925,9 @@ run_cli :: proc() -> int {
 		}
 		defer delete(gen_src)
 
-		if len(opts.out_path) > 0 {
-			if w_err := os.write_entire_file(opts.out_path, gen_src); w_err != nil {
-				fmt.eprintfln("error: failed writing %q: %v", opts.out_path, w_err)
-				return 2
-			}
-		} else {
-			fmt.print(gen_src)
+		if !write_text_output(gen_src, opts.out_path) {
+			return 2
 		}
-
 		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
 			return 2
 		}
@@ -262,7 +948,12 @@ run_cli :: proc() -> int {
 			return 2
 		}
 		defer delete(sexp)
-		fmt.println(sexp)
+		if !write_text_output(sexp, opts.out_path) {
+			return 2
+		}
+		if len(opts.out_path) == 0 {
+			fmt.println("")
+		}
 
 		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
 			return 2
@@ -284,13 +975,339 @@ run_cli :: proc() -> int {
 			return 2
 		}
 		defer delete(text)
-		fmt.print(text)
+		if !write_text_output(text, opts.out_path) {
+			return 2
+		}
 
 		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
 			return 2
 		}
 		if diags.error_count > 0 || (opts.warnings_as_errors && diags.warning_count > 0) {
 			return 1
+		}
+		return 0
+
+	case "run":
+		bundle, f_ok := load_facts_json(opts.facts_path)
+		if !f_ok {
+			return 2
+		}
+		defer loaded_facts_destroy(&bundle)
+
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		if !rb_ok {
+			return comp_code
+		}
+		defer forseti.rulebase_destroy(&rb)
+
+		sess, fired, committed_moment, _, run_code, run_ok := execute_session_with_inputs(
+			&rb,
+			&bundle,
+			opts.store_path,
+			opts.prov_mode,
+			&telemetry,
+			commit_to_store = true,
+		)
+		if !run_ok {
+			return run_code
+		}
+		defer {
+			forseti.session_destroy(sess)
+			free(sess)
+		}
+
+		out_txt, fmt_err := forseti.session_format_run_output(sess, fired, committed_moment, opts.format == .Json, context.allocator)
+		if fmt_err != nil {
+			fmt.eprintfln("error: failed formatting run output: %v", fmt_err)
+			return 2
+		}
+		defer delete(out_txt)
+		if !write_text_output(out_txt, opts.out_path) {
+			return 2
+		}
+		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
+			return 2
+		}
+		return 0
+
+	case "explain":
+		bundle, f_ok := load_facts_json(opts.facts_path)
+		if !f_ok {
+			return 2
+		}
+		defer loaded_facts_destroy(&bundle)
+
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		if !rb_ok {
+			return comp_code
+		}
+		defer forseti.rulebase_destroy(&rb)
+
+		sess, _, _, _, run_code, run_ok := execute_session_with_inputs(
+			&rb,
+			&bundle,
+			opts.store_path,
+			.Audit_Full,
+			&telemetry,
+			commit_to_store = false,
+		)
+		if !run_ok {
+			return run_code
+		}
+		defer {
+			forseti.session_destroy(sess)
+			free(sess)
+		}
+
+		fids := select_matching_fact_ids(sess, opts)
+		has_filter := opts.has_fact_id || len(opts.binding_name) > 0 || len(opts.fact_key) > 0
+		if has_filter && len(fids) == 0 {
+			fmt.eprintln("error: no matching alive fact found to explain")
+			return 1
+		}
+
+		b: strings.Builder
+		if _, b_err := strings.builder_init(&b, context.allocator); b_err != nil {
+			fmt.eprintfln("error: out of memory: %v", b_err)
+			return 2
+		}
+		defer strings.builder_destroy(&b)
+
+		if opts.format == .Json {
+			strings.write_string(&b, `{"explanations":[`)
+			for fid, i in fids {
+				if i > 0 {
+					strings.write_byte(&b, ',')
+				}
+				tree := forseti.explain(sess, fid, context.allocator)
+				j_txt, j_err := forseti.explain_format_json(&tree, context.allocator)
+				forseti.explain_tree_destroy(&tree)
+				if j_err != nil {
+					fmt.eprintfln("error: failed formatting explain JSON: %v", j_err)
+					return 2
+				}
+				strings.write_string(&b, j_txt)
+				delete(j_txt)
+			}
+			strings.write_string(&b, "]}\n")
+		} else {
+			if len(fids) == 0 {
+				strings.write_string(&b, "<no explanations>\n")
+			} else {
+				for fid in fids {
+					tree := forseti.explain(sess, fid, context.allocator)
+					txt := forseti.explain_format(&tree, context.allocator)
+					forseti.explain_tree_destroy(&tree)
+					strings.write_string(&b, txt)
+					delete(txt)
+				}
+			}
+		}
+
+		if !write_text_output(strings.to_string(b), opts.out_path) {
+			return 2
+		}
+		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
+			return 2
+		}
+		return 0
+
+	case "impact":
+		if len(opts.rule_name) == 0 {
+			fmt.eprintln("error: impact requires --rule <rule_name>")
+			return 2
+		}
+		bundle, f_ok := load_facts_json(opts.facts_path)
+		if !f_ok {
+			return 2
+		}
+		defer loaded_facts_destroy(&bundle)
+
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		if !rb_ok {
+			return comp_code
+		}
+		defer forseti.rulebase_destroy(&rb)
+
+		sess, _, _, _, run_code, run_ok := execute_session_with_inputs(
+			&rb,
+			&bundle,
+			opts.store_path,
+			.Audit_Full,
+			&telemetry,
+			commit_to_store = false,
+		)
+		if !run_ok {
+			return run_code
+		}
+		defer {
+			forseti.session_destroy(sess)
+			free(sess)
+		}
+
+		rid := max(u32)
+		for &r, i in rb.rules {
+			if forseti.interner_get(&rb.interner, r.name) == opts.rule_name {
+				rid = u32(i)
+				break
+			}
+		}
+		if rid == max(u32) {
+			fmt.eprintfln("error: unknown rule %q", opts.rule_name)
+			return 1
+		}
+
+		rep := forseti.impact(sess, rid, opts.rule_version, context.allocator)
+		defer forseti.impact_report_destroy(&rep)
+
+		out_txt: string
+		fmt_err: mem.Allocator_Error
+		if opts.format == .Json {
+			out_txt, fmt_err = forseti.impact_format_json(sess, &rep, context.allocator)
+		} else {
+			out_txt, fmt_err = forseti.impact_format_human(sess, &rep, context.allocator)
+		}
+		if fmt_err != nil {
+			fmt.eprintfln("error: failed formatting impact output: %v", fmt_err)
+			return 2
+		}
+		defer delete(out_txt)
+
+		if !write_text_output(out_txt, opts.out_path) {
+			return 2
+		}
+		if opts.format == .Json && len(opts.out_path) == 0 {
+			fmt.println("")
+		}
+		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
+			return 2
+		}
+		return 0
+
+	case "diff-replay":
+		return run_cmd_diff_replay(opts, src, opts.file_path, &diags, &telemetry)
+
+	case "telemetry":
+		bundle, f_ok := load_facts_json(opts.facts_path)
+		if !f_ok {
+			return 2
+		}
+		defer loaded_facts_destroy(&bundle)
+
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		if !rb_ok {
+			return comp_code
+		}
+		defer forseti.rulebase_destroy(&rb)
+
+		sess, _, _, _, run_code, run_ok := execute_session_with_inputs(
+			&rb,
+			&bundle,
+			opts.store_path,
+			opts.prov_mode,
+			&telemetry,
+			commit_to_store = false,
+		)
+		if !run_ok {
+			return run_code
+		}
+		defer {
+			forseti.session_destroy(sess)
+			free(sess)
+		}
+
+		out_txt: string
+		fmt_err: mem.Allocator_Error
+		switch opts.format {
+		case .Jsonl:
+			out_txt, fmt_err = forseti.telemetry_export_jsonl(&telemetry, context.allocator)
+		case .Json, .Chrome_Trace:
+			out_txt, fmt_err = forseti.telemetry_export_chrome_trace(&telemetry, context.allocator)
+		case .Human:
+			out_txt, fmt_err = format_telemetry_human(&telemetry)
+		}
+		if fmt_err != nil {
+			fmt.eprintfln("error: failed formatting telemetry: %v", fmt_err)
+			return 2
+		}
+		defer delete(out_txt)
+
+		if !write_text_output(out_txt, opts.out_path) {
+			return 2
+		}
+		if (opts.format == .Json || opts.format == .Chrome_Trace) && len(opts.out_path) == 0 {
+			fmt.println("")
+		}
+		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
+			return 2
+		}
+		return 0
+
+	case "export-dot", "export-mermaid":
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		if !rb_ok {
+			return comp_code
+		}
+		defer forseti.rulebase_destroy(&rb)
+
+		is_dot := opts.subcmd == "export-dot"
+		out_txt: string
+		exp_err: mem.Allocator_Error
+		if opts.graph_kind == .Derivations {
+			bundle, f_ok := load_facts_json(opts.facts_path)
+			if !f_ok {
+				return 2
+			}
+			defer loaded_facts_destroy(&bundle)
+
+			sess, _, _, _, run_code, run_ok := execute_session_with_inputs(
+				&rb,
+				&bundle,
+				opts.store_path,
+				.Audit_Full,
+				&telemetry,
+				commit_to_store = false,
+			)
+			if !run_ok {
+				return run_code
+			}
+			defer {
+				forseti.session_destroy(sess)
+				free(sess)
+			}
+
+			focus_fid := forseti.INVALID_FACT
+			if opts.has_fact_id || len(opts.binding_name) > 0 || len(opts.fact_key) > 0 {
+				matches := select_matching_fact_ids(sess, opts)
+				if len(matches) == 0 {
+					fmt.eprintln("error: no matching fact found for derivation export focus")
+					return 1
+				}
+				focus_fid = matches[0]
+			}
+			if is_dot {
+				out_txt, exp_err = forseti.export_derivations_dot(sess, focus_fid, context.allocator)
+			} else {
+				out_txt, exp_err = forseti.export_derivations_mermaid(sess, focus_fid, context.allocator)
+			}
+		} else {
+			if is_dot {
+				out_txt, exp_err = forseti.export_rulebase_dot(&rb, context.allocator)
+			} else {
+				out_txt, exp_err = forseti.export_rulebase_mermaid(&rb, context.allocator)
+			}
+		}
+		if exp_err != nil {
+			fmt.eprintfln("error: export failed: %v", exp_err)
+			return 2
+		}
+		defer delete(out_txt)
+
+		if !write_text_output(out_txt, opts.out_path) {
+			return 2
+		}
+		if !write_telemetry_file(&telemetry, opts.telemetry_path) {
+			return 2
 		}
 		return 0
 

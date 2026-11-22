@@ -316,6 +316,310 @@ explain_format :: proc(tree: ^Explain_Tree, allocator := context.allocator) -> s
 	return strings.to_string(b)
 }
 
+@(private)
+_origin_string :: proc "contextless" (o: Fact_Origin) -> string {
+	switch o {
+	case .External:      return "External"
+	case .Logical:       return "Logical"
+	case .Unconditional: return "Unconditional"
+	}
+	return "External"
+}
+
+@(private)
+_write_explain_node_json :: proc(b: ^strings.Builder, n: ^Explain_Node) {
+	strings.write_string(b, `{"fact_id":`)
+	fmt.sbprintf(b, "%d", u32(n.fact_id))
+	strings.write_string(b, `,"binding":`)
+	write_json_escaped_string(b, n.binding_name)
+	strings.write_string(b, `,"key":`)
+	write_json_escaped_string(b, n.fact_key)
+	strings.write_string(b, `,"summary":`)
+	write_json_escaped_string(b, n.fact_summary)
+	strings.write_string(b, `,"origin":`)
+	write_json_escaped_string(b, _origin_string(n.origin))
+	fmt.sbprintf(b, `,"proof_height":%d`, n.proof_height)
+	strings.write_string(b, `,"rule":`)
+	write_json_escaped_string(b, n.rule_name)
+	strings.write_string(b, `,"rule_version":`)
+	write_json_escaped_string(b, n.rule_version)
+	strings.write_string(b, `,"table":`)
+	write_json_escaped_string(b, n.table_name)
+	strings.write_string(b, `,"table_row":`)
+	write_json_escaped_string(b, n.table_row)
+	strings.write_string(b, `,"children":[`)
+	for &c, i in n.children {
+		if i > 0 {
+			strings.write_byte(b, ',')
+		}
+		_write_explain_node_json(b, &c)
+	}
+	strings.write_string(b, "]}")
+}
+
+@(require_results)
+explain_format_json :: proc(
+	tree: ^Explain_Tree,
+	allocator := context.allocator,
+) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	if tree == nil || !tree.found {
+		strings.write_string(&b, `{"found":false,"root":null}`)
+		return strings.to_string(b), nil
+	}
+	strings.write_string(&b, `{"found":true,"root":`)
+	_write_explain_node_json(&b, &tree.root)
+	strings.write_byte(&b, '}')
+	return strings.to_string(b), nil
+}
+
+@(private)
+_write_impact_fact_entry :: proc(b: ^strings.Builder, s: ^Session, fid: Fact_Id, alloc: mem.Allocator, as_json: bool) {
+	bname := ""
+	fkey := ""
+	summary := ""
+	if s != nil && s.rb != nil && fid != INVALID_FACT && int(fid) < len(s.facts) {
+		f := &s.facts[fid]
+		bname = interner_get(&s.rb.interner, s.rb.bindings[f.binding_idx].name)
+		fkey = session_string(s, f.key)
+		summary = _format_fact_summary(s, fid, alloc)
+	}
+	defer if len(summary) > 0 {
+		delete(summary, alloc)
+	}
+
+	if as_json {
+		strings.write_string(b, `{"fact_id":`)
+		fmt.sbprintf(b, "%d", u32(fid))
+		strings.write_string(b, `,"binding":`)
+		write_json_escaped_string(b, bname)
+		strings.write_string(b, `,"key":`)
+		write_json_escaped_string(b, fkey)
+		strings.write_string(b, `,"summary":`)
+		write_json_escaped_string(b, summary)
+		strings.write_byte(b, '}')
+	} else if len(summary) > 0 {
+		fmt.sbprintf(b, "  - [%d] %s key=%s\n", u32(fid), summary, fkey)
+	} else {
+		fmt.sbprintf(b, "  - [%d]\n", u32(fid))
+	}
+}
+
+@(require_results)
+impact_format_human :: proc(
+	s: ^Session,
+	rep: ^Impact_Report,
+	allocator := context.allocator,
+) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	if rep == nil {
+		strings.write_string(&b, "<no impact report>\n")
+		return strings.to_string(b), nil
+	}
+	fmt.sbprintf(
+		&b,
+		"Impact rule=%s (id=%d): direct=%d transitive=%d derivations=%d\n",
+		rep.rule_name,
+		rep.rule_id,
+		len(rep.direct_facts),
+		len(rep.transitive_facts),
+		len(rep.derivations),
+	)
+	if len(rep.direct_facts) > 0 {
+		strings.write_string(&b, "Direct:\n")
+		for fid in rep.direct_facts {
+			_write_impact_fact_entry(&b, s, fid, allocator, as_json = false)
+		}
+	}
+	if len(rep.transitive_facts) > 0 {
+		strings.write_string(&b, "Transitive:\n")
+		for fid in rep.transitive_facts {
+			_write_impact_fact_entry(&b, s, fid, allocator, as_json = false)
+		}
+	}
+	return strings.to_string(b), nil
+}
+
+@(require_results)
+impact_format_json :: proc(
+	s: ^Session,
+	rep: ^Impact_Report,
+	allocator := context.allocator,
+) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	if rep == nil {
+		strings.write_string(&b, `{"rule_id":0,"rule_name":"","direct_count":0,"transitive_count":0,"derivation_count":0,"direct_facts":[],"transitive_facts":[],"derivations":[]}`)
+		return strings.to_string(b), nil
+	}
+
+	strings.write_string(&b, `{"rule_id":`)
+	fmt.sbprintf(&b, "%d", rep.rule_id)
+	strings.write_string(&b, `,"rule_name":`)
+	write_json_escaped_string(&b, rep.rule_name)
+	fmt.sbprintf(
+		&b,
+		`,"direct_count":%d,"transitive_count":%d,"derivation_count":%d,"direct_facts":[`,
+		len(rep.direct_facts),
+		len(rep.transitive_facts),
+		len(rep.derivations),
+	)
+	for fid, i in rep.direct_facts {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		_write_impact_fact_entry(&b, s, fid, allocator, as_json = true)
+	}
+	strings.write_string(&b, `],"transitive_facts":[`)
+	for fid, i in rep.transitive_facts {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		_write_impact_fact_entry(&b, s, fid, allocator, as_json = true)
+	}
+	strings.write_string(&b, `],"derivations":[`)
+	for did, i in rep.derivations {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		fmt.sbprintf(&b, "%d", u32(did))
+	}
+	strings.write_string(&b, "]}")
+	return strings.to_string(b), nil
+}
+
+@(private)
+_write_json_fact_field_value :: proc(b: ^strings.Builder, s: ^Session, val: Value) {
+	if val == nil {
+		strings.write_string(b, "null")
+		return
+	}
+	switch v in val {
+	case bool:
+		strings.write_string(b, "true" if v else "false")
+	case i32:
+		fmt.sbprintf(b, "%d", v)
+	case i64:
+		fmt.sbprintf(b, "%d", v)
+	case f64:
+		fmt.sbprintf(b, "%v", v)
+	case String_Id:
+		write_json_escaped_string(b, session_string(s, v))
+	case Entity_Id:
+		fmt.sbprintf(b, "%d", u64(v))
+	case Time_Ns:
+		fmt.sbprintf(b, "%d", i64(v))
+	case Enum_Val:
+		fmt.sbprintf(b, `"%d:%d"`, v.enum_id, v.variant)
+	}
+}
+
+@(require_results)
+session_format_run_output :: proc(
+	s: ^Session,
+	fired: u64,
+	committed_moment: i64,
+	as_json: bool,
+	allocator := context.allocator,
+) -> (out: string, err: mem.Allocator_Error) {
+	b: strings.Builder
+	strings.builder_init(&b, allocator) or_return
+	defer if err != nil {
+		strings.builder_destroy(&b)
+	}
+
+	derived_count := 0
+	if s != nil && s.rb != nil {
+		for &f in s.facts {
+			if f.alive && s.rb.bindings[f.binding_idx].kind == .Derived {
+				derived_count += 1
+			}
+		}
+	}
+
+	if as_json {
+		strings.write_string(&b, `{"fired":`)
+		fmt.sbprintf(&b, "%d", fired)
+		strings.write_string(&b, `,"derived_count":`)
+		fmt.sbprintf(&b, "%d", derived_count)
+		strings.write_string(&b, `,"committed_moment":`)
+		fmt.sbprintf(&b, "%d", committed_moment)
+		strings.write_string(&b, `,"derived":[`)
+		emitted := 0
+		if s != nil && s.rb != nil {
+			for &f in s.facts {
+				if !f.alive || s.rb.bindings[f.binding_idx].kind != .Derived {
+					continue
+				}
+				if emitted > 0 {
+					strings.write_byte(&b, ',')
+				}
+				emitted += 1
+				bdef := s.rb.bindings[f.binding_idx]
+				schema := s.rb.schemas[bdef.schema_id]
+				bname := interner_get(&s.rb.interner, bdef.name)
+				fkey := session_string(s, f.key)
+				strings.write_string(&b, `{"fact_id":`)
+				fmt.sbprintf(&b, "%d", u32(f.id))
+				strings.write_string(&b, `,"binding":`)
+				write_json_escaped_string(&b, bname)
+				strings.write_string(&b, `,"key":`)
+				write_json_escaped_string(&b, fkey)
+				fmt.sbprintf(&b, `,"proof_height":%d`, f.proof_height)
+				strings.write_string(&b, `,"fields":{`)
+				for sf, sfi in schema.fields {
+					if sfi > 0 {
+						strings.write_byte(&b, ',')
+					}
+					fname := interner_get(&s.rb.interner, sf.name)
+					write_json_escaped_string(&b, fname)
+					strings.write_byte(&b, ':')
+					val, found := fact_get_field(s, &f, i16(sfi))
+					if found {
+						_write_json_fact_field_value(&b, s, val)
+					} else {
+						strings.write_string(&b, "null")
+					}
+				}
+				strings.write_string(&b, "}}")
+			}
+		}
+		strings.write_string(&b, "]}\n")
+	} else {
+		fmt.sbprintf(&b, "Fired %d rule activation(s); %d derived fact(s) alive", fired, derived_count)
+		if committed_moment >= 0 {
+			fmt.sbprintf(&b, " (committed moment %d)", committed_moment)
+		}
+		strings.write_byte(&b, '\n')
+		if s != nil && s.rb != nil {
+			for &f in s.facts {
+				if !f.alive || s.rb.bindings[f.binding_idx].kind != .Derived {
+					continue
+				}
+				bdef := s.rb.bindings[f.binding_idx]
+				bname := interner_get(&s.rb.interner, bdef.name)
+				fkey := session_string(s, f.key)
+				fmt.sbprintf(&b, "  - [%d] %s[%s] h=%d\n", u32(f.id), bname, fkey, f.proof_height)
+			}
+		}
+	}
+	return strings.to_string(b), nil
+}
+
 // Computes all direct and transitive alive facts and derivations affected by `rule_id` (optionally filtered by version).
 impact :: proc(
 	s: ^Session,
