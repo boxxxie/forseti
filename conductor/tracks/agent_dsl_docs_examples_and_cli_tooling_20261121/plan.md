@@ -15,7 +15,7 @@
 - [x] Task: Expand cross-track E2E MDM specs and run full 4-layer ATDD hygiene audit across `specs/` (Red-First ATDD)
     - [x] Implement cross-track E2E behavioral scenarios (`specs/mdm_e2e_spec_test.odin` with Pattern B `viewing_*` scoped entity audit blocks) integrating Tracks 1–6
     - [x] Audit all `specs/*_spec_test.odin`, `specs/dsl_test.odin`, and `specs/driver_test.odin` for zero DSL theater, complete `#caller_location` forwarding, SUT `@(private)` encapsulation, parallel safety, and `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Full CLI & E2E 4-Layer ATDD Audit' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Full CLI & E2E 4-Layer ATDD Audit' (Protocol in workflow.md)
 
 ---
 
@@ -27,4 +27,4 @@
 - [x] Task: Create and CI-verify all 7 runnable examples under `examples/`
     - [x] Implement `examples/01_decision_tables` through `examples/07_telemetry_and_diff_replay`
     - [x] Run strict `odin check`, execution under leak-checked tracking, `odin test tests -all-packages`, and `odin test specs -all-packages`, updating `AGENTS.md` / `README.md` links
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Agent DSL Docs, Usage Rules & Verified Examples' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Agent DSL Docs, Usage Rules & Verified Examples' (Protocol in workflow.md)

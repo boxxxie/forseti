@@ -34,5 +34,5 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [~] **Track 7: Agent-Proof DSL Reference (`docs/` & `usage-rules.md`), CI-Verified Examples, Full CLI (`cmd/forseti`), and E2E ATDD Audit** *(Priority: Step 7 — Depends on Tracks 1–6; docs & specs kept fresh incrementally)*
+- [x] **Track 7: Agent-Proof DSL Reference (`docs/` & `usage-rules.md`), CI-Verified Examples, Full CLI (`cmd/forseti`), and E2E ATDD Audit** *(Priority: Step 7 — Depends on Tracks 1–6; docs & specs kept fresh incrementally)*
   *Link: [./tracks/agent_dsl_docs_examples_and_cli_tooling_20261121/](./tracks/agent_dsl_docs_examples_and_cli_tooling_20261121/)*
