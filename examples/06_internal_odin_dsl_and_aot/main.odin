@@ -73,10 +73,13 @@ run_example :: proc() -> bool {
 	defer forseti.diag_list_destroy(&diags)
 
 	ir, b_err := forseti.ir_builder_build(&b, &diags)
-	if b_err != nil || diags.error_count != 0 {
+	if b_err != nil {
 		return false
 	}
 	defer forseti.ir_destroy(&ir)
+	if diags.error_count != 0 {
+		return false
+	}
 
 	rb, rb_err := forseti.rulebase_compile(&ir)
 	if rb_err != .None {

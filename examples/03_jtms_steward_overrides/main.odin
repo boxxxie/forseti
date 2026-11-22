@@ -51,10 +51,13 @@ rule escalate {
 	defer forseti.diag_list_destroy(&diags)
 
 	ir, c_err := forseti.compile_source(src, "03_jtms.forseti", &diags)
-	if c_err != nil || diags.error_count != 0 {
+	if c_err != nil {
 		return false
 	}
 	defer forseti.ir_destroy(&ir)
+	if diags.error_count != 0 {
+		return false
+	}
 
 	rb, rb_err := forseti.rulebase_compile(&ir)
 	if rb_err != .None {
