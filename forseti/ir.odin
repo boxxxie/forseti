@@ -368,9 +368,12 @@ type_ref_equal :: proc(a: ^Rulebase_IR, ta: Type_Ref, b: ^Rulebase_IR, tb: Type_
 		return false
 	}
 	if ta.kind == .Enum {
+		if int(ta.ref_id) >= len(a.enums) || int(tb.ref_id) >= len(b.enums) {
+			return false
+		}
 		ea := a.enums[ta.ref_id]
 		eb := b.enums[tb.ref_id]
-		if len(ea.variants) != len(eb.variants) {
+		if ir_string(a, ea.name) != ir_string(b, eb.name) || len(ea.variants) != len(eb.variants) {
 			return false
 		}
 		for i in 0 ..< len(ea.variants) {
@@ -427,12 +430,26 @@ ir_structurally_equal :: proc(a, b: ^Rulebase_IR) -> bool {
 		ir_string(a, a.module_version) != ir_string(b, b.module_version) {
 		return false
 	}
-	if len(a.schemas) != len(b.schemas) ||
+	if len(a.enums) != len(b.enums) ||
+		len(a.schemas) != len(b.schemas) ||
 		len(a.bindings) != len(b.bindings) ||
 		len(a.tables) != len(b.tables) ||
 		len(a.rules) != len(b.rules) ||
 		len(a.queries) != len(b.queries) {
 		return false
+	}
+
+	for i in 0 ..< len(a.enums) {
+		ea := a.enums[i]
+		eb := b.enums[i]
+		if ir_string(a, ea.name) != ir_string(b, eb.name) || len(ea.variants) != len(eb.variants) {
+			return false
+		}
+		for j in 0 ..< len(ea.variants) {
+			if ir_string(a, ea.variants[j]) != ir_string(b, eb.variants[j]) {
+				return false
+			}
+		}
 	}
 
 	for i in 0 ..< len(a.schemas) {

@@ -140,7 +140,7 @@ lower_clauses :: proc(ctx: ^Lower_Ctx, span: Node_Span) -> (out: []Clause_IR, er
 		return nil, nil
 	}
 	alloc := vmem.arena_allocator(&ctx.ir.arena)
-	staged := make([dynamic]Clause_IR, 0, int(span.count), context.temp_allocator)
+	staged := make([dynamic]Clause_IR, 0, int(span.count), context.temp_allocator) or_return
 	for i in 0 ..< span.count {
 		cl := ctx.pool.clauses[span.start + i]
 		if cl.kind == .Error {
@@ -179,7 +179,7 @@ lower_clauses :: proc(ctx: ^Lower_Ctx, span: Node_Span) -> (out: []Clause_IR, er
 			accum_op   = cl.accum_op,
 			inner_pat  = lower_clauses(ctx, cl.inner_pat) or_return,
 			span       = cl.span,
-		})
+		}) or_return
 	}
 	if len(staged) == 0 {
 		return nil, nil
@@ -217,10 +217,10 @@ lower_ast_to_ir :: proc(
 		src_int = src_interner,
 		ir      = &ir,
 	}
-	ctx.enums = make([dynamic]Enum_Def, 0, 8, context.temp_allocator)
-	ctx.exprs = make([dynamic]Expr_IR, 0, max(len(pool.nodes), 16), context.temp_allocator)
-	ctx.extra_exprs = make([dynamic]Expr_Id, 0, 32, context.temp_allocator)
-	append(&ctx.exprs, Expr_IR{kind = .Invalid}) // INVALID_EXPR == 0
+	ctx.enums = make([dynamic]Enum_Def, 0, 8, context.temp_allocator) or_return
+	ctx.exprs = make([dynamic]Expr_IR, 0, max(len(pool.nodes), 16), context.temp_allocator) or_return
+	ctx.extra_exprs = make([dynamic]Expr_Id, 0, 32, context.temp_allocator) or_return
+	append(&ctx.exprs, Expr_IR{kind = .Invalid}) or_return // INVALID_EXPR == 0
 
 	ir.module_name = lower_intern(&ctx, pool.module_name) or_return
 	ir.module_version = lower_intern(&ctx, pool.module_version) or_return
@@ -332,12 +332,12 @@ lower_ast_to_ir :: proc(
 
 	ir.rules = make([]Rule_Def, len(pool.rules), arena_alloc) or_return
 	for r, ri in pool.rules {
-		acts := make([]Action_IR, r.then_actions.count, arena_alloc) or_return
+		staged_acts := make([dynamic]Action_IR, 0, int(r.then_actions.count), context.temp_allocator) or_return
 		for ai in 0 ..< r.then_actions.count {
 			aa := pool.actions[r.then_actions.start + ai]
 			ak: Action_Kind_IR
 			switch aa.kind {
-			case .Assert, .Error:
+			case .Assert:
 				ak = .Assert
 			case .Assert_Eav:
 				ak = .Assert_Eav
@@ -345,8 +345,10 @@ lower_ast_to_ir :: proc(
 				ak = .Retract
 			case .Effect:
 				ak = .Effect
+			case .Error:
+				continue
 			}
-			acts[ai] = Action_IR{
+			append(&staged_acts, Action_IR{
 				kind          = ak,
 				target        = lower_intern(&ctx, aa.target) or_return,
 				unconditional = aa.unconditional,
@@ -355,7 +357,12 @@ lower_ast_to_ir :: proc(
 				attr_expr     = lower_expr(&ctx, aa.attr_expr) or_return,
 				val_expr      = lower_expr(&ctx, aa.val_expr) or_return,
 				span          = aa.span,
-			}
+			}) or_return
+		}
+		acts: []Action_IR
+		if len(staged_acts) > 0 {
+			acts = make([]Action_IR, len(staged_acts), arena_alloc) or_return
+			copy(acts, staged_acts[:])
 		}
 		ir.rules[ri] = Rule_Def{
 			name         = lower_intern(&ctx, r.name) or_return,

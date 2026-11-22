@@ -283,6 +283,9 @@ lex_string :: proc(l: ^Lexer, start: int) -> (tok: Token, err: mem.Allocator_Err
 				l.pos += 1
 			case:
 				_ = advance_codepoint(l.src, &l.pos)
+				if esc == '\n' {
+					append(&l.line_starts, u32(l.pos)) or_return
+				}
 				diag_add(
 					l.diags,
 					l.line_starts[:],

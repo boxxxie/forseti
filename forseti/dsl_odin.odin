@@ -324,21 +324,26 @@ clone_clauses :: proc(alloc: mem.Allocator, src: []Clause_Spec) -> (out: []Claus
 	return out, nil
 }
 
+@(private)
+clone_string_slice :: proc(alloc: mem.Allocator, src: []string) -> (out: []string, err: mem.Allocator_Error) {
+	if len(src) == 0 {
+		return nil, nil
+	}
+	out = make([]string, len(src), alloc) or_return
+	for s, i in src {
+		out[i] = strings.clone(s, alloc) or_return
+	}
+	return out, nil
+}
+
 ir_schema :: proc(b: ^Ir_Builder, name: string, fields: []Field_Spec) -> mem.Allocator_Error {
 	a := vmem.arena_allocator(&b.arena)
 	cloned := make([]Field_Spec, len(fields), a) or_return
 	for f, i in fields {
-		vars: []string
-		if len(f.variants) > 0 {
-			vars = make([]string, len(f.variants), a) or_return
-			for v, vi in f.variants {
-				vars[vi] = strings.clone(v, a) or_return
-			}
-		}
 		cloned[i] = Field_Spec{
 			name     = strings.clone(f.name, a) or_return,
 			type     = f.type,
-			variants = vars,
+			variants = clone_string_slice(a, f.variants) or_return,
 		}
 	}
 	append(&b.schemas, Schema_Spec_Stored{
@@ -374,11 +379,21 @@ ir_table :: proc(b: ^Ir_Builder, spec: Table_Spec) -> mem.Allocator_Error {
 	a := vmem.arena_allocator(&b.arena)
 	in_c := make([]Table_Col_Spec, len(spec.inputs), a) or_return
 	for c, i in spec.inputs {
-		in_c[i] = Table_Col_Spec{name = strings.clone(c.name, a) or_return, type = c.type, cost = c.cost}
+		in_c[i] = Table_Col_Spec{
+			name     = strings.clone(c.name, a) or_return,
+			type     = c.type,
+			cost     = c.cost,
+			variants = clone_string_slice(a, c.variants) or_return,
+		}
 	}
 	out_c := make([]Table_Col_Spec, len(spec.outputs), a) or_return
 	for c, i in spec.outputs {
-		out_c[i] = Table_Col_Spec{name = strings.clone(c.name, a) or_return, type = c.type, cost = c.cost}
+		out_c[i] = Table_Col_Spec{
+			name     = strings.clone(c.name, a) or_return,
+			type     = c.type,
+			cost     = c.cost,
+			variants = clone_string_slice(a, c.variants) or_return,
+		}
 	}
 	rows := make([]Table_Row_Spec, len(spec.rows), a) or_return
 	for r, ri in spec.rows {
@@ -437,7 +452,11 @@ ir_query :: proc(b: ^Ir_Builder, spec: Query_Spec) -> mem.Allocator_Error {
 	a := vmem.arena_allocator(&b.arena)
 	params := make([]Field_Spec, len(spec.params), a) or_return
 	for p, i in spec.params {
-		params[i] = Field_Spec{name = strings.clone(p.name, a) or_return, type = p.type}
+		params[i] = Field_Spec{
+			name     = strings.clone(p.name, a) or_return,
+			type     = p.type,
+			variants = clone_string_slice(a, p.variants) or_return,
+		}
 	}
 	append(&b.queries, Query_Spec{
 		name         = strings.clone(spec.name, a) or_return,
@@ -561,10 +580,8 @@ lower_spec_clauses :: proc(
 	out = make([]Clause_IR, len(src), a) or_return
 	for c, i in src {
 		e_id := INVALID_EXPR
-		if c.has_expr || c.expr.kind != .Lit_Bool || c.expr.bool_val {
-			if c.has_expr || c.kind == .Eav {
-				e_id = lower_spec_expr(ir, exprs, extra_exprs, c.expr) or_return
-			}
+		if c.has_expr || c.kind == .Eav || ((c.kind == .Where || c.kind == .Let || c.kind == .Accum) && (c.expr.kind != .Lit_Bool || c.expr.bool_val)) {
+			e_id = lower_spec_expr(ir, exprs, extra_exprs, c.expr) or_return
 		}
 		g_id := INVALID_EXPR
 		if c.has_guard || c.kind == .Eav {
@@ -591,6 +608,30 @@ lower_spec_clauses :: proc(
 }
 
 @(private)
+lower_spec_type_ref :: proc(
+	ir: ^Rulebase_IR,
+	enums: ^[dynamic]Enum_Def,
+	owner_name: String_Id,
+	kind: Type_Kind,
+	variants: []string,
+	alloc: mem.Allocator,
+) -> (tr: Type_Ref, err: mem.Allocator_Error) {
+	tr.kind = kind
+	if kind == .Enum {
+		vars: []String_Id
+		if len(variants) > 0 {
+			vars = make([]String_Id, len(variants), alloc) or_return
+			for v, vi in variants {
+				vars[vi] = intern(&ir.interner, v) or_return
+			}
+		}
+		tr.ref_id = u32(len(enums^))
+		append(enums, Enum_Def{name = owner_name, variants = vars}) or_return
+	}
+	return tr, nil
+}
+
+@(private)
 parse_selector_string :: proc(
 	ir: ^Rulebase_IR,
 	selector: string,
@@ -602,17 +643,12 @@ parse_selector_string :: proc(
 	segs := make([dynamic]Selector_Segment, 0, 4, context.temp_allocator)
 	i := 0
 	for i < len(selector) {
-		if selector[i] == '.' {
+		c := selector[i]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
 			i += 1
-			start := i
-			for i < len(selector) && selector[i] != '.' && selector[i] != '[' {
-				i += 1
-			}
-			if i > start {
-				tid := intern(&ir.interner, selector[start:i]) or_return
-				append(&segs, Selector_Segment{kind = .Field, text = tid})
-			}
-		} else if selector[i] == '[' {
+			continue
+		}
+		if c == '[' {
 			i += 1
 			close := strings.index_byte(selector[i:], ']')
 			if close < 0 {
@@ -630,7 +666,21 @@ parse_selector_string :: proc(
 				append(&segs, Selector_Segment{kind = .Var_Key, text = tid})
 			}
 		} else {
-			i += 1
+			if c == '.' {
+				i += 1
+			}
+			start := i
+			for i < len(selector) {
+				sc := selector[i]
+				if sc == '.' || sc == '[' || sc == ' ' || sc == '\t' || sc == '\n' || sc == '\r' {
+					break
+				}
+				i += 1
+			}
+			if i > start {
+				tid := intern(&ir.interner, selector[start:i]) or_return
+				append(&segs, Selector_Segment{kind = .Field, text = tid})
+			}
 		}
 	}
 	if len(segs) == 0 {
@@ -662,25 +712,17 @@ ir_builder_build :: proc(
 	ir.module_name = intern(&ir.interner, b.module_name) or_return
 	ir.module_version = intern(&ir.interner, b.module_version) or_return
 
-	enums := make([dynamic]Enum_Def, 0, 8, context.temp_allocator)
-	exprs := make([dynamic]Expr_IR, 0, 64, context.temp_allocator)
-	extra_exprs := make([dynamic]Expr_Id, 0, 32, context.temp_allocator)
-	append(&exprs, Expr_IR{kind = .Invalid})
+	enums := make([dynamic]Enum_Def, 0, 8, context.temp_allocator) or_return
+	exprs := make([dynamic]Expr_IR, 0, 64, context.temp_allocator) or_return
+	extra_exprs := make([dynamic]Expr_Id, 0, 32, context.temp_allocator) or_return
+	append(&exprs, Expr_IR{kind = .Invalid}) or_return
 
 	ir.schemas = make([]Schema_Def, len(b.schemas), a) or_return
 	for s, si in b.schemas {
 		fields := make([]Field_Def, len(s.fields), a) or_return
 		for f, fi in s.fields {
 			fid := intern(&ir.interner, f.name) or_return
-			tr := Type_Ref{kind = f.type}
-			if f.type == .Enum {
-				vars := make([]String_Id, len(f.variants), a) or_return
-				for v, vi in f.variants {
-					vars[vi] = intern(&ir.interner, v) or_return
-				}
-				tr.ref_id = u32(len(enums))
-				append(&enums, Enum_Def{name = fid, variants = vars})
-			}
+			tr := lower_spec_type_ref(&ir, &enums, fid, f.type, f.variants, a) or_return
 			fields[fi] = Field_Def{name = fid, type = tr}
 		}
 		ir.schemas[si] = Schema_Def{name = intern(&ir.interner, s.name) or_return, fields = fields}
@@ -701,11 +743,15 @@ ir_builder_build :: proc(
 	for t, ti in b.tables {
 		inputs := make([]Table_Col_Def, len(t.inputs), a) or_return
 		for c, ci in t.inputs {
-			inputs[ci] = Table_Col_Def{name = intern(&ir.interner, c.name) or_return, type = Type_Ref{kind = c.type}, cost = c.cost}
+			cid := intern(&ir.interner, c.name) or_return
+			tr := lower_spec_type_ref(&ir, &enums, cid, c.type, c.variants, a) or_return
+			inputs[ci] = Table_Col_Def{name = cid, type = tr, cost = c.cost}
 		}
 		outputs := make([]Table_Col_Def, len(t.outputs), a) or_return
 		for c, ci in t.outputs {
-			outputs[ci] = Table_Col_Def{name = intern(&ir.interner, c.name) or_return, type = Type_Ref{kind = c.type}, cost = c.cost}
+			cid := intern(&ir.interner, c.name) or_return
+			tr := lower_spec_type_ref(&ir, &enums, cid, c.type, c.variants, a) or_return
+			outputs[ci] = Table_Col_Def{name = cid, type = tr, cost = c.cost}
 		}
 		rows := make([]Table_Row_Def, len(t.rows), a) or_return
 		for r, ri in t.rows {
@@ -768,7 +814,9 @@ ir_builder_build :: proc(
 	for q, qi in b.queries {
 		params := make([]Query_Param_Def, len(q.params), a) or_return
 		for p, pi in q.params {
-			params[pi] = Query_Param_Def{name = intern(&ir.interner, p.name) or_return, type = Type_Ref{kind = p.type}}
+			pid := intern(&ir.interner, p.name) or_return
+			ptr := lower_spec_type_ref(&ir, &enums, pid, p.type, p.variants, a) or_return
+			params[pi] = Query_Param_Def{name = pid, type = ptr}
 		}
 		ir.queries[qi] = Query_Def{
 			name         = intern(&ir.interner, q.name) or_return,

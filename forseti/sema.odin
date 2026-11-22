@@ -8,11 +8,18 @@ import "core:strings"
 
 @(private)
 Scope_Var :: struct {
-	name:  String_Id,
-	type:  Type_Ref,
-	span:  Span,
-	used:  bool,
-	depth: int,
+	name:       String_Id,
+	type:       Type_Ref,
+	span:       Span,
+	used:       bool,
+	depth:      int,
+	clause_gen: u32,
+}
+
+@(private)
+_Shadowed_Var :: struct {
+	prev:              Scope_Var,
+	shadowed_at_depth: int,
 }
 
 @(private)
@@ -30,6 +37,8 @@ Sema_Ctx :: struct {
 	seen_fields:   map[String_Id]bool,
 	pop_buf:       [dynamic]String_Id,
 	unused_buf:    [dynamic]Scope_Var,
+	shadowed_vars: [dynamic]_Shadowed_Var,
+	clause_gen:    u32,
 }
 
 @(private)
@@ -65,6 +74,21 @@ is_ordered_kind :: proc "contextless" (k: Type_Kind) -> bool {
 }
 
 @(private)
+is_int_literal_expr :: proc(ir: ^Rulebase_IR, eid: Expr_Id) -> bool {
+	if eid == INVALID_EXPR || int(eid) >= len(ir.exprs) {
+		return false
+	}
+	e := ir.exprs[eid]
+	if e.kind == .Lit_Int {
+		return true
+	}
+	if e.kind == .Unary && e.unary_op == .Neg && e.lhs != INVALID_EXPR && int(e.lhs) < len(ir.exprs) {
+		return ir.exprs[e.lhs].kind == .Lit_Int
+	}
+	return false
+}
+
+@(private)
 types_compatible :: proc(ir: ^Rulebase_IR, expected, actual: Type_Ref, actual_eid: Expr_Id = INVALID_EXPR) -> bool {
 	if expected.kind == .Unknown || actual.kind == .Unknown {
 		return true
@@ -81,8 +105,8 @@ types_compatible :: proc(ir: ^Rulebase_IR, expected, actual: Type_Ref, actual_ei
 		}
 		return true
 	}
-	if expected.kind == .I32 && actual.kind == .I64 && actual_eid != INVALID_EXPR {
-		return ir.exprs[actual_eid].kind == .Lit_Int
+	if expected.kind == .I32 && actual.kind == .I64 && is_int_literal_expr(ir, actual_eid) {
+		return true
 	}
 	if expected.kind == .Enum && actual.kind == .String {
 		return true
@@ -139,6 +163,7 @@ sema_eval_expr :: proc(
 	mark_used := true,
 	used_outer: ^bool = nil,
 	outer_depth := -1,
+	max_join_gen := max(u32),
 ) -> (ty: Type_Ref, err: mem.Allocator_Error) {
 	if eid == INVALID_EXPR || int(eid) >= len(ctx.ir.exprs) {
 		return Type_Ref{kind = .Unknown}, nil
@@ -174,14 +199,14 @@ sema_eval_expr :: proc(
 		if mark_used {
 			sv.used = true
 		}
-		if used_outer != nil && (outer_depth < 0 || sv.depth <= outer_depth) {
+		if used_outer != nil && (outer_depth < 0 || sv.depth <= outer_depth) && sv.clause_gen < max_join_gen {
 			used_outer^ = true
 		}
 		return sv.type, nil
 	case .Ident:
 		return Type_Ref{kind = .Unknown}, nil
 	case .Field_Access:
-		base_t := sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth) or_return
+		base_t := sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
 		if base_t.kind == .Unknown {
 			return Type_Ref{kind = .Unknown}, nil
 		}
@@ -217,7 +242,7 @@ sema_eval_expr :: proc(
 		sema_error(ctx, .E2001, e.span, fmt.tprintf("cannot access field %q on non-fact value", fname)) or_return
 		return Type_Ref{kind = .Unknown}, nil
 	case .Unary:
-		ot := sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth) or_return
+		ot := sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
 		if ot.kind == .Unknown {
 			return Type_Ref{kind = .Unknown}, nil
 		}
@@ -236,8 +261,8 @@ sema_eval_expr :: proc(
 			return Type_Ref{kind = .Bool}, nil
 		}
 	case .Binary:
-		lt := sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth) or_return
-		rt := sema_eval_expr(ctx, scope, e.rhs, mark_used, used_outer, outer_depth) or_return
+		lt := sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
+		rt := sema_eval_expr(ctx, scope, e.rhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
 		if lt.kind == .Unknown || rt.kind == .Unknown {
 			return Type_Ref{kind = .Unknown}, nil
 		}
@@ -260,7 +285,7 @@ sema_eval_expr :: proc(
 			}
 			return Type_Ref{kind = .Bool}, nil
 		case .Lt, .Lte, .Gt, .Gte:
-			if !is_ordered_kind(lt.kind) || !types_compatible(ctx.ir, lt, rt, e.rhs) {
+			if !is_ordered_kind(lt.kind) || !is_ordered_kind(rt.kind) || (!types_compatible(ctx.ir, lt, rt, e.rhs) && !types_compatible(ctx.ir, rt, lt, e.lhs)) {
 				sema_error(
 					ctx,
 					.E2002,
@@ -271,7 +296,7 @@ sema_eval_expr :: proc(
 			}
 			return Type_Ref{kind = .Bool}, nil
 		case .Add, .Sub, .Mul, .Div, .Mod:
-			if !is_numeric_kind(lt.kind) || !types_compatible(ctx.ir, lt, rt, e.rhs) {
+			if !is_numeric_kind(lt.kind) || !is_numeric_kind(rt.kind) || (!types_compatible(ctx.ir, lt, rt, e.rhs) && !types_compatible(ctx.ir, rt, lt, e.lhs)) {
 				sema_error(
 					ctx,
 					.E2002,
@@ -280,30 +305,36 @@ sema_eval_expr :: proc(
 				) or_return
 				return Type_Ref{kind = .Unknown}, nil
 			}
+			if lt.kind == .I64 && rt.kind == .I32 && is_int_literal_expr(ctx.ir, e.lhs) {
+				return rt, nil
+			}
 			return lt, nil
 		}
 	case .Range:
-		lt := sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth) or_return
-		rt := sema_eval_expr(ctx, scope, e.rhs, mark_used, used_outer, outer_depth) or_return
+		lt := sema_eval_expr(ctx, scope, e.lhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
+		rt := sema_eval_expr(ctx, scope, e.rhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
 		if lt.kind == .Unknown || rt.kind == .Unknown {
 			return Type_Ref{kind = .Unknown}, nil
 		}
-		if (!is_numeric_kind(lt.kind) && lt.kind != .Time) || !types_compatible(ctx.ir, lt, rt, e.rhs) {
+		if (!is_numeric_kind(lt.kind) && lt.kind != .Time) || (!is_numeric_kind(rt.kind) && rt.kind != .Time) || (!types_compatible(ctx.ir, lt, rt, e.rhs) && !types_compatible(ctx.ir, rt, lt, e.lhs)) {
 			sema_error(ctx, .E2002, e.span, "range bounds must have matching numeric or time types") or_return
 			return Type_Ref{kind = .Unknown}, nil
+		}
+		if lt.kind == .I64 && rt.kind == .I32 && is_int_literal_expr(ctx.ir, e.lhs) {
+			return rt, nil
 		}
 		return lt, nil
 	case .In_List:
 		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
-			_ = sema_eval_expr(ctx, scope, ctx.ir.extra_exprs[i], mark_used, used_outer, outer_depth) or_return
+			_ = sema_eval_expr(ctx, scope, ctx.ir.extra_exprs[i], mark_used, used_outer, outer_depth, max_join_gen) or_return
 		}
 		return Type_Ref{kind = .Bool}, nil
 	case .Cell_Cmp:
-		rt := sema_eval_expr(ctx, scope, e.rhs, mark_used, used_outer, outer_depth) or_return
+		rt := sema_eval_expr(ctx, scope, e.rhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
 		return rt, nil
 	case .Call:
 		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
-			_ = sema_eval_expr(ctx, scope, ctx.ir.extra_exprs[i], mark_used, used_outer, outer_depth) or_return
+			_ = sema_eval_expr(ctx, scope, ctx.ir.extra_exprs[i], mark_used, used_outer, outer_depth, max_join_gen) or_return
 		}
 		return Type_Ref{kind = .Unknown}, nil
 	}
@@ -342,7 +373,9 @@ sema_validate_table_cell :: proc(ctx: ^Sema_Ctx, col_type: Type_Ref, eid: Expr_I
 		return nil
 	case .Range:
 		rt := sema_eval_expr(ctx, nil, eid) or_return
-		if !types_compatible(ctx.ir, col_type, rt) {
+		compat := types_compatible(ctx.ir, col_type, rt) ||
+			(col_type.kind == .I32 && rt.kind == .I64 && is_int_literal_expr(ctx.ir, e.lhs) && is_int_literal_expr(ctx.ir, e.rhs))
+		if !compat {
 			sema_error(
 				ctx,
 				.E2002,
@@ -387,24 +420,32 @@ bind_scope_var :: proc(
 	type: Type_Ref,
 	span: Span,
 	depth: int,
+	clause_gen: u32 = 0,
 ) -> mem.Allocator_Error {
 	if name == EMPTY_STRING {
 		return nil
 	}
-	if _, exists := scope^[name]; exists {
+	if prev, exists := scope^[name]; exists {
 		sema_warn(
 			ctx,
 			.W2005,
 			span,
 			fmt.tprintf("variable %q shadows an existing binding", ir_string(ctx.ir, name)),
 		) or_return
+		if prev.depth < depth {
+			append(&ctx.shadowed_vars, _Shadowed_Var{
+				prev              = prev,
+				shadowed_at_depth = depth,
+			})
+		}
 	}
 	scope^[name] = Scope_Var{
-		name  = name,
-		type  = type,
-		span  = span,
-		used  = false,
-		depth = depth,
+		name       = name,
+		type       = type,
+		span       = span,
+		used       = false,
+		depth      = depth,
+		clause_gen = clause_gen,
 	}
 	return nil
 }
@@ -419,6 +460,14 @@ pop_scope_depth :: proc(ctx: ^Sema_Ctx, scope: ^map[String_Id]Scope_Var, min_kee
 	}
 	for k in ctx.pop_buf {
 		delete_key(scope, k)
+	}
+	for len(ctx.shadowed_vars) > 0 {
+		top := ctx.shadowed_vars[len(ctx.shadowed_vars) - 1]
+		if top.shadowed_at_depth <= min_keep_depth {
+			break
+		}
+		pop(&ctx.shadowed_vars)
+		scope^[top.prev.name] = top.prev
 	}
 }
 
@@ -437,6 +486,8 @@ sema_analyze_clauses :: proc(
 		case .Pattern:
 			prior_had_vars := len(scope^) > 0
 			shares_join := false
+			ctx.clause_gen += 1
+			cur_gen := ctx.clause_gen
 			sid, s_ok := resolve_target_schema(ctx, cl.target)
 			if !s_ok {
 				sema_error(
@@ -451,7 +502,7 @@ sema_analyze_clauses :: proc(
 
 			if cl.bind_var != EMPTY_STRING {
 				ft := Type_Ref{kind = .Fact, ref_id = sid} if s_ok else Type_Ref{kind = .Unknown}
-				bind_scope_var(ctx, scope, cl.bind_var, ft, cl.span, depth) or_return
+				bind_scope_var(ctx, scope, cl.bind_var, ft, cl.span, depth, cur_gen) or_return
 			}
 
 			for fb in cl.fields {
@@ -470,11 +521,16 @@ sema_analyze_clauses :: proc(
 					}
 				}
 
+				if fb.expr == INVALID_EXPR || int(fb.expr) >= len(ctx.ir.exprs) {
+					continue
+				}
 				expr := ctx.ir.exprs[fb.expr]
 				if expr.kind == .Var {
 					if sv, existing := &scope^[expr.str_id]; existing {
 						sv.used = true
-						shares_join = true
+						if sv.clause_gen < cur_gen {
+							shares_join = true
+						}
 						if !types_compatible(ctx.ir, expected_t, sv.type) {
 							sema_error(
 								ctx,
@@ -491,15 +547,16 @@ sema_analyze_clauses :: proc(
 						}
 					} else {
 						scope^[expr.str_id] = Scope_Var{
-							name  = expr.str_id,
-							type  = expected_t,
-							span  = expr.span,
-							used  = false,
-							depth = depth,
+							name       = expr.str_id,
+							type       = expected_t,
+							span       = expr.span,
+							used       = false,
+							depth      = depth,
+							clause_gen = cur_gen,
 						}
 					}
 				} else {
-					et := sema_eval_expr(ctx, scope, fb.expr, true, &shares_join, depth) or_return
+					et := sema_eval_expr(ctx, scope, fb.expr, true, &shares_join, depth, cur_gen) or_return
 					if !types_compatible(ctx.ir, expected_t, et, fb.expr) {
 						sema_error(
 							ctx,
@@ -527,31 +584,36 @@ sema_analyze_clauses :: proc(
 		case .Eav:
 			prior_had_vars := len(scope^) > 0
 			shares_join := false
+			ctx.clause_gen += 1
+			cur_gen := ctx.clause_gen
 			if cl.bind_var != EMPTY_STRING {
-				bind_scope_var(ctx, scope, cl.bind_var, Type_Ref{kind = .Unknown}, cl.span, depth) or_return
+				bind_scope_var(ctx, scope, cl.bind_var, Type_Ref{kind = .Unknown}, cl.span, depth, cur_gen) or_return
 			}
 			eav_exprs := [3]Expr_Id{cl.expr, cl.guard_expr, cl.extra_expr}
 			eav_types := [3]Type_Kind{.Entity, .String, .Unknown}
 			for eid, slot_idx in eav_exprs {
-				if eid == INVALID_EXPR {
+				if eid == INVALID_EXPR || int(eid) >= len(ctx.ir.exprs) {
 					continue
 				}
 				ex := ctx.ir.exprs[eid]
 				if ex.kind == .Var {
 					if sv, existing := &scope^[ex.str_id]; existing {
 						sv.used = true
-						shares_join = true
+						if sv.clause_gen < cur_gen {
+							shares_join = true
+						}
 					} else {
 						scope^[ex.str_id] = Scope_Var{
-							name  = ex.str_id,
-							type  = Type_Ref{kind = eav_types[slot_idx]},
-							span  = ex.span,
-							used  = false,
-							depth = depth,
+							name       = ex.str_id,
+							type       = Type_Ref{kind = eav_types[slot_idx]},
+							span       = ex.span,
+							used       = false,
+							depth      = depth,
+							clause_gen = cur_gen,
 						}
 					}
 				} else {
-					_ = sema_eval_expr(ctx, scope, eid, true, &shares_join, depth) or_return
+					_ = sema_eval_expr(ctx, scope, eid, true, &shares_join, depth, cur_gen) or_return
 				}
 			}
 			if positive_count != nil && depth == 0 {
@@ -571,7 +633,7 @@ sema_analyze_clauses :: proc(
 		case .Accum:
 			sema_analyze_clauses(ctx, scope, cl.inner_pat, depth + 1, nil, nil, nil) or_return
 			agg_t := sema_eval_expr(ctx, scope, cl.expr, true) or_return
-			if cl.guard_expr != INVALID_EXPR {
+			if cl.guard_expr != INVALID_EXPR && int(cl.guard_expr) < len(ctx.ir.exprs) {
 				gt := sema_eval_expr(ctx, scope, cl.guard_expr, true) or_return
 				if gt.kind != .Unknown && gt.kind != .Bool {
 					sema_error(ctx, .E2002, ctx.ir.exprs[cl.guard_expr].span, "accumulator 'where' guard must be boolean") or_return
@@ -599,7 +661,7 @@ sema_analyze_clauses :: proc(
 			case .Distinct, .Collect:
 				res_t = Type_Ref{kind = .Unknown}
 			}
-			bind_scope_var(ctx, scope, cl.bind_var, res_t, cl.span, depth) or_return
+			bind_scope_var(ctx, scope, cl.bind_var, res_t, cl.span, depth, ctx.clause_gen) or_return
 
 		case .Decide:
 			tid, t_ok := ctx.table_map[cl.target]
@@ -656,23 +718,24 @@ sema_analyze_clauses :: proc(
 
 			if cl.bind_var != EMPTY_STRING {
 				rt := Type_Ref{kind = .Table_Result, ref_id = tid} if t_ok else Type_Ref{kind = .Unknown}
-				bind_scope_var(ctx, scope, cl.bind_var, rt, cl.span, depth) or_return
+				bind_scope_var(ctx, scope, cl.bind_var, rt, cl.span, depth, ctx.clause_gen) or_return
 			}
 
 		case .Where:
 			wt := sema_eval_expr(ctx, scope, cl.expr, true) or_return
 			if wt.kind != .Unknown && wt.kind != .Bool {
+				wspan := ctx.ir.exprs[cl.expr].span if cl.expr != INVALID_EXPR && int(cl.expr) < len(ctx.ir.exprs) else cl.span
 				sema_error(
 					ctx,
 					.E2002,
-					ctx.ir.exprs[cl.expr].span,
+					wspan,
 					fmt.tprintf("'where' predicate must evaluate to bool, got %s", type_kind_str(wt.kind)),
 				) or_return
 			}
 
 		case .Let:
 			lt := sema_eval_expr(ctx, scope, cl.expr, true) or_return
-			bind_scope_var(ctx, scope, cl.bind_var, lt, cl.span, depth) or_return
+			bind_scope_var(ctx, scope, cl.bind_var, lt, cl.span, depth, ctx.clause_gen) or_return
 		}
 	}
 	return nil
@@ -848,6 +911,7 @@ analyze_ir :: proc(
 	ctx.seen_fields = make(map[String_Id]bool, 16, sa)
 	ctx.pop_buf = make([dynamic]String_Id, 0, 8, sa)
 	ctx.unused_buf = make([dynamic]Scope_Var, 0, 8, sa)
+	ctx.shadowed_vars = make([dynamic]_Shadowed_Var, 0, 8, sa)
 
 	// Pass 1: Symbol tables & duplicate detection (E2004)
 	fset := make(map[String_Id]bool, 16, sa)
@@ -876,6 +940,7 @@ analyze_ir :: proc(
 			bind.schema_id = Schema_Id(sid)
 			ctx.schema_ref[sid] = true
 		} else {
+			bind.schema_id = Schema_Id(INVALID_ID)
 			sema_error(
 				&ctx,
 				.E2001,
@@ -960,6 +1025,9 @@ analyze_ir :: proc(
 				}
 			}
 			for out_id, oi in row.outputs {
+				if out_id == INVALID_EXPR || int(out_id) >= len(ir.exprs) {
+					continue
+				}
 				if oi < len(tbl.outputs) {
 					if ir.exprs[out_id].kind == .Wildcard {
 						continue
@@ -984,6 +1052,8 @@ analyze_ir :: proc(
 	for r in ir.rules {
 		clear(&scope)
 		clear(&matched_targets)
+		clear(&ctx.shadowed_vars)
+		ctx.clause_gen = 0
 		positive_count := 0
 		has_not := false
 
@@ -995,6 +1065,8 @@ analyze_ir :: proc(
 	for q in ir.queries {
 		clear(&scope)
 		clear(&matched_targets)
+		clear(&ctx.shadowed_vars)
+		ctx.clause_gen = 0
 		for p in q.params {
 			qvar_name := fmt.tprintf("?%s", ir_string(ir, p.name))
 			qid := intern(&ir.interner, qvar_name) or_return

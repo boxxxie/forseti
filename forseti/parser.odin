@@ -719,11 +719,26 @@ parse_table_cell_atom :: proc(p: ^Parser) -> (id: Node_Id, err: mem.Allocator_Er
 }
 
 @(private)
-parse_table_cell :: proc(p: ^Parser) -> (id: Node_Id, err: mem.Allocator_Error) {
+parse_table_cell_and :: proc(p: ^Parser) -> (id: Node_Id, err: mem.Allocator_Error) {
 	lhs := parse_table_cell_atom(p) or_return
-	for peek(p).kind == .Kw_And || peek(p).kind == .Kw_Or {
+	for peek(p).kind == .Kw_And {
 		op_tok := advance(p)
 		rhs := parse_table_cell_atom(p) or_return
+		span := merge_spans(p.pool.nodes[lhs].span, p.pool.nodes[rhs].span)
+		lhs = ast_add_node(p.pool, Ast_Node{
+			span    = span,
+			payload = Ast_Binary{op = token_to_binop(op_tok.kind), lhs = lhs, rhs = rhs},
+		}) or_return
+	}
+	return lhs, nil
+}
+
+@(private)
+parse_table_cell :: proc(p: ^Parser) -> (id: Node_Id, err: mem.Allocator_Error) {
+	lhs := parse_table_cell_and(p) or_return
+	for peek(p).kind == .Kw_Or {
+		op_tok := advance(p)
+		rhs := parse_table_cell_and(p) or_return
 		span := merge_spans(p.pool.nodes[lhs].span, p.pool.nodes[rhs].span)
 		lhs = ast_add_node(p.pool, Ast_Node{
 			span    = span,
@@ -762,7 +777,7 @@ parse_table_cols_block :: proc(p: ^Parser, is_input: bool) -> (cols: [dynamic]As
 			if ctok.kind == .Int {
 				_ = advance(p)
 				cval, cok := parse_int_literal(p, ctok)
-				if cok && cval >= 0 {
+				if cok && cval >= 0 && cval <= i64(max(u32)) {
 					cost = u32(cval)
 				} else {
 					report_parse_error(p, ctok.span, .E1002, "cost must be a non-negative integer") or_return
@@ -1370,7 +1385,7 @@ parse_rule_decl :: proc(p: ^Parser) -> mem.Allocator_Error {
 			if stok.kind == .Int {
 				_ = advance(p)
 				sval, sok := parse_int_literal(p, stok)
-				if sok {
+				if sok && ((neg && sval <= -i64(min(i32))) || (!neg && sval <= i64(max(i32)))) {
 					salience = i32(-sval if neg else sval)
 					has_salience = true
 				} else {
