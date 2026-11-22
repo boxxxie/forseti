@@ -528,55 +528,59 @@ session_modify_fact_by_key :: proc(
 	key: string,
 	new_fields: []Value,
 ) -> Session_Error {
-	if s != nil && s.rb != nil && s.provenance.mode == .Fast {
-		if bidx, ok := session_find_binding(s, binding_name); ok {
-			if key_id, k_ok := _lookup_interned_string_id(&s.rb.interner, &s.interner, key); k_ok {
-				lk := Fact_Lookup_Key{binding_idx = bidx, key = key_id}
-				if fid, found := s.facts_by_key[lk]; found {
-					f := &s.facts[fid]
-					if f.alive && f.origin == .External {
-						bdef := s.rb.bindings[bidx]
-						schema := s.rb.schemas[bdef.schema_id]
-						if r_err := _validate_fact_fields_range(schema, new_fields); r_err != .None {
-							return r_err
-						}
-						f.alive = false
-						alpha_eval_retract_fact(s, fid)
-						agenda_remove_fact(&s.agenda, fid)
-						jtms_retract_cascades_for_fact(s, fid)
-						f = &s.facts[fid]
+	if s == nil || s.rb == nil {
+		return .Unknown_Binding
+	}
+	bidx, ok := session_find_binding(s, binding_name)
+	if !ok {
+		return .Unknown_Binding
+	}
+	bdef := s.rb.bindings[bidx]
+	schema := s.rb.schemas[bdef.schema_id]
+	if r_err := _validate_fact_fields_range(schema, new_fields); r_err != .None {
+		return r_err
+	}
+	if s.provenance.mode == .Fast {
+		if key_id, k_ok := _lookup_interned_string_id(&s.rb.interner, &s.interner, key); k_ok {
+			lk := Fact_Lookup_Key{binding_idx = bidx, key = key_id}
+			if fid, found := s.facts_by_key[lk]; found {
+				f := &s.facts[fid]
+				if f.alive && f.origin == .External {
+					f.alive = false
+					alpha_eval_retract_fact(s, fid)
+					agenda_remove_fact(&s.agenda, fid)
+					jtms_retract_cascades_for_fact(s, fid)
+					f = &s.facts[fid]
 
-						need_len := max(len(schema.fields), len(new_fields))
-						if len(f.fields) != need_len {
-							if f.fields != nil {
-								delete(f.fields, s.allocator)
-							}
-							f.fields = make([]Value, need_len, s.allocator)
-						} else {
-							for &fv in f.fields {
-								fv = nil
-							}
+					need_len := max(len(schema.fields), len(new_fields))
+					if len(f.fields) != need_len {
+						if f.fields != nil {
+							delete(f.fields, s.allocator)
 						}
-						_normalize_fact_fields_into(s, schema, new_fields, f.fields)
-						f.has_cursor = false
-						f.cursor = {}
-						f.recency = s.next_recency
-						s.next_recency += 1
-						f.alive = true
-						f.support_count = 1
-						f.proof_height = 0
-						f.best_derivation = INVALID_DERIVATION
-
-						_record_dirty_derived_fact(s, fid, bidx)
-						alpha_eval_insert_fact(s, fid)
-						return .None
+						f.fields = make([]Value, need_len, s.allocator)
+					} else {
+						for &fv in f.fields {
+							fv = nil
+						}
 					}
+					_normalize_fact_fields_into(s, schema, new_fields, f.fields)
+					f.has_cursor = false
+					f.cursor = {}
+					f.recency = s.next_recency
+					s.next_recency += 1
+					f.alive = true
+					f.support_count = 1
+					f.proof_height = 0
+					f.best_derivation = INVALID_DERIVATION
+
+					_record_dirty_derived_fact(s, fid, bidx)
+					alpha_eval_insert_fact(s, fid)
+					return .None
 				}
 			}
 		}
 	}
-	session_retract_fact_by_key(s, binding_name, key) or_return
-	_, err := session_insert_fact(s, binding_name, key, new_fields)
+	_, err := session_insert_fact_by_idx(s, bidx, key, new_fields)
 	return err
 }
 

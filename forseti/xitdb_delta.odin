@@ -363,6 +363,7 @@ _Pending_Wc_State :: struct {
 @(private)
 _sync_full_scan :: proc(
 	wc: ^Watched_Collection,
+	col_path: string,
 	col_cur: xitdb.Read_Cursor,
 	has_col: bool,
 	is_resync: bool,
@@ -427,8 +428,8 @@ _sync_full_scan :: proc(
 							if _, a_err := append(pending_ops, _Pending_Key_Op{wc = wc, key = k_scratch, fp = fp}); a_err != nil {
 								return a_err
 							}
-							_emit_delta(out, wc.path, k_str, .Changed_Old, {}, vc) or_return
-							_emit_delta(out, wc.path, k_str, .Changed_New, {}, vc) or_return
+							_emit_delta(out, col_path, k_str, .Changed_Old, {}, vc) or_return
+							_emit_delta(out, col_path, k_str, .Changed_New, {}, vc) or_return
 						}
 						continue
 					}
@@ -443,7 +444,7 @@ _sync_full_scan :: proc(
 				if _, a_err := append(pending_ops, _Pending_Key_Op{wc = wc, key = k_scratch, fp = fp}); a_err != nil {
 					return a_err
 				}
-				_emit_delta(out, wc.path, k_str, .Added, {}, vc) or_return
+				_emit_delta(out, col_path, k_str, .Added, {}, vc) or_return
 			}
 		}
 	}
@@ -458,7 +459,7 @@ _sync_full_scan :: proc(
 			}
 		}
 		for rk in removed {
-			_emit_delta(out, wc.path, rk, .Removed, {}, {}) or_return
+			_emit_delta(out, col_path, rk, .Removed, {}, {}) or_return
 			if _, a_err := append(pending_ops, _Pending_Key_Op{wc = wc, key = rk, delete = true}); a_err != nil {
 				return a_err
 			}
@@ -492,8 +493,37 @@ delta_syncer_sync :: proc(
 	}
 	out.deltas = make([dynamic]Fact_Delta, 0, 16, s.allocator) or_return
 
+	out_alloc := vmem.arena_allocator(&out.arena)
 	moment_count := store_bridge_moment_count(bridge) or_return
 	if moment_count == 0 {
+		if !s.has_synced {
+			return nil
+		}
+		out.was_compacted = true
+		for &wc in s.watched {
+			if len(wc.logical_keys) == 0 {
+				continue
+			}
+			col_path, cp_err := strings.clone(wc.path, out_alloc)
+			if cp_err != nil {
+				return cp_err
+			}
+			for k in wc.logical_keys {
+				_emit_delta(out, col_path, k, .Removed, {}, {}) or_return
+			}
+		}
+		for &wc in s.watched {
+			for k in wc.logical_keys {
+				delete(k, s.allocator)
+			}
+			clear(&wc.logical_keys)
+			wc.has_prev = false
+			wc.prev_collection_slot = {}
+		}
+		s.has_synced = false
+		s.last_file_id = 0
+		s.last_moment_index = 0
+		s.last_moment_slot = {}
 		return nil
 	}
 	cur_moment_idx := moment_count - 1
@@ -535,6 +565,7 @@ delta_syncer_sync :: proc(
 	pending_wc := make([dynamic]_Pending_Wc_State, 0, len(s.watched), scratch)
 
 	for &wc in s.watched {
+		col_path := strings.clone(wc.path, out_alloc) or_return
 		cur_col_cur, cur_ok, cc_err := store_resolve_path_prehashed(cur_m_cur, wc.path_keys)
 		if cc_err != nil {
 			return cc_err
@@ -549,7 +580,7 @@ delta_syncer_sync :: proc(
 		}
 
 		if !s.has_synced || !wc.has_prev || compacted {
-			_sync_full_scan(&wc, cur_col_cur, cur_ok, s.has_synced && wc.has_prev, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, cur_col_cur, cur_ok, s.has_synced && wc.has_prev, out, &pending_ops, scratch) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_has_prev         = true,
@@ -583,7 +614,7 @@ delta_syncer_sync :: proc(
 			continue
 		}
 		if !prev_ok && cur_ok {
-			_sync_full_scan(&wc, cur_col_cur, true, false, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, cur_col_cur, true, false, out, &pending_ops, scratch) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_prev_slot        = true,
@@ -594,7 +625,7 @@ delta_syncer_sync :: proc(
 			continue
 		}
 		if prev_ok && !cur_ok {
-			_sync_full_scan(&wc, {}, false, true, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, {}, false, true, out, &pending_ops, scratch) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_prev_slot        = true,
@@ -622,19 +653,19 @@ delta_syncer_sync :: proc(
 				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, fp = fp}); a_err != nil {
 					return a_err
 				}
-				_emit_delta(out, wc.path, k_str, .Added, {}, ch.new_value) or_return
+				_emit_delta(out, col_path, k_str, .Added, {}, ch.new_value) or_return
 			case .Removed:
 				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, delete = true}); a_err != nil {
 					return a_err
 				}
-				_emit_delta(out, wc.path, k_str, .Removed, ch.old_value, {}) or_return
+				_emit_delta(out, col_path, k_str, .Removed, ch.old_value, {}) or_return
 			case .Changed:
 				fp := _cursor_content_fingerprint(ch.new_value, scratch) or_return
 				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, fp = fp}); a_err != nil {
 					return a_err
 				}
-				_emit_delta(out, wc.path, k_str, .Changed_Old, ch.old_value, ch.new_value) or_return
-				_emit_delta(out, wc.path, k_str, .Changed_New, ch.old_value, ch.new_value) or_return
+				_emit_delta(out, col_path, k_str, .Changed_Old, ch.old_value, ch.new_value) or_return
+				_emit_delta(out, col_path, k_str, .Changed_New, ch.old_value, ch.new_value) or_return
 			}
 		}
 		if _, a_err := append(&pending_wc, _Pending_Wc_State{
@@ -646,11 +677,43 @@ delta_syncer_sync :: proc(
 		}
 	}
 
-	for op in pending_ops {
+	for &wc in s.watched {
+		add_cnt := 0
+		for op in pending_ops {
+			if op.wc == &wc && !op.delete && !(op.key in wc.logical_keys) {
+				add_cnt += 1
+			}
+		}
+		if add_cnt > 0 {
+			reserve(&wc.logical_keys, len(wc.logical_keys) + add_cnt) or_return
+		}
+	}
+	staged_keys := make([]string, len(pending_ops), scratch)
+	staged_committed := false
+	defer if !staged_committed {
+		for sk in staged_keys {
+			if len(sk) > 0 {
+				delete(sk, s.allocator)
+			}
+		}
+	}
+	for op, oi in pending_ops {
+		if !op.delete && !(op.key in op.wc.logical_keys) {
+			staged_keys[oi] = strings.clone(op.key, s.allocator) or_return
+		}
+	}
+	staged_committed = true
+
+	for op, oi in pending_ops {
 		if op.delete {
 			_delete_logical_key(s, op.wc, op.key)
+		} else if op.key in op.wc.logical_keys {
+			op.wc.logical_keys[op.key] = op.fp
+			if len(staged_keys[oi]) > 0 {
+				delete(staged_keys[oi], s.allocator)
+			}
 		} else {
-			_update_logical_key_fp(s, op.wc, op.key, op.fp) or_return
+			op.wc.logical_keys[staged_keys[oi]] = op.fp
 		}
 	}
 	for pwc in pending_wc {

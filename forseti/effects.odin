@@ -242,7 +242,36 @@ session_apply_effects :: proc(
 	if s == nil || s.rb == nil {
 		return nil, .Invalid_Arg
 	}
-	out := make([dynamic]Fact_Id, 0, len(results), allocator)
+
+	seen_jobs: map[u64]bool
+	if len(results) > 1 {
+		seen_jobs = make(map[u64]bool, len(results), context.temp_allocator)
+	}
+	total_facts := 0
+	for res in results {
+		if !(res.job_id in s.inflight_effects) {
+			return nil, .Invalid_Arg
+		}
+		if len(results) > 1 {
+			if res.job_id in seen_jobs {
+				return nil, .Invalid_Arg
+			}
+			seen_jobs[res.job_id] = true
+		}
+		for rf in res.facts {
+			bidx, bok := session_find_binding(s, rf.binding_name)
+			if !bok {
+				return nil, .Unknown_Binding
+			}
+			schema := s.rb.schemas[s.rb.bindings[bidx].schema_id]
+			if r_err := _validate_fact_fields_range(schema, rf.fields); r_err != .None {
+				return nil, r_err
+			}
+			total_facts += 1
+		}
+	}
+
+	out := make([dynamic]Fact_Id, 0, total_facts, allocator)
 	defer if err != .None {
 		delete(out)
 	}

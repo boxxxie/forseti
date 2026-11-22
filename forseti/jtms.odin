@@ -308,15 +308,36 @@ jtms_assert_logical :: proc(
 	_normalize_fact_fields_into(s, schema, raw_fields, norm_fields)
 	chash := _compute_fact_content_hash(s, binding_idx, norm_fields)
 
-	// Compute candidate proof_height = 1 + max(parent proof_heights).
+	// Filter to valid live parents and compute candidate proof_height = 1 + max(parent proof_heights).
+	valid_buf: [16]Fact_Id
+	valid_dyn: [dynamic]Fact_Id
+	valid_parents: []Fact_Id
 	max_p_h := u32(0)
-	for pfid in parent_facts {
-		if pfid != INVALID_FACT && int(pfid) < len(s.facts) && s.facts[pfid].alive {
-			ph := s.facts[pfid].proof_height
-			if ph > max_p_h {
-				max_p_h = ph
+	if len(parent_facts) <= len(valid_buf) {
+		vcnt := 0
+		for pfid in parent_facts {
+			if pfid != INVALID_FACT && int(pfid) < len(s.facts) && s.facts[pfid].alive {
+				valid_buf[vcnt] = pfid
+				vcnt += 1
+				ph := s.facts[pfid].proof_height
+				if ph > max_p_h {
+					max_p_h = ph
+				}
 			}
 		}
+		valid_parents = valid_buf[:vcnt]
+	} else {
+		valid_dyn = make([dynamic]Fact_Id, 0, len(parent_facts), context.temp_allocator)
+		for pfid in parent_facts {
+			if pfid != INVALID_FACT && int(pfid) < len(s.facts) && s.facts[pfid].alive {
+				append(&valid_dyn, pfid)
+				ph := s.facts[pfid].proof_height
+				if ph > max_p_h {
+					max_p_h = ph
+				}
+			}
+		}
+		valid_parents = valid_dyn[:]
 	}
 	new_height := max_p_h + 1
 
@@ -416,7 +437,7 @@ jtms_assert_logical :: proc(
 		fid,
 		rule_id,
 		_rule_ver_u16(s, rule_id),
-		parent_facts,
+		valid_parents,
 		new_height,
 		.Logical,
 		table_idx,
@@ -427,17 +448,17 @@ jtms_assert_logical :: proc(
 	}
 
 	// Register JTMS Justification & premise links (using inline storage for <= 4 parents).
-	pcnt := u16(min(len(parent_facts), int(max(u16))))
+	pcnt := u16(min(len(valid_parents), int(max(u16))))
 	inline_buf: [4]Fact_Id
 	p_start := u32(0)
 	if int(pcnt) <= len(inline_buf) {
 		for pi := 0; pi < int(pcnt); pi += 1 {
-			inline_buf[pi] = parent_facts[pi]
+			inline_buf[pi] = valid_parents[pi]
 		}
 	} else {
 		p_start = u32(len(s.jtms.just_parents))
 		for pi := 0; pi < int(pcnt); pi += 1 {
-			append(&s.jtms.just_parents, parent_facts[pi])
+			append(&s.jtms.just_parents, valid_parents[pi])
 		}
 	}
 
@@ -479,7 +500,7 @@ jtms_assert_logical :: proc(
 	}
 	append(fj_list, jid)
 
-	for pf in parent_facts[:int(pcnt)] {
+	for pf in valid_parents[:int(pcnt)] {
 		pj_list, has_pj := &s.jtms.premise_to_justs[pf]
 		if !has_pj {
 			s.jtms.premise_to_justs[pf] = make([dynamic]u32, 0, 4, s.allocator)
@@ -764,6 +785,9 @@ jtms_cascade_from_affected_facts :: proc(s: ^Session, seed_facts: []Fact_Id) {
 					if fast_mode {
 						append(&dead_justs, jid)
 					}
+				}
+				if af, has_af := &s.jtms.active_firings[j.firing_key]; has_af {
+					af.alive = false
 				}
 			}
 		}

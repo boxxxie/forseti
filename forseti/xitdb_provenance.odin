@@ -21,7 +21,7 @@ _write_derived_fact_record :: proc(
 	kstr := session_string(s, f.key)
 	hbuf: [64]u8 = ---
 	h := xitdb.database_digest_string_buf(col_map.cursor.db, kstr, hbuf[:])
-	_, _ = xitdb.hash_map_remove_by_hash(col_map, h)
+	_ = xitdb.hash_map_remove_by_hash(col_map, h) or_return
 	xitdb.hash_map_put_key_by_hash(col_map, h, kstr) or_return
 	rec_wc := xitdb.hash_map_put_cursor_by_hash(col_map, h) or_return
 	rec_m := xitdb.write_hash_map_init(rec_wc) or_return
@@ -96,7 +96,7 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 			}
 			cm := get_derived_col(s, moment_wc, &col_maps, lk.binding_idx) or_return
 			kstr := session_string(s, lk.key)
-			_, _ = xitdb.hash_map_remove(cm, kstr)
+			_ = xitdb.hash_map_remove(cm, kstr) or_return
 		}
 
 		for fid in s.dirty_derived_fids {
@@ -122,7 +122,7 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 		}
 	} else {
 		for bdef, bi in s.rb.bindings {
-			if bdef.kind != .Derived {
+			if bdef.kind != .Derived || bi >= len(s.rb.binding_path_hashes) {
 				continue
 			}
 			path_keys := s.rb.binding_path_hashes[bi]
@@ -142,7 +142,7 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 					cur_fid, has_cur := s.facts_by_key[lk]
 					if !has_cur || !s.facts[cur_fid].alive {
 						kstr := session_string(s, lk.key)
-						_, _ = xitdb.hash_map_remove(&col_map, kstr)
+						_ = xitdb.hash_map_remove(&col_map, kstr) or_return
 					}
 				}
 			}
@@ -177,7 +177,7 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 	by_rule_m := xitdb.write_hash_map_init(by_rule_wc) or_return
 
 	// Reset __tx fresh per transaction so __tx.decision_ids reflects this commit only.
-	_, _ = hash_map_remove_prehashed(&root_m, &ak.tx_root)
+	_ = hash_map_remove_prehashed(&root_m, &ak.tx_root) or_return
 	tx_wc := hash_map_put_cursor_prehashed(&root_m, &ak.tx_root) or_return
 	tx_m := xitdb.write_hash_map_init(tx_wc) or_return
 
@@ -260,7 +260,7 @@ _commit_derived_and_audit_tx_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_dat
 
 		// Record parent facts & index under idx.decisions_by_entity for each parent key too.
 		parents := provenance_parents(&s.provenance, Derivation_Id(di))
-		_, _ = hash_map_remove_prehashed(&drec_m, &ak.parents)
+		_ = hash_map_remove_prehashed(&drec_m, &ak.parents) or_return
 		par_wc := hash_map_put_cursor_prehashed(&drec_m, &ak.parents) or_return
 		par_arr := xitdb.write_array_list_init(par_wc) or_return
 		for pf in parents {
