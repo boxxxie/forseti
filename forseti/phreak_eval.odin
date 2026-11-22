@@ -118,25 +118,30 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 
 	remaining := &s.dirty_segs_rem
 	clear(remaining)
-	for seg_id in s.dirty_segs {
-		sm, ok := s.seg_mems[seg_id]
-		if !ok || !sm.dirty {
-			continue
+	work := &s.dirty_segs_work
+	for len(s.dirty_segs) > 0 {
+		clear(work)
+		work^, s.dirty_segs = s.dirty_segs, work^
+		for seg_id in work^ {
+			sm, ok := s.seg_mems[seg_id]
+			if !ok || !sm.dirty {
+				continue
+			}
+			sdef := s.rb.segments[seg_id]
+			st := s.rb.rules[sdef.rule_id].stratum if int(sdef.rule_id) < len(s.rb.rules) else u32(0)
+			if !evaluate_all_strata && st != target_stratum {
+				append(remaining, seg_id)
+				continue
+			}
+			sm.dirty = false
+			if !sm.was_linked {
+				jtms_revoke_all_rule_firings(s, sdef.rule_id)
+				continue
+			}
+			_push_segment_frame(s, seg_id)
 		}
-		sdef := s.rb.segments[seg_id]
-		st := s.rb.rules[sdef.rule_id].stratum if int(sdef.rule_id) < len(s.rb.rules) else u32(0)
-		if !evaluate_all_strata && st != target_stratum {
-			append(remaining, seg_id)
-			continue
-		}
-		sm.dirty = false
-		if !sm.was_linked {
-			jtms_revoke_all_rule_firings(s, sdef.rule_id)
-			continue
-		}
-		_push_segment_frame(s, seg_id)
 	}
-	clear(&s.dirty_segs)
+	clear(work)
 	s.dirty_segs, s.dirty_segs_rem = s.dirty_segs_rem, s.dirty_segs
 
 	fact_slots_buf: [MAX_TOKEN_FACTS]Vm_Fact_Binding
@@ -313,7 +318,10 @@ phreak_evaluate_stratum :: proc(s: ^Session, target_stratum: u32, evaluate_all_s
 				if frame.sub_step < len(sub.steps) {
 					step := sub.steps[frame.sub_step]
 					nxt := _acquire_token_buf(s)
-					_subnetwork_eval_step(s, step, frame.sub_tokens[:], &nxt) or_return
+					if step_err := _subnetwork_eval_step(s, step, frame.sub_tokens[:], &nxt); step_err != .None {
+						_release_token_buf(s, &nxt)
+						return step_err
+					}
 					_release_token_buf(s, &frame.sub_tokens)
 					frame.sub_tokens = nxt
 					frame.sub_step += 1

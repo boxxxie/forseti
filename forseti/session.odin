@@ -93,6 +93,7 @@ Session :: struct {
 	seg_mems:               map[u32]^Segment_Memory,
 	dirty_segs:             [dynamic]u32,
 	dirty_segs_rem:         [dynamic]u32,
+	dirty_segs_work:        [dynamic]u32,
 	zero_input_seeded:      bool,
 	beta_mems:              map[u32]^Beta_Memory,
 	neg_mems:               map[u32]^Not_Exists_Memory,
@@ -159,6 +160,7 @@ session_init :: proc(
 	s.seg_mems = make(map[u32]^Segment_Memory, 16, allocator)
 	s.dirty_segs = make([dynamic]u32, 0, 16, allocator)
 	s.dirty_segs_rem = make([dynamic]u32, 0, 16, allocator)
+	s.dirty_segs_work = make([dynamic]u32, 0, 16, allocator)
 	s.beta_mems = make(map[u32]^Beta_Memory, 16, allocator)
 	s.neg_mems = make(map[u32]^Not_Exists_Memory, 8, allocator)
 	s.accum_mems = make(map[u32]^Accum_Memory, 8, allocator)
@@ -211,6 +213,7 @@ session_destroy :: proc(s: ^Session) {
 		delete(ef.pass_tokens)
 	}
 	delete(s.eval_stack)
+	delete(s.dirty_segs_work)
 	delete(s.dirty_segs_rem)
 	delete(s.dirty_segs)
 
@@ -312,6 +315,21 @@ _record_live_memory_watermark :: proc(s: ^Session) {
 	}
 }
 
+@(private)
+_validate_fact_fields_range :: proc(schema: Schema_Def, fields: []Value) -> Session_Error {
+	n := min(len(schema.fields), len(fields))
+	for i := 0; i < n; i += 1 {
+		if schema.fields[i].type.kind == .I32 {
+			if iv, is_i64 := fields[i].(i64); is_i64 {
+				if iv < i64(min(i32)) || iv > i64(max(i32)) {
+					return .Invalid_Arg
+				}
+			}
+		}
+	}
+	return .None
+}
+
 // Normalizes incoming Values into Session string space (using immutable Rulebase IDs when matched).
 @(private)
 _normalize_fact_fields_into :: proc(s: ^Session, schema: Schema_Def, fields: []Value, out: []Value) {
@@ -402,6 +420,11 @@ session_insert_fact_by_idx :: proc(
 	if s == nil || s.rb == nil || int(binding_idx) >= len(s.rb.bindings) {
 		return INVALID_FACT, .Unknown_Binding
 	}
+	bdef := s.rb.bindings[binding_idx]
+	schema := s.rb.schemas[bdef.schema_id]
+	if r_err := _validate_fact_fields_range(schema, fields); r_err != .None {
+		return INVALID_FACT, r_err
+	}
 	key_id, k_err := intern_session_string(&s.rb.interner, &s.interner, key)
 	if k_err != nil {
 		return INVALID_FACT, .Alloc_Failed
@@ -412,8 +435,6 @@ session_insert_fact_by_idx :: proc(
 		_ = session_retract_fact(s, prev_id)
 	}
 
-	bdef := s.rb.bindings[binding_idx]
-	schema := s.rb.schemas[bdef.schema_id]
 	norm_fields := _normalize_fact_fields(s, schema, fields)
 
 	fid = Fact_Id(len(s.facts))
@@ -489,7 +510,10 @@ session_retract_fact_by_key :: proc(
 	if !ok {
 		return .Unknown_Binding
 	}
-	key_id, _ := intern_session_string(&s.rb.interner, &s.interner, key)
+	key_id, has_key := _lookup_interned_string_id(&s.rb.interner, &s.interner, key)
+	if !has_key {
+		return .None
+	}
 	lk := Fact_Lookup_Key{binding_idx = bidx, key = key_id}
 	fid, found := s.facts_by_key[lk]
 	if !found {
@@ -511,13 +535,17 @@ session_modify_fact_by_key :: proc(
 				if fid, found := s.facts_by_key[lk]; found {
 					f := &s.facts[fid]
 					if f.alive && f.origin == .External {
+						bdef := s.rb.bindings[bidx]
+						schema := s.rb.schemas[bdef.schema_id]
+						if r_err := _validate_fact_fields_range(schema, new_fields); r_err != .None {
+							return r_err
+						}
 						f.alive = false
 						alpha_eval_retract_fact(s, fid)
 						agenda_remove_fact(&s.agenda, fid)
 						jtms_retract_cascades_for_fact(s, fid)
+						f = &s.facts[fid]
 
-						bdef := s.rb.bindings[bidx]
-						schema := s.rb.schemas[bdef.schema_id]
 						need_len := max(len(schema.fields), len(new_fields))
 						if len(f.fields) != need_len {
 							if f.fields != nil {

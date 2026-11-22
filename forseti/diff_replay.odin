@@ -128,6 +128,7 @@ session_diff_replay :: proc(
 
 	base_sigs := _collect_derived_signatures(baseline_sess, context.temp_allocator)
 	cand_sigs := _collect_derived_signatures(cand_sess, context.temp_allocator)
+	moments_after := store_bridge_moment_count(parent_bridge) or_return
 
 	added := make([dynamic]Diff_Fact_Change, 0, 8, allocator)
 	removed := make([dynamic]Diff_Fact_Change, 0, 8, allocator)
@@ -151,8 +152,6 @@ session_diff_replay :: proc(
 			})
 		}
 	}
-
-	moments_after := store_bridge_moment_count(parent_bridge) or_return
 
 	rep = Diff_Replay_Report{
 		added                 = added[:],

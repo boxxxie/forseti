@@ -1,6 +1,7 @@
 package forseti
 
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:slice"
 import "core:strings"
@@ -76,12 +77,22 @@ accum_destroy :: proc(st: ^Accum_State) {
 
 @(private)
 _accum_entry_cmp :: proc "contextless" (a, b: Accum_Bag_Entry) -> int {
+	if a.is_num != b.is_num {
+		return -1 if a.is_num else 1
+	}
 	if a.is_num && b.is_num {
-		if a.num_val < b.num_val {
-			return -1
+		a_nan := math.is_nan(a.num_val)
+		b_nan := math.is_nan(b.num_val)
+		if a_nan != b_nan {
+			return 1 if a_nan else -1
 		}
-		if a.num_val > b.num_val {
-			return 1
+		if !a_nan {
+			if a.num_val < b.num_val {
+				return -1
+			}
+			if a.num_val > b.num_val {
+				return 1
+			}
 		}
 	}
 	if u8(a.key.kind) < u8(b.key.kind) {
@@ -206,7 +217,7 @@ accum_retract :: proc(
 	case .Sum, .Avg:
 		if fv, is_f := v.(f64); is_f {
 			for x, i in st.f64_vals {
-				if x == fv {
+				if x == fv || (math.is_nan(x) && math.is_nan(fv)) {
 					unordered_remove(&st.f64_vals, i)
 					break
 				}

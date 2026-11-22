@@ -479,7 +479,7 @@ jtms_assert_logical :: proc(
 	}
 	append(fj_list, jid)
 
-	for pf in parent_facts {
+	for pf in parent_facts[:int(pcnt)] {
 		pj_list, has_pj := &s.jtms.premise_to_justs[pf]
 		if !has_pj {
 			s.jtms.premise_to_justs[pf] = make([dynamic]u32, 0, 4, s.allocator)

@@ -449,22 +449,13 @@ _agenda_pop_for_stratum :: proc(s: ^Session, stratum: u32) -> (act: Activation, 
 	ag := &s.agenda
 
 	if len(ag.phases) > 0 {
-		for pi := 0; pi < len(ag.phases); {
-			cur_phase := ag.phases[pi]
+		for cur_phase in ag.phases {
 			bk := Agenda_Bucket_Key{stratum = stratum, phase = cur_phase}
 			if ph_h, has_ph := &ag.phase_heaps[bk]; has_ph {
 				if popped, ok := _agenda_pop_live_from_heap(ag, ph_h); ok {
 					return popped, true
 				}
 			}
-			any_in_phase := ag.phase_live_counts[cur_phase] > 0
-			max_st, has_max := s.rb.phase_max_stratum[cur_phase]
-			has_pending_in_rb_later := has_max && max_st > stratum
-			if any_in_phase || has_pending_in_rb_later {
-				pi += 1
-				continue
-			}
-			ordered_remove(&ag.phases, pi)
 		}
 	}
 

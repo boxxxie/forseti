@@ -255,6 +255,9 @@ stratify_ir :: proc(
 	sa := vmem.arena_allocator(&strat_scratch)
 
 	plan.allocator = allocator
+	defer if err != nil {
+		stratification_plan_destroy(&plan)
+	}
 	plan.pred_to_node = make(map[String_Id]u32, len(ir.bindings) + 8, allocator)
 
 	pred_names := make([dynamic]String_Id, 0, len(ir.bindings) + 8, allocator)
@@ -430,16 +433,27 @@ stratify_ir :: proc(
 		st := u32(0)
 		is_rec := false
 		has_head := false
+		has_head_node := false
 		for act in r.then_actions {
 			if act.kind == .Assert && act.target != EMPTY_STRING {
 				has_head = true
 				if hnode, ok := plan.pred_to_node[act.target]; ok {
 					hst := plan.pred_stratum[hnode]
-					if hst > st {
+					if !has_head_node || hst < st {
 						st = hst
+						has_head_node = true
 					}
-					if plan.sccs[plan.pred_scc[hnode]].is_recursive {
-						is_rec = true
+				}
+			}
+		}
+		if has_head_node {
+			for act in r.then_actions {
+				if act.kind == .Assert && act.target != EMPTY_STRING {
+					if hnode, ok := plan.pred_to_node[act.target]; ok && plan.pred_stratum[hnode] == st {
+						if plan.sccs[plan.pred_scc[hnode]].is_recursive {
+							is_rec = true
+							break
+						}
 					}
 				}
 			}

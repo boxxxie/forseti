@@ -250,12 +250,12 @@ session_apply_effects :: proc(
 	for res in results {
 		inf, has_inf := s.inflight_effects[res.job_id]
 		if !has_inf {
-			return out[:], .Invalid_Arg
+			return nil, .Invalid_Arg
 		}
 		for rf in res.facts {
 			bidx, bok := session_find_binding(s, rf.binding_name)
 			if !bok {
-				return out[:], .Unknown_Binding
+				return nil, .Unknown_Binding
 			}
 			fkey := Firing_Key{
 				rule_id  = inf.rule_id,
@@ -271,7 +271,7 @@ session_apply_effects :: proc(
 					inf.parent_facts,
 				)
 				if j_err != .None {
-					return out[:], j_err
+					return nil, j_err
 				}
 				append(&out, fid)
 			} else {
