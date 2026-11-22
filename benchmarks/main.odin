@@ -145,6 +145,7 @@ main :: proc() {
 	register_frontend_benchmarks(&suite)
 	register_vm_benchmarks(&suite)
 	register_xitdb_benchmarks(&suite)
+	register_hasher_verify_benchmarks(&suite)
 	register_scale_rule_benchmarks(&suite)
 	register_scale_join_benchmarks(&suite)
 	register_join_benchmarks(&suite)
