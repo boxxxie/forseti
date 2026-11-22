@@ -4,18 +4,18 @@ Guidelines and architecture invariants for coding agents developing **Forseti** 
 
 ---
 
-## Planned Repository Structure
+## Repository Structure
 
-- **`forseti/`** — Core rules engine library (`package forseti`): `.forseti` lexer/parser/IR, compile-time diagnostics, compiled DMN decision tables, `xitdb` delta substrate, lazy PHREAK / Rete-UL matcher, 32-bit `#must_tail` guard VM, Z-set JTMS, accumulators, Tarjan SCC semi-naive Datalog, compact `#soa` provenance/semirings, 3-phase async effects, and built-in telemetry. Internal structs/helpers are marked `@(private)` or `#+private`.
+- **`forseti/`** — Core rules engine library (`package forseti`): `.forseti` lexer/parser/IR, compile-time diagnostics, compiled DMN decision tables, `xitdb` delta substrate, lazy PHREAK / Rete-UL matcher, 32-bit `#must_tail` guard VM, Z-set JTMS, accumulators, Tarjan SCC semi-naive Datalog, compact `#soa` provenance/semirings, 3-phase async effects, DOT/Mermaid visual exporters, and built-in telemetry. Internal structs/helpers are marked `@(private)` or `#+private`.
 - **`specs/`** — Black-box 4-Layer ATDD executable specifications (`package forseti_specs`, importing `../forseti`):
   - **Layer 1 (`*_spec_test.odin`):** Behavioral specifications in pure problem-domain vocabulary (Patterns A/B/C + `#caller_location` row-constructor decision tables). Zero allocator, cursor, or internal struct details.
   - **Layer 2 (`dsl_test.odin`):** Domain verbs (`given_*`, `upon_*`, `then_*`, `viewing_*`, `proc{...}` overloads) operating on `&World` (initialized in-place with `world_init(&w, t)` + `defer world_destroy(&w)`), forwarding `loc := #caller_location` to every `testing.expect*` call.
   - **Layer 3 (`driver_test.odin`):** Composable protocol drivers bridging Layer 2 to `forseti` / `xitdb` / CLI APIs. SUT allocations stay on `context.allocator` (never hidden in `w.arena`) so `ODIN_TEST_FAIL_ON_BAD_MEMORY=true` catches real production leaks; expected negative paths scope `context.logger = log.nil_logger()`, and OS resources register `testing.cleanup`.
-- **`tests/`** — Direct Pattern E unit tests and Pattern D `prop_*` (`t.seed` + `testing.set_fail_timeout`) property / differential oracle tests for low-level infrastructure (lexer, AST pool, VM opcodes, bitmask/hash codecs, fuzz regressions).
+- **`tests/`** — Direct Pattern E unit tests and Pattern D `prop_*` (`t.seed` + `testing.set_fail_timeout`) property / differential oracle tests for low-level infrastructure, plus doc-snippet (`test_doc_snippets.odin`) and example (`test_examples_verify.odin`) verifiers.
 - **`cmd/forseti/`** — CLI (`check`, `verify-tables`, `ast`, `ir`, `gen`, `run`, `explain`, `impact`, `diff-replay`, `telemetry`, `export-dot` / `export-mermaid`).
 - **`benchmarks/`** — `hugi` + `obench` benchmark suite scaling `10` to `1,000,000` rules (`benchmarks/history.hugidb`).
-- **`examples/`** — CI-verified standalone runnable examples demonstrating the `.forseti` DSL, internal Odin DSL, AOT codegen, `xitdb` integration, and telemetry.
-- **`docs/`** — Deep technical architecture, DSL reference (`docs/dsl-reference.md`), `xitdb` fast-mode tradeoffs (`docs/xitdb-fast-mode.md`), and scaling benchmarks (`docs/benchmarks.md`).
+- **`examples/`** — CI-verified standalone runnable examples (`01_decision_tables` .. `07_telemetry_and_diff_replay`) demonstrating the `.forseti` DSL, internal Odin DSL, AOT codegen, `xitdb` integration, and telemetry.
+- **`docs/` & `usage-rules.md`** — Concise LLM quick reference ([`usage-rules.md`](usage-rules.md)), complete DSL reference ([`docs/dsl-reference.md`](docs/dsl-reference.md)), `xitdb` fast-mode tradeoffs ([`docs/xitdb-fast-mode.md`](docs/xitdb-fast-mode.md)), and scaling benchmarks ([`docs/benchmarks.md`](docs/benchmarks.md)).
 - **`conductor/`** — Conductor project context and sequenced implementation tracks ([`conductor/tracks.md`](conductor/tracks.md)).
 - **`reference/`** — Gitignored upstream reference engines indexed in [`reference/README.md`](reference/README.md) (populate with `./scripts/clone_references.sh`).
 

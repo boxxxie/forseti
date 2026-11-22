@@ -18,7 +18,34 @@ It unifies the strongest techniques across modern rule-engine paradigms over one
 
 ## Navigation
 
-- **Agent & Build Guide:** [`AGENTS.md`](AGENTS.md)
+- **Agent Quick Reference & Rules:** [`usage-rules.md`](usage-rules.md) | [`AGENTS.md`](AGENTS.md)
+- **DSL, Table & CLI Documentation:** [`docs/dsl-reference.md`](docs/dsl-reference.md) | [`docs/xitdb-fast-mode.md`](docs/xitdb-fast-mode.md) | [`docs/benchmarks.md`](docs/benchmarks.md)
+- **Verified Runnable Examples (`examples/`):**
+  - [`01_decision_tables`](examples/01_decision_tables/main.odin) — DMN tables (`First`/`Unique`/`Collect_Sum`/`Merge`), lazy column skipping & AOT codegen
+  - [`02_mdm_xitdb_pipeline`](examples/02_mdm_xitdb_pipeline/main.odin) — `Safe_V2` `xitdb` persistence, `Delta_Syncer`, derived commit & index verification
+  - [`03_jtms_steward_overrides`](examples/03_jtms_steward_overrides/main.odin) — Diamond support, JTMS cascades & unconditional `assert!` audit logs
+  - [`04_cyclic_hierarchies`](examples/04_cyclic_hierarchies/main.odin) — Tarjan-stratified cyclic recursion, `explain` & cycle-break retraction
+  - [`05_accumulators_and_effects`](examples/05_accumulators_and_effects/main.odin) — Tied-min retractable accumulators & 3-phase `core:thread` async effects
+  - [`06_internal_odin_dsl_and_aot`](examples/06_internal_odin_dsl_and_aot/main.odin) — Tier 2 `Ir_Builder` internal DSL + Tier 3 AOT Odin output
+  - [`07_telemetry_and_diff_replay`](examples/07_telemetry_and_diff_replay/main.odin) — Telemetry JSONL/Chrome Trace, `Core_Overlay` `diff_replay` & Mermaid/DOT export
 - **Conductor Context & Sequenced Tracks:** [`conductor/tracks.md`](conductor/tracks.md) | [`conductor/index.md`](conductor/index.md)
 - **Benchmark Config:** [`hugi.json`](hugi.json)
-- **Reference Engines (16 Cloned Repos):** [`reference/README.md`](reference/README.md) (populate via `./scripts/clone_references.sh`)
+- **Reference Engines:** [`reference/README.md`](reference/README.md) (populate via `./scripts/clone_references.sh`)
+
+---
+
+## Quick Start & CLI
+
+```bash
+COLS="-collection:xitdb=../xitdb/xitdb -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench"
+
+# Validate, verify decision tables, or run policies from the CLI
+odin run cmd/forseti $COLS -- check policy.forseti --warnings-as-errors
+odin run cmd/forseti $COLS -- verify-tables policy.forseti
+odin run cmd/forseti $COLS -- run --facts facts.json --store mdm.xit --format=json policy.forseti
+odin run cmd/forseti $COLS -- explain --facts facts.json --binding CanonOrg policy.forseti
+odin run cmd/forseti $COLS -- impact --facts facts.json --rule canonicalize --format=json policy.forseti
+odin run cmd/forseti $COLS -- diff-replay --candidate v2.forseti --facts facts.json --format=json v1.forseti
+odin run cmd/forseti $COLS -- export-mermaid --graph=rulebase policy.forseti
+odin run cmd/forseti $COLS -- gen --package generated_tables --out generated_tables.odin policy.forseti
+```
