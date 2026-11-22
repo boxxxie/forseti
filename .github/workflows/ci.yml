@@ -26,12 +26,11 @@ jobs:
 
       # Sibling paths (../xitdb/xitdb, ../hugi/hugi, ../hugi/deps/obench/obench)
       # match ols.json, tests/test_examples_verify.odin, and specs/driver_test.odin.
-      # Update ref to a release tag once boxxxie/odin-xitdb#10 lands.
       - name: Checkout odin-xitdb
         uses: actions/checkout@v4
         with:
           repository: boxxxie/odin-xitdb
-          ref: feat/collection-diff-stats-and-hash-id
+          ref: v2.2.0
           path: xitdb
           submodules: false
           persist-credentials: false
