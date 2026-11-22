@@ -245,7 +245,7 @@ decide_tier_table :: proc "contextless" (in_val: Tier_Table_Input) -> Tier_Table
 
 ### 4. Embedding in Odin (`Session` + `xitdb` + Causal `explain` & `diff_replay`)
 
-Compile a `Rulebase` once (immutable and shareable), attach a `Session` to a `Safe_V2` `xitdb` file store with incremental delta syncing, inspect causal proof trees, and evaluate policy changes in a zero-copy `Core_Overlay` fork:
+Compile a `Rulebase` once (immutable and shareable), attach a `Session` to an `xitdb` v2 file store with incremental delta syncing, inspect causal proof trees, and evaluate policy changes in a zero-copy `Core_Overlay` fork:
 
 ```odin
 diags: forseti.Diagnostic_List
@@ -269,7 +269,7 @@ defer {
 }
 
 bridge: forseti.Store_Bridge
-assert(forseti.store_bridge_open_file(&bridge, "mdm.xit", forseti.Xitdb_Config{mode = .Safe_V2}) == nil)
+assert(forseti.store_bridge_open_file(&bridge, "mdm.xit") == nil)
 defer forseti.store_bridge_destroy(&bridge)
 
 syncer: forseti.Delta_Syncer
@@ -321,7 +321,7 @@ COLS="-collection:xitdb=../xitdb/xitdb -collection:hugi=../hugi/hugi -collection
 odin run cmd/forseti $COLS -- check policy.forseti --warnings-as-errors
 odin run cmd/forseti $COLS -- verify-tables policy.forseti
 
-# 2. Execute against JSON facts or a persisted Safe_V2 xitdb store
+# 2. Execute against JSON facts or a persisted xitdb v2 store
 odin run cmd/forseti $COLS -- run --facts facts.json --store mdm.xit --format=json policy.forseti
 
 # 3. Audit causal lineage, rule blast radius, and counterfactual policy changes
@@ -405,7 +405,7 @@ Every example compiles cleanly under strict `-vet -strict-style -warnings-as-err
 | Example | What It Demonstrates | Run Command |
 | :--- | :--- | :--- |
 | [`01_decision_tables`](examples/01_decision_tables/main.odin) | `First` lazy cost-skipping, `Collect_Sum`, `Merge`, and Tier 3 AOT codegen | `odin run examples/01_decision_tables -collection:xitdb=../xitdb/xitdb` |
-| [`02_mdm_xitdb_pipeline`](examples/02_mdm_xitdb_pipeline/main.odin) | `Safe_V2` disk store, `Delta_Syncer`, atomic `.decisions` & `.__tx` commit | `odin run examples/02_mdm_xitdb_pipeline -collection:xitdb=../xitdb/xitdb` |
+| [`02_mdm_xitdb_pipeline`](examples/02_mdm_xitdb_pipeline/main.odin) | `xitdb` v2 disk store, `Delta_Syncer`, atomic `.decisions` & `.__tx` commit | `odin run examples/02_mdm_xitdb_pipeline -collection:xitdb=../xitdb/xitdb` |
 | [`03_jtms_steward_overrides`](examples/03_jtms_steward_overrides/main.odin) | Diamond support survival, cascading retractions, and `assert!` audit logs | `odin run examples/03_jtms_steward_overrides -collection:xitdb=../xitdb/xitdb` |
 | [`04_cyclic_hierarchies`](examples/04_cyclic_hierarchies/main.odin) | Tarjan-stratified cyclic recursion, `explain`, and cycle-break retraction | `odin run examples/04_cyclic_hierarchies -collection:xitdb=../xitdb/xitdb` |
 | [`05_accumulators_and_effects`](examples/05_accumulators_and_effects/main.odin) | Tied-minimum retractable accumulators & 3-phase `core:thread` async effects | `odin run examples/05_accumulators_and_effects -collection:xitdb=../xitdb/xitdb` |
@@ -421,7 +421,6 @@ Every example compiles cleanly under strict `-vet -strict-style -warnings-as-err
 | [**Documentation Hub (`docs/README.md`)**](docs/README.md) | Everyone | Architecture diagrams, conceptual mental models, and reading paths |
 | [**Odin Embedding Guide (`docs/odin-api.md`)**](docs/odin-api.md) | Odin Developers | Lifetimes, `Session`, `Delta_Syncer`, `explain`/semirings, async effects, AOT |
 | [**DSL & CLI Reference (`docs/dsl-reference.md`)**](docs/dsl-reference.md) | Policy & Tool Authors | Full EBNF grammar, hit policies, CLI flags, verified `E*`/`W*` error catalog |
-| [**`xitdb` Safe vs Fast Mode (`docs/xitdb-fast-mode.md`)**](docs/xitdb-fast-mode.md) | Storage & Perf Engineers | `Safe_V2` wire guarantees vs opt-in `Fast_Memory` (`"fh16"`) guardrails |
 | [**Benchmarks & Scaling (`docs/benchmarks.md`)**](docs/benchmarks.md) | Perf Engineers | `10`–`1M` rule scaling, hardware PMU counters, `@zero_alloc` hot-path audit |
 | [**Agent Usage Rules (`usage-rules.md`)**](usage-rules.md) | AI Coding Agents | Prescriptive decision trees, canonical recipes, and top 12 pitfalls |
 | [**Repository Guide (`AGENTS.md`)**](AGENTS.md) | Contributors & Agents | Package invariants, 4-layer ATDD rules, and canonical build/test gates |

@@ -109,7 +109,7 @@ Options:
   --out <file>             Write command output to <file> instead of stdout
   --package <name>         Package name for 'gen' (default: generated_tables)
   --facts <facts.json>     JSON facts input ({"facts":[...]} or [...])
-  --store <db.xit>         Attach/open Safe_V2 xitdb file store
+  --store <db.xit>         Attach/open xitdb v2 file store
   --candidate <file>       Candidate .forseti policy for 'diff-replay'
   --rule <name>            Target rule name for 'impact'
   --version <ver>          Optional rule version filter for 'impact'
@@ -684,7 +684,7 @@ execute_session_with_inputs :: proc(
 	}
 
 	if len(store_path) > 0 {
-		if b_err := forseti.store_bridge_open_file(&exec.bridge, store_path, forseti.Xitdb_Config{mode = .Safe_V2}, telemetry, context.allocator); b_err != nil {
+		if b_err := forseti.store_bridge_open_file(&exec.bridge, store_path, forseti.Xitdb_Config{}, telemetry, context.allocator); b_err != nil {
 			cli_exec_destroy(exec)
 			fmt.eprintfln("error: failed opening store %q: %v", store_path, b_err)
 			return 2, false
@@ -870,12 +870,12 @@ run_cmd_diff_replay :: proc(
 
 	bridge: forseti.Store_Bridge
 	if len(opts.store_path) > 0 {
-		if b_err := forseti.store_bridge_open_file(&bridge, opts.store_path, forseti.Xitdb_Config{mode = .Safe_V2}, telemetry, context.allocator); b_err != nil {
+		if b_err := forseti.store_bridge_open_file(&bridge, opts.store_path, forseti.Xitdb_Config{}, telemetry, context.allocator); b_err != nil {
 			fmt.eprintfln("error: failed opening store %q: %v", opts.store_path, b_err)
 			return 2
 		}
 	} else {
-		if b_err := forseti.store_bridge_init_standalone(&bridge, forseti.Xitdb_Config{mode = .Safe_V2}, telemetry, context.allocator); b_err != nil {
+		if b_err := forseti.store_bridge_init_standalone(&bridge, forseti.Xitdb_Config{}, telemetry, context.allocator); b_err != nil {
 			fmt.eprintfln("error: failed creating store: %v", b_err)
 			return 2
 		}

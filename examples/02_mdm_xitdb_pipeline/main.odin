@@ -84,7 +84,7 @@ rule canonicalize {
 
 	{
 		bridge: forseti.Store_Bridge
-		if forseti.store_bridge_open_file(&bridge, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+		if forseti.store_bridge_open_file(&bridge, db_path, forseti.Xitdb_Config{}) != nil {
 			return false
 		}
 		defer forseti.store_bridge_destroy(&bridge)
@@ -124,9 +124,9 @@ rule canonicalize {
 		}
 	}
 
-	// Reopen persisted Safe_V2 xitdb file and verify .orgs.canon + .decisions + .__tx!
+	// Reopen persisted xitdb v2 file and verify .orgs.canon + .decisions + .__tx!
 	reopened: forseti.Store_Bridge
-	if forseti.store_bridge_open_file(&reopened, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+	if forseti.store_bridge_open_file(&reopened, db_path, forseti.Xitdb_Config{}) != nil {
 		return false
 	}
 	defer forseti.store_bridge_destroy(&reopened)

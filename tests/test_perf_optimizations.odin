@@ -414,7 +414,7 @@ rule stats {
 	defer forseti.rulebase_destroy(&rb)
 
 	sb_inc := new(forseti.Store_Bridge)
-	testing.expect_value(t, forseti.store_bridge_init_standalone(sb_inc, forseti.Xitdb_Config{mode = .Safe_V2}), nil)
+	testing.expect_value(t, forseti.store_bridge_init_standalone(sb_inc, forseti.Xitdb_Config{}), nil)
 	defer {
 		forseti.store_bridge_destroy(sb_inc)
 		free(sb_inc)
@@ -504,7 +504,7 @@ rule stats {
 
 	// Commit same session state into a fresh Store_Bridge and compare full parity.
 	sb_ref := new(forseti.Store_Bridge)
-	testing.expect_value(t, forseti.store_bridge_init_standalone(sb_ref, forseti.Xitdb_Config{mode = .Safe_V2}), nil)
+	testing.expect_value(t, forseti.store_bridge_init_standalone(sb_ref, forseti.Xitdb_Config{}), nil)
 	defer {
 		forseti.store_bridge_destroy(sb_ref)
 		free(sb_ref)
@@ -842,7 +842,7 @@ rule from_t2 {
 	defer forseti.rulebase_destroy(&rb)
 
 	sb := new(forseti.Store_Bridge)
-	testing.expect_value(t, forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{mode = .Fast_Memory}), nil)
+	testing.expect_value(t, forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{}), nil)
 	defer {
 		forseti.store_bridge_destroy(sb)
 		free(sb)
@@ -1007,7 +1007,6 @@ test_prehashed_key_custom_20byte_hasher_id0 :: proc(t: ^testing.T) {
 	}
 
 	cfg := forseti.Xitdb_Config{
-		mode = .Safe_V2,
 		custom_hasher = xitdb.Hasher{
 			hash_proc = inv_sha1,
 			hash_size = 20,

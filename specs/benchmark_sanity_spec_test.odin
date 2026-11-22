@@ -115,7 +115,7 @@ rule count_domain_canon phase "stats" salience 5 {
 	then_compilation_has_zero_diagnostics(&w, "mdm")
 	upon_compiling_rulebase(&w, "mdm", "rb")
 
-	given_standalone_store(&w, "db", forseti.Xitdb_Config{mode = .Safe_V2})
+	given_standalone_store(&w, "db")
 	given_watched_collection(&w, "db", ".orgs.raw")
 	upon_committing_mdm_orgs(&w, "db", {
 		{id = "org:1", name = "Acme One", country = "US", domain = "acme.com", employees = 250, active = true},

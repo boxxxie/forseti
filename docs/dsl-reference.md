@@ -1,4 +1,4 @@
-[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · **DSL Reference** · [xitdb Modes](xitdb-fast-mode.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
+[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · **DSL Reference** · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
 
 # Forseti DSL Reference
 

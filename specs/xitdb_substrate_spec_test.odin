@@ -67,8 +67,8 @@ spec_standalone_and_attached_mdm_moments :: proc(t: ^testing.T) {
 	then_sorted_prefix_scan_returns(&w, "mem", ".orgs.by_domain", "acme.", {"acme.com:org:1", "acme.org:org:2"})
 	then_eav_entity_attributes_match(&w, "mem", ".facts.eav", "org:2", {"country", "name"}, {"FR", "ACME Subsidiary"})
 
-	// Attached Core_Buffered_File Safe_V2 store persists across reopen.
-	given_attached_file_store(&w, "disk", "mdm_store.xit", forseti.Xitdb_Config{mode = .Safe_V2})
+	// Attached Core_Buffered_File store persists across reopen.
+	given_attached_file_store(&w, "disk", "mdm_store.xit")
 	upon_committing_mdm_orgs(&w, "disk", {
 		{
 			id            = "org:10",
@@ -80,7 +80,7 @@ spec_standalone_and_attached_mdm_moments :: proc(t: ^testing.T) {
 			locked_fields = {"name"},
 		},
 	})
-	upon_reopening_attached_file_store(&w, "disk", "disk_reopened", "mdm_store.xit", forseti.Xitdb_Config{mode = .Safe_V2})
+	upon_reopening_attached_file_store(&w, "disk", "disk_reopened", "mdm_store.xit")
 
 	then_lazy_field_equals(&w, "disk_reopened", -1, ".orgs.raw", "org:10", {"address", "country"}, "NL")
 	then_lazy_field_equals(&w, "disk_reopened", -1, ".orgs.raw", "org:10", {"active"}, true)
@@ -94,7 +94,7 @@ spec_incremental_delta_sync_100k_records :: proc(t: ^testing.T) {
 	world_init(&w, t)
 	defer world_destroy(&w)
 
-	given_standalone_store(&w, "scale", forseti.Xitdb_Config{mode = .Fast_Memory})
+	given_standalone_store(&w, "scale")
 	given_watched_collection(&w, "scale", ".orgs.raw")
 
 	upon_bulk_seeding_records(&w, "scale", ".orgs.raw", 100_000)
@@ -200,54 +200,49 @@ spec_overlay_fork_counterfactual_isolation :: proc(t: ^testing.T) {
 }
 
 @(test)
-spec_safe_v2_vs_fast_memory_guardrails :: proc(t: ^testing.T) {
+spec_xitdb_config_and_hash_size_guardrails :: proc(t: ^testing.T) {
 	w: World
 	world_init(&w, t)
 	defer world_destroy(&w)
 
-	// 1. Safe_V2 rejects fast_hasher override.
+	zero_size_proc :: proc(data: []u8, out_hash: []u8, _: rawptr) {
+		_ = data
+		_ = out_hash
+	}
+
+	// 1. Custom hasher proc with hash_size = 0 is rejected cleanly.
 	upon_attempting_invalid_memory_open(
 		&w,
-		forseti.Xitdb_Config{mode = .Safe_V2, custom_hasher = forseti.fast_hasher()},
+		forseti.Xitdb_Config{custom_hasher = xitdb.Hasher{hash_proc = zero_size_proc, hash_size = 0}},
 		forseti.Xitdb_Config{},
 		reopen_existing = false,
 	)
 	then_store_error_is(&w, forseti.Store_Bridge_Error.Invalid_Config)
 
-	// 2. Disk-backed buffered file rejects Fast_Memory mode.
+	// 2. Non-zero hash metadata with nil hash_proc is rejected on file open cleanly.
 	upon_attempting_invalid_file_open(
 		&w,
-		"bad_fast.xit",
-		forseti.Xitdb_Config{mode = .Fast_Memory},
+		"bad_hasher_meta.xit",
+		forseti.Xitdb_Config{custom_hasher = xitdb.Hasher{hash_size = 16}},
 		forseti.Xitdb_Config{},
 		reopen_existing = false,
 	)
-	then_store_error_is(&w, forseti.Store_Bridge_Error.Disk_Fast_Mode_Forbidden)
+	then_store_error_is(&w, forseti.Store_Bridge_Error.Invalid_Config)
 
-	// 3. Disk-backed buffered file rejects Safe_V2 + custom fast_hasher override.
-	upon_attempting_invalid_file_open(
-		&w,
-		"bad_crc.xit",
-		forseti.Xitdb_Config{mode = .Safe_V2, custom_hasher = forseti.fast_hasher()},
-		forseti.Xitdb_Config{},
-		reopen_existing = false,
-	)
-	then_store_error_is(&w, forseti.Store_Bridge_Error.Disk_Fast_Mode_Forbidden)
-
-	// 4. Opening a Safe_V2 SHA-1 file with Fast_Memory fast_hasher fails hash validation cleanly.
+	// 3. Opening a SHA-1 (20 B) image with SHA-256 (32 B) fails hash validation cleanly.
 	upon_attempting_invalid_memory_open(
 		&w,
-		forseti.Xitdb_Config{mode = .Safe_V2},
-		forseti.Xitdb_Config{mode = .Fast_Memory},
+		forseti.Xitdb_Config{},
+		forseti.Xitdb_Config{custom_hasher = xitdb.sha256_hasher()},
 		reopen_existing = true,
 	)
 	then_store_error_is(&w, xitdb.Xitdb_Error.Invalid_Hash_Size)
 
-	// 5. Opening a Fast_Memory DB with Safe_V2 SHA-1 fails hash validation cleanly.
+	// 4. Opening a SHA-256 (32 B) image with default SHA-1 (20 B) fails hash validation cleanly.
 	upon_attempting_invalid_memory_open(
 		&w,
-		forseti.Xitdb_Config{mode = .Fast_Memory},
-		forseti.Xitdb_Config{mode = .Safe_V2},
+		forseti.Xitdb_Config{custom_hasher = xitdb.sha256_hasher()},
+		forseti.Xitdb_Config{},
 		reopen_existing = true,
 	)
 	then_store_error_is(&w, xitdb.Xitdb_Error.Invalid_Hash_Size)
@@ -286,7 +281,7 @@ rule canonicalize {
 	then_compilation_has_zero_diagnostics(&w, "ch")
 	upon_compiling_rulebase(&w, "ch", "rb")
 
-	given_attached_file_store(&w, "disk_seed", "hydrate_reopen.xit", forseti.Xitdb_Config{mode = .Safe_V2})
+	given_attached_file_store(&w, "disk_seed", "hydrate_reopen.xit")
 	upon_committing_mdm_orgs(&w, "disk_seed", {
 		{id = "org:1", name = "Alpine AG", country = "DE", domain = "alpine.de", employees = 200, active = true, locked_fields = {"domain"}},
 		{id = "org:2", name = "Boutique", country = "FR", domain = "btq.fr", employees = 12, active = true},
@@ -294,7 +289,7 @@ rule canonicalize {
 	})
 
 	// Reopen persisted disk store cleanly, watch .orgs.raw, and hydrate via transient snapshot!
-	upon_reopening_attached_file_store(&w, "disk_seed", "disk", "hydrate_reopen.xit", forseti.Xitdb_Config{mode = .Safe_V2})
+	upon_reopening_attached_file_store(&w, "disk_seed", "disk", "hydrate_reopen.xit")
 	given_watched_collection(&w, "disk", ".orgs.raw")
 	given_session(&w, "rb", "s")
 	upon_syncing_store_and_firing(&w, "disk", "s", "cold_sync", commit_derived = true)

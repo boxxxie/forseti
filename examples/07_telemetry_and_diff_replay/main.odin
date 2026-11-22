@@ -79,7 +79,7 @@ rule mark_ent {
 	defer forseti.rulebase_destroy(&rb2)
 
 	bridge: forseti.Store_Bridge
-	if forseti.store_bridge_init_standalone(&bridge, forseti.Xitdb_Config{mode = .Safe_V2}, &tel) != nil {
+	if forseti.store_bridge_init_standalone(&bridge, forseti.Xitdb_Config{}, &tel) != nil {
 		return false
 	}
 	defer forseti.store_bridge_destroy(&bridge)

@@ -1,93 +1,13 @@
 package forseti
 
-import "core:encoding/endian"
 import "core:sync"
 import xitdb "xitdb:."
 
-// Opt-in 128-bit non-cryptographic hasher ("fh16") kept in Forseti for trusted
-// ephemeral in-memory stores (`Xitdb_Config{mode = .Fast_Memory}`).
-FAST_HASH_ID   :: u32(0x66683136) // "fh16"
-FAST_HASH_SIZE :: u16(16)
-
-@(private)
-_wymix64 :: #force_inline proc "contextless" (a, b: u64) -> u64 {
-	r := u128(a) * u128(b)
-	return u64(r) ~ u64(r >> 64)
-}
-
-@(private)
-_read_u64_le_padded :: #force_inline proc "contextless" (p: []u8) -> u64 #no_bounds_check {
-	n := len(p)
-	if n >= 8 {
-		v, _ := endian.get_u64(p[:8], .Little)
-		return v
-	}
-	v: u64 = 0
-	for i := 0; i < n; i += 1 {
-		v |= u64(p[i]) << u64(i * 8)
-	}
-	return v
-}
-
-fast_hash128_sum_into :: proc "contextless" (data: []u8, out: []u8) #no_bounds_check {
-	s0 :: u64(0xa0761d6478bd642f)
-	s1 :: u64(0xe7037ed1a0b428db)
-	s2 :: u64(0x8ebc6af09c88c6e3)
-	s3 :: u64(0x589965cc75374cc3)
-
-	seed_a := s0 ~ _wymix64(u64(len(data)) ~ s1, s2)
-	seed_b := s1 ~ _wymix64(u64(len(data)) ~ s3, s0)
-
-	i := 0
-	for i + 16 <= len(data) {
-		v0, _ := endian.get_u64(data[i:i + 8], .Little)
-		v1, _ := endian.get_u64(data[i + 8:i + 16], .Little)
-		seed_a = _wymix64(v0 ~ s1, v1 ~ seed_a) ~ seed_b
-		seed_b = _wymix64(v1 ~ s2, v0 ~ seed_b) ~ s3
-		i += 16
-	}
-
-	rem := data[i:]
-	a := _read_u64_le_padded(rem)
-	b: u64 = 0
-	if len(rem) > 8 {
-		b = _read_u64_le_padded(rem[8:])
-	}
-
-	h0 := _wymix64(seed_a ~ a ~ s1, seed_b ~ u64(len(data)) ~ s2)
-	h1 := _wymix64(seed_b ~ b ~ s3, seed_a ~ u64(len(data)) ~ s0)
-	h0 = _wymix64(h0 ~ s0, h1 ~ s3)
-	h1 = _wymix64(h1 ~ s2, h0 ~ s1)
-
-	if len(out) >= 8 {
-		endian.unchecked_put_u64be(out[0:8], h0)
-	}
-	if len(out) >= 16 {
-		endian.unchecked_put_u64be(out[8:16], h1)
-	}
-}
-
-@(private)
-_fast_hash128_proc :: proc(data: []u8, out_hash: []u8, _: rawptr) {
-	fast_hash128_sum_into(data, out_hash)
-}
-
-fast_hasher :: proc(id: u32 = FAST_HASH_ID, file_id: u64 = 0) -> xitdb.Hasher {
-	effective_id := id if id != 0 else FAST_HASH_ID
-	return xitdb.Hasher{
-		hash_proc = _fast_hash128_proc,
-		hash_size = FAST_HASH_SIZE,
-		id        = effective_id,
-		file_id   = file_id,
-	}
-}
-
-// Prehashed_Key stores wire-compatible SHA-1 (Safe_V2) and fast128 digests for a static key.
+// Prehashed_Key stores wire-compatible SHA-1 digest for a static key.
 // `key` must outlive this struct (e.g. owned by Rulebase.interner, Watched_Collection, or rodata).
 Prehashed_Key :: struct {
-	key:     string,
-	sha1:    [20]u8,
-	fast128: [16]u8,
+	key:  string,
+	sha1: [20]u8,
 }
 
 @(require_results)
@@ -95,16 +15,12 @@ prehashed_key_make :: proc(key: string) -> Prehashed_Key {
 	pk := Prehashed_Key{key = key}
 	raw := transmute([]u8)key
 	xitdb.sha1_sum_into(raw, pk.sha1[:])
-	fast_hash128_sum_into(raw, pk.fast128[:])
 	return pk
 }
 
 prehashed_key_digest :: #force_inline proc(db: ^xitdb.Database, pk: ^Prehashed_Key, fallback_buf: []u8) -> []u8 {
 	if db.hasher.hash_proc == xitdb.sha1_hasher().hash_proc && db.hasher.hash_size == 20 && db.hasher.user_data == nil {
 		return pk.sha1[:]
-	}
-	if db.hasher.hash_proc == _fast_hash128_proc && db.hasher.hash_size == FAST_HASH_SIZE && db.hasher.user_data == nil {
-		return pk.fast128[:]
 	}
 	return xitdb.database_digest_string_buf(db, pk.key, fallback_buf)
 }
@@ -176,6 +92,7 @@ Audit_Static_Keys :: struct {
 	table:               Prehashed_Key,
 	table_row:           Prehashed_Key,
 	parents:             Prehashed_Key,
+	unknown:             Prehashed_Key,
 }
 
 @(private = "file")
@@ -207,6 +124,7 @@ _init_audit_keys_fn :: proc() {
 		table               = prehashed_key_make("table"),
 		table_row           = prehashed_key_make("table_row"),
 		parents             = prehashed_key_make("parents"),
+		unknown             = prehashed_key_make("unknown"),
 	}
 }
 

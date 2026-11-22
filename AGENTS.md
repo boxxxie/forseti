@@ -15,7 +15,7 @@ Guidelines and architecture invariants for coding agents developing **Forseti** 
 - **`cmd/forseti/`** — CLI (`check`, `verify-tables`, `ast`, `ir`, `gen`, `run`, `explain`, `impact`, `diff-replay`, `telemetry`, `export-dot` / `export-mermaid`).
 - **`benchmarks/`** — `hugi` + `obench` benchmark suite scaling `10` to `1,000,000` rules (`benchmarks/history.hugidb`).
 - **`examples/`** — CI-verified standalone runnable examples (`01_decision_tables` .. `07_telemetry_and_diff_replay`) demonstrating the `.forseti` DSL, internal Odin DSL, AOT codegen, `xitdb` integration, and telemetry.
-- **`docs/` & `usage-rules.md`** — Documentation hub ([`docs/README.md`](docs/README.md)), Odin embedding guide ([`docs/odin-api.md`](docs/odin-api.md)), concise LLM quick reference ([`usage-rules.md`](usage-rules.md)), complete DSL reference ([`docs/dsl-reference.md`](docs/dsl-reference.md)), `xitdb` fast-mode tradeoffs ([`docs/xitdb-fast-mode.md`](docs/xitdb-fast-mode.md)), and scaling benchmarks ([`docs/benchmarks.md`](docs/benchmarks.md)).
+- **`docs/` & `usage-rules.md`** — Documentation hub ([`docs/README.md`](docs/README.md)), Odin embedding guide ([`docs/odin-api.md`](docs/odin-api.md)), concise LLM quick reference ([`usage-rules.md`](usage-rules.md)), complete DSL reference ([`docs/dsl-reference.md`](docs/dsl-reference.md)), and scaling benchmarks ([`docs/benchmarks.md`](docs/benchmarks.md)).
 - **`conductor/`** — Conductor project context and sequenced implementation tracks ([`conductor/tracks.md`](conductor/tracks.md)).
 - **`reference/`** — Gitignored upstream reference engines indexed in [`reference/README.md`](reference/README.md) (populate with `./scripts/clone_references.sh`).
 
@@ -59,7 +59,7 @@ hugi run
 
 ## Core Architectural Invariants
 
-1. **Preserve Safe `xitdb` v2 Defaults:** Never alter default `xitdb` wire compatibility (`SLOT_LENGTH = 9`, big-endian encoding, CRC-64/XZ trailers, SHA-1 HAMT hashing). Any fast-memory adaptation for trusted in-memory Forseti workloads (e.g., non-crypto `Hasher`, optional CRC skip in pure scratch RAM, preallocated diff scratch) MUST live behind explicit opt-in configuration with documented limitations in `docs/xitdb-fast-mode.md`.
+1. **Preserve Safe `xitdb` v2 Defaults:** Never alter default `xitdb` wire compatibility (`SLOT_LENGTH = 9`, big-endian encoding, CRC-64/XZ trailers, SHA-1 HAMT hashing via `xitdb.sha1_hasher()`). Optimize hot paths using `Prehashed_Key` for static keys, single-digest `*_by_hash` helpers, and reusable scratch arenas (`Delta_Syncer.scratch_arena`) rather than custom non-standard wire hashers.
 2. **Audit Trails On by Default (`.Audit_Full`):** Default session mode enables Z-set JTMS (`assert` is logical) and `#soa[dynamic]Derivation` causal lineage. Opt-out `.Fast` / `.Support_Only` modes must be explicitly requested.
 3. **Zero Hot-Path Crypto Hashing:** Never run SHA-1/SHA-256 per fact inside matching or derivation recording. Record compact `u32`-indexed derivations in RAM and compute content digests lazily only when exporting or committing checkpoints.
 4. **Lazy Session Memory for `1,000,000`-Rule Scalability:** Immutable `Rulebase` holds network topology shared across threads; per-`Session` segment and Beta memories allocate lazily on first activation so initializing a session over `1,000,000` rules stays O(active) rather than preallocating O(rules) empty containers.

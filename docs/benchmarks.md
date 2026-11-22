@@ -1,4 +1,4 @@
-[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · [xitdb Modes](xitdb-fast-mode.md) · **Benchmarks** · [Agent Rules](../usage-rules.md)
+[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · **Benchmarks** · [Agent Rules](../usage-rules.md)
 
 # Forseti Benchmarks & Scaling Architecture
 
@@ -10,7 +10,7 @@ This report documents Forseti's longitudinal [`hugi`](https://github.com/boxxxie
 > - **Lazy Cost Tree (`10,000` rows):** `28.80 ns` (`O(1)`, `0` allocs)
 > - **`1,000,000`-Rule Compile & Sparse Init:** `1.772 s` compile (`~556 B/rule`), `19.48 us` `session_init` (`O(1)`), `2.27 us` single-rule match
 > - **`@zero_alloc` PHREAK Hot Match (`.Fast`):** `1.32 ms` at `1,000` background facts (`12.14x` speedup, `0` allocs)
-> - **Incremental `xitdb` `Safe_V2` Diff (`10 / 10k`):** `3.56 us` (`2.81 M items/s`, `0` allocs)
+> - **Incremental `xitdb` v2 Diff (`10 / 10k`):** `3.56 us` (`2.81 M items/s`, `0` allocs)
 
 ## Contents
 
@@ -122,34 +122,30 @@ Complexity fits remain `O(1)` for `cost_tree_single_hit`, `lazy_cost_skip`, and 
 
 ### 3.5 `xitdb` Storage Profiles (`xitdb_modes`)
 
-Measured on `10,000` HAMT records (`Safe_V2` SHA-1 with hardware SHA-NI on this CPU vs opt-in `Fast_Memory` `"fh16"` non-cryptographic hasher):
+Measured on `10,000` HAMT records (default `xitdb` v2 SHA-1 with hardware SHA-NI on this CPU):
 
 | Workload | `e9cd4fc` Median p50 | Speedup vs `be8f675` | Throughput | Allocs / op |
 | --- | ---: | ---: | ---: | ---: |
 | `insert_10k_safe_v2` | `2.92 ms` | `3.34x` | `342 tx/s` (`3.42 Mitem/s`) | `1.0 / 408 B` |
-| `insert_10k_fast_memory` | `2.74 ms` | `3.35x` | `365 tx/s` (`3.65 Mitem/s`) | `1.0 / 408 B` |
 | `lookup_10k_safe_v2` | `1.17 ms` | `3.71x` | `8.53 Mitem/s` | `0` |
-| `lookup_10k_fast_memory` | `857.21 us` | `4.78x` | `11.67 Mitem/s` | `0` |
 | `lookup_10k_safe_v2_prehashed_cursor` | `561.61 us` | `6.05x` | `17.81 Mitem/s` | `0` |
 | `field_read_10k_safe_v2_string` | `1.03 ms` | `5.29x` | `9.75 Mitem/s` | `0` |
 | `field_read_10k_safe_v2_prehashed` | `526.88 us` | `8.85x` | `18.98 Mitem/s` | `0` |
 | `diff_10_of_10k_safe_v2` | `3.56 us` | `2.66x` | `280,928 diff/s` (`2.81 Mitem/s`) | `0` |
-| `diff_10_of_10k_fast_memory` | `3.25 us` | `2.69x` | `307,898 diff/s` (`3.08 Mitem/s`) | `0` |
 | `commit_cycle_safe_v2` | `1.97 us` | `2.98x` | `506,768 commit/s` | `0` |
-| `commit_cycle_fast_memory` | `1.88 us` | `3.24x` | `532,998 commit/s` | `0` |
 | `batch_write_1k_single_tx_safe_v2` | `306.22 us` | `2.74x` | `3.27 Mitem/s` | `1.0 / 408 B` |
 | `single_write_1k_separate_tx_safe_v2` | `2.03 ms` | `2.93x` | `491.7 Kitem/s` | `1.0 / 408 B` |
 
-### 3.6 End-to-End MDM Mode Tradeoffs (`mdm_e2e`: `Audit_Full` vs `Fast`, `Safe_V2` vs `Fast_Memory`)
+### 3.6 End-to-End MDM Mode Tradeoffs (`mdm_e2e`: `Audit_Full` vs `Fast`)
 
 > **Note on `hugi compare` `mdm_e2e` delta (`be8f675 -> e9cd4fc`):** In baseline `be8f675`, [`rulebase_compile`](../forseti/rulebase_compile.odin) shallow-copied `ir.schemas` and `ir.bindings` slices from the IR arena, leaving `rb.bindings[i].segments` invalid after `ir_destroy(&ir)` so `session_sync_and_fire` saw empty dot paths and skipped firing rules (`~114 us` constant no-op). Fixing that deep copy in `e9cd4fc` restored full decision-table matching (`canonicalize`), negative blocking (`not Suppress`), domain aggregation (`count_domain_canon`), and atomic derived + audit commits; `e9cd4fc` therefore represents the first real full-execution `mdm_e2e` numbers.
 
-| Scale (`N` base orgs, `10` deltas/tx) | `Audit_Full` + `Safe_V2` | `Fast` + `Safe_V2` (no derived commit) | `Audit_Full` + `Fast_Memory` | `Audit_Full` + `Safe_V2` Allocs/op |
-| ---: | ---: | ---: | ---: | ---: |
-| `10` | `272.93 us` | `125.66 us` (`2.17x` vs audit) | `270.73 us` | `186.3 / 92.58 KiB` |
-| `100` | `404.84 us` | `262.45 us` (`1.54x` vs audit) | `406.09 us` | `182.5 / 23.54 KiB` |
-| `1,000` | `2.43 ms` | `1.93 ms` (`1.26x` vs audit) | `2.48 ms` | `191.0 / 6.52 KiB` |
-| `10,000` | `39.37 ms` | `39.14 ms` | `39.45 ms` | `191.0 / 6.52 KiB` |
+| Scale (`N` base orgs, `10` deltas/tx) | `Audit_Full` (derived + audit commit) | `Fast` (no derived commit) | `Audit_Full` Allocs/op |
+| ---: | ---: | ---: | ---: |
+| `10` | `272.93 us` | `125.66 us` (`2.17x` vs audit) | `186.3 / 92.58 KiB` |
+| `100` | `404.84 us` | `262.45 us` (`1.54x` vs audit) | `182.5 / 23.54 KiB` |
+| `1,000` | `2.43 ms` | `1.93 ms` (`1.26x` vs audit) | `191.0 / 6.52 KiB` |
+| `10,000` | `39.37 ms` | `39.14 ms` | `191.0 / 6.52 KiB` |
 
 At `N = 10`–`1,000`, `Audit_Full` provenance plus incremental derived + audit persistence (`decisions`, `idx.*`, `__tx`) adds `~147 us` (`10`) to `~500 us` (`1,000`) with only `~6.52 KiB` per incremental transaction (`O(delta)` `xitdb` commit). At `N = 10,000`, runtime in `mdm_e2e` is dominated by re-evaluating the non-LIA `not Suppress` / `count(...)` accumulator rules over the `10,000`-fact `RawOrg` / `CanonOrg` working set rather than `xitdb` hashing or provenance writes.
 

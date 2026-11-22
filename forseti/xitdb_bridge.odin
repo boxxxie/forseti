@@ -8,15 +8,8 @@ import "core:os"
 import "core:strings"
 import xitdb "xitdb:."
 
-// Xitdb_Mode selects between wire-compatible crash-safe defaults and opt-in trusted in-memory speedups.
-Xitdb_Mode :: enum u8 {
-	Safe_V2,
-	Fast_Memory,
-}
-
-// Xitdb_Config configures xitdb initialization guardrails and opt-in fast-memory hasher.
+// Xitdb_Config configures xitdb initialization (defaults to wire-compatible v2 SHA-1 HAMT + CRC-64/XZ trailers).
 Xitdb_Config :: struct {
-	mode:          Xitdb_Mode,
 	custom_hasher: xitdb.Hasher,
 }
 
@@ -30,7 +23,6 @@ Store_Bridge_Error :: enum u8 {
 	None = 0,
 	Empty_Path,
 	Moment_Missing,
-	Disk_Fast_Mode_Forbidden,
 	Not_A_Collection,
 	Unsupported_Value_Type,
 	Invalid_Config,
@@ -91,26 +83,17 @@ _core_has_disk_backing :: proc(core: ^xitdb.Core) -> bool {
 }
 
 @(private)
-_resolve_xitdb_hasher :: proc(
-	cfg: Xitdb_Config,
-	is_disk: bool,
-) -> (h: xitdb.Hasher, err: Store_Error) {
-	if is_disk {
-		if cfg.mode == .Fast_Memory || cfg.custom_hasher.id == FAST_HASH_ID {
-			return {}, .Disk_Fast_Mode_Forbidden
-		}
-	}
-
-	switch cfg.mode {
-	case .Safe_V2:
-		if cfg.custom_hasher.id == FAST_HASH_ID {
+_resolve_xitdb_hasher :: proc(cfg: Xitdb_Config) -> (h: xitdb.Hasher, err: Store_Error) {
+	if cfg.custom_hasher.hash_proc != nil {
+		if cfg.custom_hasher.hash_size == 0 {
 			return {}, .Invalid_Config
 		}
-		h = cfg.custom_hasher if cfg.custom_hasher.hash_proc != nil else xitdb.sha1_hasher()
-	case .Fast_Memory:
-		h = cfg.custom_hasher if cfg.custom_hasher.hash_proc != nil else fast_hasher()
+		return cfg.custom_hasher, nil
 	}
-	return h, nil
+	if cfg.custom_hasher.hash_size != 0 || cfg.custom_hasher.id != 0 {
+		return {}, .Invalid_Config
+	}
+	return xitdb.sha1_hasher(), nil
 }
 
 // Initializes an in-memory xitdb store inside `b` (never move `b` after calling).
@@ -123,7 +106,7 @@ store_bridge_init_standalone :: proc(
 	if b == nil {
 		return .Invalid_Config
 	}
-	h, r_err := _resolve_xitdb_hasher(cfg, is_disk = false)
+	h, r_err := _resolve_xitdb_hasher(cfg)
 	if r_err != nil {
 		return r_err
 	}
@@ -149,7 +132,7 @@ store_bridge_init_standalone :: proc(
 	return nil
 }
 
-// Opens or initializes a disk-backed Core_Buffered_File store inside `b` (always enforces Safe_V2 guardrails).
+// Opens or initializes a disk-backed Core_Buffered_File store inside `b` (uses v2 SHA-1 HAMT + CRC-64/XZ defaults).
 store_bridge_open_file :: proc(
 	b: ^Store_Bridge,
 	path: string,
@@ -160,7 +143,7 @@ store_bridge_open_file :: proc(
 	if b == nil || len(path) == 0 {
 		return .Invalid_Config if b == nil else .Empty_Path
 	}
-	h, r_err := _resolve_xitdb_hasher(cfg, is_disk = true)
+	h, r_err := _resolve_xitdb_hasher(cfg)
 	if r_err != nil {
 		return r_err
 	}
@@ -202,8 +185,7 @@ store_bridge_init_attached :: proc(
 	if b == nil || db == nil || db.core == nil {
 		return .Invalid_Config
 	}
-	is_disk := _core_has_disk_backing(db.core)
-	_, r_err := _resolve_xitdb_hasher(cfg, is_disk)
+	_, r_err := _resolve_xitdb_hasher(cfg)
 	if r_err != nil {
 		return r_err
 	}

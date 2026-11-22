@@ -1,7 +1,6 @@
 package forseti_specs
 
 import "core:testing"
-import "../forseti"
 
 @(test)
 spec_multi_fact_mdm_joins_and_decide_integration :: proc(t: ^testing.T) {
@@ -208,7 +207,7 @@ query orgs_by_domain(dom: string) {
 	then_compilation_has_zero_diagnostics(&w, "sq")
 	upon_compiling_rulebase(&w, "sq", "rb")
 
-	given_standalone_store(&w, "db", forseti.Xitdb_Config{mode = .Fast_Memory})
+	given_standalone_store(&w, "db")
 	given_watched_collection(&w, "db", ".orgs.raw")
 	upon_committing_mdm_orgs(&w, "db", {
 		{id = "org:1", name = "ACME HQ", country = "DE", domain = "acme.com", employees = 250, active = true},

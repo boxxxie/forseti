@@ -231,7 +231,7 @@ _bench_seed_records_cb :: proc(moment_wc: ^xitdb.Write_Cursor, user_data: rawptr
 @(private = "file")
 _run_field_read_10k :: proc(b: ^hugi.Bencher, prehashed: bool) {
 	sb := new(forseti.Store_Bridge)
-	_ = forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{mode = .Safe_V2})
+	_ = forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{})
 	defer {
 		forseti.store_bridge_destroy(sb)
 		free(sb)
@@ -302,7 +302,7 @@ _run_batch_vs_separate_1k :: proc(b: ^hugi.Bencher, single_tx: bool) {
 	hugi.set_items(b, u64(n))
 	for hugi.step(b) {
 		sb := new(forseti.Store_Bridge)
-		_ = forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{mode = .Safe_V2})
+		_ = forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{})
 		if single_tx {
 			cnt := n
 			_, _ = forseti.store_bridge_commit_moment(sb, _bench_batch_1k_cb, &cnt)
@@ -320,27 +320,17 @@ _run_batch_vs_separate_1k :: proc(b: ^hugi.Bencher, single_tx: bool) {
 
 @(private = "file")
 _bench_insert_safe_v2 :: proc(b: ^hugi.Bencher) {
-	_run_insert_10k(b, forseti.Xitdb_Config{mode = .Safe_V2})
-}
-
-@(private = "file")
-_bench_insert_fast_memory :: proc(b: ^hugi.Bencher) {
-	_run_insert_10k(b, forseti.Xitdb_Config{mode = .Fast_Memory})
+	_run_insert_10k(b, forseti.Xitdb_Config{})
 }
 
 @(private = "file")
 _bench_lookup_safe_v2 :: proc(b: ^hugi.Bencher) {
-	_run_lookup_10k(b, forseti.Xitdb_Config{mode = .Safe_V2})
+	_run_lookup_10k(b, forseti.Xitdb_Config{})
 }
 
 @(private = "file")
 _bench_lookup_safe_v2_prehashed_cursor :: proc(b: ^hugi.Bencher) {
-	_run_lookup_10k_prehashed(b, forseti.Xitdb_Config{mode = .Safe_V2})
-}
-
-@(private = "file")
-_bench_lookup_fast_memory :: proc(b: ^hugi.Bencher) {
-	_run_lookup_10k(b, forseti.Xitdb_Config{mode = .Fast_Memory})
+	_run_lookup_10k_prehashed(b, forseti.Xitdb_Config{})
 }
 
 @(private = "file")
@@ -355,22 +345,12 @@ _bench_field_read_10k_safe_v2_prehashed :: proc(b: ^hugi.Bencher) {
 
 @(private = "file")
 _bench_diff_safe_v2 :: proc(b: ^hugi.Bencher) {
-	_run_diff_10_of_10k(b, forseti.Xitdb_Config{mode = .Safe_V2})
-}
-
-@(private = "file")
-_bench_diff_fast_memory :: proc(b: ^hugi.Bencher) {
-	_run_diff_10_of_10k(b, forseti.Xitdb_Config{mode = .Fast_Memory})
+	_run_diff_10_of_10k(b, forseti.Xitdb_Config{})
 }
 
 @(private = "file")
 _bench_commit_safe_v2 :: proc(b: ^hugi.Bencher) {
-	_run_commit_cycle(b, forseti.Xitdb_Config{mode = .Safe_V2})
-}
-
-@(private = "file")
-_bench_commit_fast_memory :: proc(b: ^hugi.Bencher) {
-	_run_commit_cycle(b, forseti.Xitdb_Config{mode = .Fast_Memory})
+	_run_commit_cycle(b, forseti.Xitdb_Config{})
 }
 
 @(private = "file")
@@ -402,7 +382,7 @@ _bench_file_buffered_write_1k_single_tx_safe_v2 :: proc(b: ^hugi.Bencher) {
 		iter += 1
 		db_path := fmt.bprintf(pbuf[:], "%s/w_%d.xit", dir, iter)
 		sb := new(forseti.Store_Bridge)
-		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{}) != nil {
 			free(sb)
 			break
 		}
@@ -429,7 +409,7 @@ _bench_file_buffered_commit_cycle_safe_v2 :: proc(b: ^hugi.Bencher) {
 	pbuf: [256]u8 = ---
 	db_path := fmt.bprintf(pbuf[:], "%s/cycle.xit", dir)
 	sb := new(forseti.Store_Bridge)
-	if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+	if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{}) != nil {
 		free(sb)
 		return
 	}
@@ -475,7 +455,7 @@ _bench_file_reopen_hydrate_session_1k :: proc(b: ^hugi.Bencher) {
 	db_path := fmt.bprintf(pbuf[:], "%s/hydrate.xit", dir)
 	{
 		sb := new(forseti.Store_Bridge)
-		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{}) != nil {
 			free(sb)
 			return
 		}
@@ -516,7 +496,7 @@ _bench_file_reopen_hydrate_session_1k :: proc(b: ^hugi.Bencher) {
 	hugi.set_items(b, u64(n))
 	for hugi.step(b) {
 		sb := new(forseti.Store_Bridge)
-		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{mode = .Safe_V2}) != nil {
+		if forseti.store_bridge_open_file(sb, db_path, forseti.Xitdb_Config{}) != nil {
 			free(sb)
 			break
 		}
@@ -539,16 +519,12 @@ _bench_file_reopen_hydrate_session_1k :: proc(b: ^hugi.Bencher) {
 register_xitdb_benchmarks :: proc(suite: ^hugi.Suite) {
 	g := hugi.group_add(suite, "xitdb_modes")
 	hugi.group_bench(g, "insert_10k_safe_v2", _bench_insert_safe_v2)
-	hugi.group_bench(g, "insert_10k_fast_memory", _bench_insert_fast_memory)
 	hugi.group_bench(g, "lookup_10k_safe_v2", _bench_lookup_safe_v2, zero_alloc = true)
 	hugi.group_bench(g, "lookup_10k_safe_v2_prehashed_cursor", _bench_lookup_safe_v2_prehashed_cursor, zero_alloc = true)
-	hugi.group_bench(g, "lookup_10k_fast_memory", _bench_lookup_fast_memory, zero_alloc = true)
 	hugi.group_bench(g, "field_read_10k_safe_v2_string", _bench_field_read_10k_safe_v2_string, zero_alloc = true)
 	hugi.group_bench(g, "field_read_10k_safe_v2_prehashed", _bench_field_read_10k_safe_v2_prehashed, zero_alloc = true)
 	hugi.group_bench(g, "diff_10_of_10k_safe_v2", _bench_diff_safe_v2)
-	hugi.group_bench(g, "diff_10_of_10k_fast_memory", _bench_diff_fast_memory)
 	hugi.group_bench(g, "commit_cycle_safe_v2", _bench_commit_safe_v2)
-	hugi.group_bench(g, "commit_cycle_fast_memory", _bench_commit_fast_memory)
 	hugi.group_bench(g, "batch_write_1k_single_tx_safe_v2", _bench_batch_write_1k_single_tx_safe_v2)
 	hugi.group_bench(g, "single_write_1k_separate_tx_safe_v2", _bench_single_write_1k_separate_tx_safe_v2)
 	hugi.group_bench(g, "file_buffered_write_1k_single_tx_safe_v2", _bench_file_buffered_write_1k_single_tx_safe_v2)

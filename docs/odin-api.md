@@ -1,11 +1,11 @@
-[README](../README.md) · [Docs Hub](README.md) · **Odin API** · [DSL Reference](dsl-reference.md) · [xitdb Modes](xitdb-fast-mode.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
+[README](../README.md) · [Docs Hub](README.md) · **Odin API** · [DSL Reference](dsl-reference.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
 
 # Forseti Odin Embedding & Runtime Guide
 
 Practical guide to embedding `package forseti` in Odin applications: compilation, memory lifetimes, standalone decision tables, incremental `xitdb` sync, JTMS queries, provenance semirings, counterfactual replay, 3-phase async effects, and telemetry.
 
 > [!NOTE]
-> For `.forseti` language syntax, EBNF grammar, and the full diagnostic catalog, see [`docs/dsl-reference.md`](dsl-reference.md). For `.Fast` / `Fast_Memory` guardrails, see [`docs/xitdb-fast-mode.md`](xitdb-fast-mode.md).
+> For `.forseti` language syntax, EBNF grammar, and the full diagnostic catalog, see [`docs/dsl-reference.md`](dsl-reference.md).
 
 ## Contents
 
@@ -182,8 +182,8 @@ for row in qres.rows {
 
 ### Opening or Attaching a Store (`Store_Bridge`)
 
-- `store_bridge_open_file(&bridge, "mdm.xit", forseti.Xitdb_Config{mode = .Safe_V2})` — Durable `Core_Buffered_File` (always enforces `.Safe_V2` SHA-1 HAMT + CRC-64/XZ trailers; `.Fast_Memory` is forbidden on disk).
-- `store_bridge_init_standalone(&bridge, forseti.Xitdb_Config{mode = .Safe_V2})` — In-memory `Core_Memory` store (optionally accepts `.Fast_Memory` for ephemeral trusted RAM).
+- `store_bridge_open_file(&bridge, "mdm.xit")` — Durable `Core_Buffered_File` (standard `xitdb` v2 SHA-1 HAMT + CRC-64/XZ trailers by default; accepts an optional `Xitdb_Config{custom_hasher = ...}`).
+- `store_bridge_init_standalone(&bridge)` — In-memory `Core_Memory` store (same wire-compatible v2 defaults).
 - `store_bridge_init_attached(&bridge, &my_xitdb)` — Attaches without taking ownership of your existing `xitdb.Database`.
 
 ### Incremental `Delta_Syncer` & Atomic Moment Layout

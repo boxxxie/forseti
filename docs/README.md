@@ -1,4 +1,4 @@
-[README](../README.md) · **Docs Hub** · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · [xitdb Modes](xitdb-fast-mode.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
+[README](../README.md) · **Docs Hub** · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
 
 # Forseti Documentation Hub
 
@@ -12,7 +12,6 @@ Welcome to the **Forseti** documentation hub. This guide helps you pick the righ
 | :--- | :--- | :--- |
 | **Writing `.forseti` policies** | [`dsl-reference.md`](dsl-reference.md) | Complete EBNF grammar, hit policies (`F`/`U`/`A`/`P`/`C*`/`M`/`R`), `E*`/`W*` error catalog, CLI |
 | **Embedding Forseti in Odin** | [`odin-api.md`](odin-api.md) | Lifetimes, `Rulebase` vs `Session`, `Delta_Syncer`, `explain`/semirings, async effects, AOT |
-| **Tuning `xitdb` storage & speed** | [`xitdb-fast-mode.md`](xitdb-fast-mode.md) | `Safe_V2` wire compatibility vs opt-in `Fast_Memory` (`"fh16"`) boundaries and guardrails |
 | **Evaluating performance & scale** | [`benchmarks.md`](benchmarks.md) | `10`–`1,000,000` rule latency/RAM scaling, PMU counters, `@zero_alloc` hot paths |
 | **Integrating as an AI coding agent** | [`usage-rules.md`](../usage-rules.md) | Decision trees, copy-paste recipes, top 12 pitfalls, and 4-layer ATDD rules |
 | **Contributing to Forseti** | [`AGENTS.md`](../AGENTS.md) | Package invariants, canonical check/test/ASan commands, and [`conductor/tracks.md`](../conductor/tracks.md) |
@@ -67,7 +66,7 @@ In default `.Audit_Full` mode, every rule firing appends a compact 32-byte `Deri
 All 7 examples in [`examples/`](../examples/) are compiled and leak-checked on CI by [`tests/test_examples_verify.odin`](../tests/test_examples_verify.odin):
 
 1. [`01_decision_tables`](../examples/01_decision_tables/main.odin) — `First` lazy cost skipping (`cost 100`), `Collect_Sum`, `Merge`, and AOT codegen
-2. [`02_mdm_xitdb_pipeline`](../examples/02_mdm_xitdb_pipeline/main.odin) — `Safe_V2` persisted `.xit` pipeline, `Delta_Syncer`, and `.decisions` / `.idx.*` / `.__tx` verification
+2. [`02_mdm_xitdb_pipeline`](../examples/02_mdm_xitdb_pipeline/main.odin) — persisted `xitdb` v2 `.xit` pipeline, `Delta_Syncer`, and `.decisions` / `.idx.*` / `.__tx` verification
 3. [`03_jtms_steward_overrides`](../examples/03_jtms_steward_overrides/main.odin) — Diamond support survival, cascading retractions, and `assert!` unconditional audit retention
 4. [`04_cyclic_hierarchies`](../examples/04_cyclic_hierarchies/main.odin) — Tarjan SCC semi-naive recursion on a 3-node cycle, `explain`, and cycle-break retraction
 5. [`05_accumulators_and_effects`](../examples/05_accumulators_and_effects/main.odin) — Tied-minimum retractable accumulators (`count`, `sum`, `min`, `max`) & 3-phase `core:thread` async effects

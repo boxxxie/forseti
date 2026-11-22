@@ -251,7 +251,7 @@ _bench_overlay_diff_replay :: proc(b: ^hugi.Bencher) {
 	}
 
 	sb := new(forseti.Store_Bridge)
-	_ = forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{mode = .Safe_V2})
+	_ = forseti.store_bridge_init_standalone(sb, forseti.Xitdb_Config{})
 	defer {
 		forseti.store_bridge_destroy(sb)
 		free(sb)

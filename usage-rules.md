@@ -1,4 +1,4 @@
-[README](README.md) · [Docs Hub](docs/README.md) · [Odin API](docs/odin-api.md) · [DSL Reference](docs/dsl-reference.md) · [xitdb Modes](docs/xitdb-fast-mode.md) · [Benchmarks](docs/benchmarks.md) · **Agent Rules**
+[README](README.md) · [Docs Hub](docs/README.md) · [Odin API](docs/odin-api.md) · [DSL Reference](docs/dsl-reference.md) · [Benchmarks](docs/benchmarks.md) · **Agent Rules**
 
 # Forseti Usage Rules & Agent Guide
 
@@ -18,7 +18,7 @@ Prescriptive rules, authoring decision trees, Odin embedding recipes, and pitfal
 - **Single Canonical `Rulebase_IR`:** External `.forseti` policies (`compile_source`), Tier 2 internal Odin builders (`ir_builder_build`), and Tier 3 AOT Odin table generators (`codegen_odin_module`) all share one IR, semantic validator (`analyze_ir`), decision-table verifier (`verify_all_tables`), and Tarjan stratifier (`stratify_ir`).
 - **Immutable `Rulebase` vs. Pinned `Session`:** Compile `Rulebase` once with `rulebase_compile` and share it read-only across sessions. `Session` and `Store_Bridge` hold internal self-pointers (arenas, maps, attached DB pointers) — **initialize in-place or heap-allocate via `new(...)` and never copy by value**.
 - **Lazy Sparse `Session` Memory (`1M`-Rule Scale):** Alpha and Beta memories are allocated lazily on first activation. `session_init` over `1,000,000` rules allocates O(active) containers, not O(rules).
-- **Safe `xitdb` Defaults & Audit-Full Default:** Default `Store_Bridge` mode is `Xitdb_Config{mode = .Safe_V2}` (SHA-1 HAMT + CRC-64/XZ trailers) and default `Session_Config` mode is `provenance_mode = .Audit_Full` (Z-set JTMS + `#soa[dynamic]Derivation` causal lineage).
+- **Safe `xitdb` Defaults & Audit-Full Default:** Default `Store_Bridge` uses standard `xitdb` v2 defaults (`xitdb.sha1_hasher()` HAMT + CRC-64/XZ trailers) and default `Session_Config` mode is `provenance_mode = .Audit_Full` (Z-set JTMS + `#soa[dynamic]Derivation` causal lineage).
 - **Zero Hot-Path Crypto Hashing:** Never run SHA-1/SHA-256 per fact inside rule matching or `Derivation` recording. Compute HAMT digests only on store commit/sync using `Prehashed_Key`.
 
 ---
@@ -38,7 +38,6 @@ Prescriptive rules, authoring decision trees, Odin embedding recipes, and pitfal
 - **`.Audit_Full` (default):** Full JTMS cascading retractions, `explain`, `impact`, `evaluate_semiring`, `diff_replay`, and atomic `decisions` / `idx.decisions_*` / `__tx` commits.
 - **`.Support_Only`:** Tracks logical justification support without retaining `Derivation` proof DAGs.
 - **`.Fast`:** Disables derivation/JTMS overhead for maximum ephemeral throughput when audit lineage is not needed.
-- **`Xitdb_Mode.Safe_V2` (default) vs. `.Fast_Memory`:** Always use `.Safe_V2` for persisted `.xit` files (`Core_Buffered_File` / `Core_File`). Use `.Fast_Memory` only for trusted ephemeral RAM stores (`docs/xitdb-fast-mode.md`).
 
 ---
 
@@ -128,7 +127,7 @@ _, _ = forseti.session_fire(sess)
 
 ```odin
 bridge: forseti.Store_Bridge
-assert(forseti.store_bridge_open_file(&bridge, "mdm.xit", forseti.Xitdb_Config{mode = .Safe_V2}) == nil)
+assert(forseti.store_bridge_open_file(&bridge, "mdm.xit") == nil)
 defer forseti.store_bridge_destroy(&bridge)
 
 syncer: forseti.Delta_Syncer
@@ -187,7 +186,7 @@ _, _ = forseti.session_fire(sess)
 6. **DO NOT** use `assert!` when you want JTMS cascading retractions on premise removal. **DO** use `assert` for logical facts and reserve `assert! ... unconditional` for permanent audit logs.
 7. **DO NOT** reference a variable bound inside `not { ... }` or `exists { ... }` in outer patterns or `then` actions (`E2003`). **DO** bind shared join variables in an outer positive pattern first.
 8. **DO NOT** create negative or aggregation cycles across derived bindings (`E4001`). **DO** split raw/derived layers so every cycle through `not` or accumulators flows strictly across increasing strata.
-9. **DO NOT** pass `Xitdb_Mode.Fast_Memory` or `fast_hasher()` to `store_bridge_open_file` (`Disk_Fast_Mode_Forbidden`). **DO** keep file-backed stores on `.Safe_V2`.
+9. **DO NOT** re-hash static schema/path keys on every lookup or commit (`xitdb.hash_map_get_slot` hashes on each call). **DO** keep default `Xitdb_Config{}` (SHA-1 v2 wire compatibility) and reuse `Prehashed_Key` or a single `xitdb.database_digest_string_buf` digest across maps/sets.
 10. **DO NOT** forget cleanup on returned reports/strings (`explain_tree_destroy`, `impact_report_destroy`, `semiring_result_destroy`, `diff_replay_report_destroy`, `effects_jobs_destroy`, `sync_result_destroy`, `delete(applied)`, `delete(exported)`). **DO** test every test binary with `-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.
 11. **DO NOT** touch `sess.interner` or `Session` maps from worker threads during Phase 2 async effect execution. **DO** inspect `Effect_Job.fields` (`str` / `value`) on workers and intern result strings back on the engine thread before `session_apply_effects`.
 12. **DO NOT** put internal `forseti` allocators, cursor walks, or `driver_*` helpers in `specs/*_spec_test.odin` (4-layer ATDD violation) or omit `loc = loc` forwarding in `specs/dsl_test.odin`. **DO** keep infrastructure/codec tests in `tests/` and behavioral specs pure in `specs/`.

@@ -128,17 +128,12 @@ _run_mdm_e2e_incremental :: proc(
 
 @(private = "file")
 _bench_mdm_audit_full_safe_v2 :: proc(b: ^hugi.Bencher) {
-	_run_mdm_e2e_incremental(b, forseti.Xitdb_Config{mode = .Safe_V2}, .Audit_Full, true)
+	_run_mdm_e2e_incremental(b, forseti.Xitdb_Config{}, .Audit_Full, true)
 }
 
 @(private = "file")
 _bench_mdm_fast_safe_v2 :: proc(b: ^hugi.Bencher) {
-	_run_mdm_e2e_incremental(b, forseti.Xitdb_Config{mode = .Safe_V2}, .Fast, false)
-}
-
-@(private = "file")
-_bench_mdm_audit_full_fast_memory :: proc(b: ^hugi.Bencher) {
-	_run_mdm_e2e_incremental(b, forseti.Xitdb_Config{mode = .Fast_Memory}, .Audit_Full, true)
+	_run_mdm_e2e_incremental(b, forseti.Xitdb_Config{}, .Fast, false)
 }
 
 register_mdm_e2e_benchmarks :: proc(suite: ^hugi.Suite) {
@@ -146,5 +141,4 @@ register_mdm_e2e_benchmarks :: proc(suite: ^hugi.Suite) {
 	hugi.group_params(g, []int{10, 100, 1_000, 10_000})
 	hugi.group_bench(g, "incremental_sync_fire_audit_full_safe_v2", _bench_mdm_audit_full_safe_v2)
 	hugi.group_bench(g, "incremental_sync_fire_fast_safe_v2", _bench_mdm_fast_safe_v2)
-	hugi.group_bench(g, "incremental_sync_fire_audit_full_fast_memory", _bench_mdm_audit_full_fast_memory)
 }

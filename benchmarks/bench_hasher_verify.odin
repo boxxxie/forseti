@@ -208,48 +208,33 @@ _bench_raw_xitdb_sha256_hw :: proc(b: ^hugi.Bencher) {
 }
 
 @(private = "file")
-_bench_raw_forseti_fast_hash128_sw :: proc(b: ^hugi.Bencher) {
-	_run_raw_hasher(b, forseti.fast_hasher())
-}
-
-@(private = "file")
 _bench_raw_core_crypto_sha1_sw :: proc(b: ^hugi.Bencher) {
 	_run_raw_hasher(b, _sw_sha1_hasher())
 }
 
 @(private = "file")
 _bench_xitdb_lookup_sha1_hw :: proc(b: ^hugi.Bencher) {
-	_run_xitdb_lookup_sized(b, forseti.Xitdb_Config{mode = .Safe_V2}, prehashed = false)
+	_run_xitdb_lookup_sized(b, forseti.Xitdb_Config{}, prehashed = false)
 }
 
 @(private = "file")
 _bench_xitdb_lookup_sha256_hw :: proc(b: ^hugi.Bencher) {
-	_run_xitdb_lookup_sized(b, forseti.Xitdb_Config{mode = .Safe_V2, custom_hasher = xitdb.sha256_hasher()}, prehashed = false)
-}
-
-@(private = "file")
-_bench_xitdb_lookup_fast_memory_sw :: proc(b: ^hugi.Bencher) {
-	_run_xitdb_lookup_sized(b, forseti.Xitdb_Config{mode = .Fast_Memory}, prehashed = false)
+	_run_xitdb_lookup_sized(b, forseti.Xitdb_Config{custom_hasher = xitdb.sha256_hasher()}, prehashed = false)
 }
 
 @(private = "file")
 _bench_xitdb_lookup_sha1_prehashed :: proc(b: ^hugi.Bencher) {
-	_run_xitdb_lookup_sized(b, forseti.Xitdb_Config{mode = .Safe_V2}, prehashed = true)
+	_run_xitdb_lookup_sized(b, forseti.Xitdb_Config{}, prehashed = true)
 }
 
 @(private = "file")
 _bench_xitdb_insert_sha1_hw :: proc(b: ^hugi.Bencher) {
-	_run_xitdb_insert_sized(b, forseti.Xitdb_Config{mode = .Safe_V2})
+	_run_xitdb_insert_sized(b, forseti.Xitdb_Config{})
 }
 
 @(private = "file")
 _bench_xitdb_insert_sha256_hw :: proc(b: ^hugi.Bencher) {
-	_run_xitdb_insert_sized(b, forseti.Xitdb_Config{mode = .Safe_V2, custom_hasher = xitdb.sha256_hasher()})
-}
-
-@(private = "file")
-_bench_xitdb_insert_fast_memory_sw :: proc(b: ^hugi.Bencher) {
-	_run_xitdb_insert_sized(b, forseti.Xitdb_Config{mode = .Fast_Memory})
+	_run_xitdb_insert_sized(b, forseti.Xitdb_Config{custom_hasher = xitdb.sha256_hasher()})
 }
 
 register_hasher_verify_benchmarks :: proc(suite: ^hugi.Suite) {
@@ -257,16 +242,13 @@ register_hasher_verify_benchmarks :: proc(suite: ^hugi.Suite) {
 	hugi.group_params(g_raw, []int{10, 32, 64, 256, 1_024, 4_096})
 	hugi.group_bench(g_raw, "xitdb_sha1_hw", _bench_raw_xitdb_sha1_hw, zero_alloc = true)
 	hugi.group_bench(g_raw, "xitdb_sha256_hw", _bench_raw_xitdb_sha256_hw, zero_alloc = true)
-	hugi.group_bench(g_raw, "forseti_fast_hash128_sw", _bench_raw_forseti_fast_hash128_sw, zero_alloc = true)
 	hugi.group_bench(g_raw, "core_crypto_sha1_sw", _bench_raw_core_crypto_sha1_sw, zero_alloc = true)
 
 	g_xit := hugi.group_add(suite, "hasher_xitdb_verify")
 	hugi.group_params(g_xit, []int{10, 64, 256, 1_024})
 	hugi.group_bench(g_xit, "lookup_1k_safe_v2_sha1_hw", _bench_xitdb_lookup_sha1_hw, zero_alloc = true)
 	hugi.group_bench(g_xit, "lookup_1k_safe_v2_sha256_hw", _bench_xitdb_lookup_sha256_hw, zero_alloc = true)
-	hugi.group_bench(g_xit, "lookup_1k_fast_memory_sw", _bench_xitdb_lookup_fast_memory_sw, zero_alloc = true)
 	hugi.group_bench(g_xit, "lookup_1k_safe_v2_prehashed", _bench_xitdb_lookup_sha1_prehashed, zero_alloc = true)
 	hugi.group_bench(g_xit, "insert_1k_safe_v2_sha1_hw", _bench_xitdb_insert_sha1_hw)
 	hugi.group_bench(g_xit, "insert_1k_safe_v2_sha256_hw", _bench_xitdb_insert_sha256_hw)
-	hugi.group_bench(g_xit, "insert_1k_fast_memory_sw", _bench_xitdb_insert_fast_memory_sw)
 }
