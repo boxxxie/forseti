@@ -48,8 +48,9 @@ TableDecl   ::= "table" Ident ("version" String)? ("hit" HitPolicy)? VerifySpec?
                 "}"
 HitPolicy   ::= "First" | "Unique" | "Any" | "Priority" | "Collect"
               | "Collect_Sum" | "Collect_Min" | "Collect_Max" | "Collect_Count"
-              | "Merge" | "Reverse_Merge"
-              | "F" | "U" | "A" | "P" | "C" | "C+" | "C<" | "C>" | "C#" | "M" | "R"
+              | "CollectSum" | "CollectMin" | "CollectMax" | "CollectCount"
+              | "Merge" | "Reverse_Merge" | "ReverseMerge"
+              | "F" | "U" | "A" | "P" | "C" | "M" | "R"
 VerifySpec  ::= "verify" "(" VerifyOpt ("," VerifyOpt)* ")"
 VerifyOpt   ::= "complete" | "no_overlap" | "no_dead_rules" | "strict"
 TableInputs ::= "inputs" "{" (TableCol ("," | ";")?)* "}"
@@ -95,12 +96,12 @@ QueryDecl   ::= "query" Ident ("(" (Ident ":" TypeSpec ("," Ident ":" TypeSpec)*
 | `Any` | `A` | Lazy cost-ordered tree | Overlapping rows allowed only when outputs match identically; conflicting overlaps emit `E3001`. |
 | `Priority` | `P` | Lazy cost-ordered tree | Evaluates rows sorted by first output `enum(...)` variant rank (`W3002`/`W3005` verify in rank order). |
 | `Collect` | `C` | Ternary `u64` bitset matrix | Returns all matching rows in `matched_rows`. |
-| `Collect_Sum` | `C+` | Ternary `u64` bitset matrix | Sums matching numeric output columns. |
-| `Collect_Min` | `C<` | Ternary `u64` bitset matrix | Computes minimum across matching rows. |
-| `Collect_Max` | `C>` | Ternary `u64` bitset matrix | Computes maximum across matching rows. |
-| `Collect_Count` | `C#` | Ternary `u64` bitset matrix | Counts matching rows. |
+| `Collect_Sum` | `CollectSum` | Ternary `u64` bitset matrix | Sums matching numeric output columns. |
+| `Collect_Min` | `CollectMin` | Ternary `u64` bitset matrix | Computes minimum across matching rows. |
+| `Collect_Max` | `CollectMax` | Ternary `u64` bitset matrix | Computes maximum across matching rows. |
+| `Collect_Count` | `CollectCount` | Ternary `u64` bitset matrix | Counts matching rows. |
 | `Merge` | `M` | Ternary `u64` bitset matrix | Merges matching rows top-to-bottom; first non-`-` value per output column wins. |
-| `Reverse_Merge` | `R` | Ternary `u64` bitset matrix | Merges matching rows bottom-to-top; last non-`-` value wins. |
+| `Reverse_Merge` | `R`, `ReverseMerge` | Ternary `u64` bitset matrix | Merges matching rows bottom-to-top; last non-`-` value wins. |
 
 ### Verified Policy Example (DMN Table + Rule + Query)
 

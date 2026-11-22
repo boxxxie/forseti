@@ -128,7 +128,8 @@ defer forseti.delta_syncer_destroy(&syncer)
 
 _ = forseti.delta_syncer_watch(&syncer, ".accounts.raw")
 fired, err := forseti.session_sync_and_fire(sess, &bridge, &syncer, commit_derived = true)
-assert(err == nil && fired >= 0)
+assert(err == nil)
+_ = fired
 ```
 
 ### 4. Explaining, Evaluating Semirings, Counterfactual Replay & Visual Export

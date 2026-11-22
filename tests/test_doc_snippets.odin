@@ -67,20 +67,22 @@ _verify_doc_forseti_snippets :: proc(t: ^testing.T, doc_path: string) -> int {
 			ir, c_err := forseti.compile_source(snippet, label, &diags)
 			testing.expectf(t, c_err == nil, "%s compile_source failed: %v", label, c_err)
 
-			if len(expect_errors) > 0 {
-				testing.expectf(t, diags.error_count > 0, "%s expected error(s) %v, got 0 errors", label, expect_errors[:])
-				for want in expect_errors {
-					found := false
-					for d in diags.items {
-						if d.severity == .Error && forseti.diag_code_string(d.code) == want {
-							found = true
-							break
+			if len(expect_errors) > 0 || len(expect_warnings) > 0 {
+				if len(expect_errors) > 0 {
+					testing.expectf(t, diags.error_count > 0, "%s expected error(s) %v, got 0 errors", label, expect_errors[:])
+					for want in expect_errors {
+						found := false
+						for d in diags.items {
+							if d.severity == .Error && forseti.diag_code_string(d.code) == want {
+								found = true
+								break
+							}
 						}
+						testing.expectf(t, found, "%s expected error code %s, got %d diag(s)", label, want, len(diags.items))
 					}
-					testing.expectf(t, found, "%s expected error code %s, got %d diag(s)", label, want, len(diags.items))
+				} else {
+					testing.expectf(t, diags.error_count == 0, "%s expected 0 errors (warnings only), got %d errors", label, diags.error_count)
 				}
-			} else if len(expect_warnings) > 0 {
-				testing.expectf(t, diags.error_count == 0, "%s expected 0 errors (warnings only), got %d errors", label, diags.error_count)
 				for want in expect_warnings {
 					found := false
 					for d in diags.items {
