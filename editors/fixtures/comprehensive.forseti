@@ -1,0 +1,52 @@
+// Comprehensive Forseti grammar & formatter smoke fixture
+module editor_smoke version "1.0"
+
+/* Multi-line block comment covering
+   schemas, enums, tables, rules, effects, and queries */
+schema RawOrg { org_id: string, employees: i64, score: f64, active: bool, kind: enum("vip", "std"), ref: entity, ts: time }
+
+schema BlockedOrg { org_id: string }
+
+schema CanonOrg { org_id: string, tier: string, note: string, cnt: i64 }
+
+schema AuditEntry { org_id: string }
+
+source Raw : RawOrg at .orgs.raw[?id]
+
+source Blocked : BlockedOrg at .orgs.blocked[?id]
+
+derived Canon : CanonOrg at .orgs.canon[?id]
+
+derived Audit : AuditEntry at .orgs.audit[?id]
+
+table tier_gate version "1.0" hit First verify(complete, no_dead_rules) {
+  inputs { employees: i64 cost 1, active: bool cost 1, score: f64 cost 10 }
+  outputs { tier: string, note: string }
+  rows {
+    r_ent:     >= 100    | true  | >= 0.5 || "enterprise" | "verified";
+    r_neg_chk: -10..0    | false | -      || "smb"        | "inactive";
+    r_in_chk:  in (1, 2) | -     | -      || "smb"        | "small";
+    r_default: -         | -     | -      || "smb"        | "standard";
+  }
+}
+
+rule classify phase "main" salience 10 {
+  when {
+    ?r := Raw(org_id: ?oid, employees: ?emp, active: ?act, score: ?sc)
+    not Blocked(org_id: ?oid)
+    exists Raw(org_id: ?oid)
+    ?g := decide tier_gate(employees: ?emp, active: ?act, score: ?sc)
+    ?cnt := count(?oid) from Raw(org_id: ?oid)
+    where ?emp >= 0 or ?emp == -5
+  }
+  then {
+    assert Canon(org_id: ?oid, tier: ?g.tier, note: ?g.note, cnt: ?cnt)
+    assert! Audit(org_id: ?oid) unconditional
+    retract ?r
+  }
+  effect "enrich" { org_id: ?oid }
+}
+
+query ent_orgs(tier: string) {
+  Canon(org_id: ?oid, tier: ?tier)
+}

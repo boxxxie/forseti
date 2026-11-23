@@ -14,6 +14,7 @@ Welcome to the **Forseti** documentation hub. This guide helps you pick the righ
 | **Embedding Forseti in Odin** | [`odin-api.md`](odin-api.md) | Lifetimes, `Rulebase` vs `Session`, `Delta_Syncer`, `explain`/semirings, async effects, AOT |
 | **Evaluating performance & scale** | [`benchmarks.md`](benchmarks.md) | `10`–`1,000,000` rule latency/RAM scaling, PMU counters, `@zero_alloc` hot paths |
 | **Integrating as an AI coding agent** | [`usage-rules.md`](../usage-rules.md) | Decision trees, copy-paste recipes, top 12 pitfalls, and 4-layer ATDD rules |
+| **Setting up IDE / editor tooling** | [`editors.md`](editors.md) | `forseti fmt`, `forseti lsp`, TextMate & Tree-sitter grammars for Neovim, VS Code, Zed |
 | **Contributing to Forseti** | [`AGENTS.md`](../AGENTS.md) | Package invariants, canonical check/test/ASan commands, and [`conductor/tracks.md`](../conductor/tracks.md) |
 
 ---

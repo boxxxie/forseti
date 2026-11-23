@@ -30,7 +30,7 @@
 
 ## Phase 3: Syntax Highlighting Grammars & Editor Integrations
 
-- [~] Task: Create TextMate and Tree-sitter grammars + editor setup docs
-    - [ ] Author `editors/textmate/forseti.tmLanguage.json` and `editors/tree-sitter-forseti/{grammar.js,queries/highlights.scm}` covering all `.forseti` keywords, table syntax, selectors, and `?var` sigils
-    - [ ] Add grammar smoke fixtures, document editor setup in `docs/`, and run full strict check + `tests` + `specs` + `odin doc`
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Editor Grammars & Integration Docs' (Protocol in workflow.md)
+- [x] Task: Create TextMate and Tree-sitter grammars + editor setup docs
+    - [x] Author `editors/textmate/forseti.tmLanguage.json` and `editors/tree-sitter-forseti/{grammar.js,queries/highlights.scm}` covering all `.forseti` keywords, table syntax, selectors, and `?var` sigils
+    - [x] Add grammar smoke fixtures, document editor setup in `docs/`, and run full strict check + `tests` + `specs` + `odin doc`
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Editor Grammars & Integration Docs' (Protocol in workflow.md)

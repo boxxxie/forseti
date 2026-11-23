@@ -424,6 +424,7 @@ Every example compiles cleanly under strict `-vet -strict-style -warnings-as-err
 | [**Odin Embedding Guide (`docs/odin-api.md`)**](docs/odin-api.md) | Odin Developers | Lifetimes, `Session`, `Delta_Syncer`, `explain`/semirings, async effects, AOT |
 | [**DSL & CLI Reference (`docs/dsl-reference.md`)**](docs/dsl-reference.md) | Policy & Tool Authors | Full EBNF grammar, hit policies, CLI flags, verified `E*`/`W*` error catalog |
 | [**Benchmarks & Scaling (`docs/benchmarks.md`)**](docs/benchmarks.md) | Perf Engineers | `10`–`1M` rule scaling, hardware PMU counters, `@zero_alloc` hot-path audit |
+| [**Editors, Formatter & LSP (`docs/editors.md`)**](docs/editors.md) | Editor & Tool Users | `forseti fmt`, `forseti lsp`, TextMate & Tree-sitter grammars (Neovim, VS Code, Zed) |
 | [**Agent Usage Rules (`usage-rules.md`)**](usage-rules.md) | AI Coding Agents | Prescriptive decision trees, canonical recipes, and top 12 pitfalls |
 | [**Repository Guide (`AGENTS.md`)**](AGENTS.md) | Contributors & Agents | Package invariants, 4-layer ATDD rules, and canonical build/test gates |
 

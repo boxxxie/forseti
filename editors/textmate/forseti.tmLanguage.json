@@ -1,0 +1,165 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Forseti",
+  "scopeName": "source.forseti",
+  "fileTypes": ["forseti"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#selectors" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#hit-policies" },
+    { "include": "#variables" },
+    { "include": "#numbers" },
+    { "include": "#table-delimiters" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.forseti",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.forseti",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.forseti",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.forseti",
+          "match": "\\\\[\"\\\\ntr0]"
+        }
+      ]
+    },
+    "selectors": {
+      "patterns": [
+        {
+          "name": "meta.selector.forseti",
+          "match": "(\\bat\\b)\\s+(\\.[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)(\\[(?:\\?[A-Za-z_][A-Za-z0-9_]*|\\*|\"[^\"]*\")\\])?",
+          "captures": {
+            "1": { "name": "keyword.control.forseti" },
+            "2": { "name": "entity.other.attribute-name.selector.forseti" },
+            "3": { "name": "variable.parameter.selector.forseti" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.assert-unconditional.forseti",
+          "match": "\\bassert!"
+        },
+        {
+          "name": "keyword.declaration.forseti",
+          "match": "\\b(module|version|schema|source|derived|table|rule|query|enum)\\b"
+        },
+        {
+          "name": "keyword.control.forseti",
+          "match": "\\b(at|hit|verify|inputs|outputs|rows|cost|phase|salience|when|then|effect|where|decide|assert|unconditional|retract|from)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.forseti",
+          "match": "\\b(not|exists|and|or|in)\\b"
+        },
+        {
+          "name": "constant.language.boolean.forseti",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.forseti",
+          "match": "\\b(bool|i32|i64|f64|string|entity|time)\\b"
+        },
+        {
+          "name": "support.function.builtin.forseti",
+          "match": "\\b(count|sum|min|max|avg|distinct|collect)\\b"
+        }
+      ]
+    },
+    "hit-policies": {
+      "patterns": [
+        {
+          "name": "support.constant.hit-policy.forseti",
+          "match": "\\b(First|Unique|Any|Priority|Collect_Sum|Collect_Min|Collect_Max|Collect_Count|Collect|Reverse_Merge|Merge)\\b"
+        },
+        {
+          "name": "support.constant.verify-flag.forseti",
+          "match": "\\b(complete|no_overlap|no_dead_rules|strict)\\b"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.unused.forseti",
+          "match": "\\?_[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
+          "name": "variable.other.binding.forseti",
+          "match": "\\?[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.forseti",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*(?:[eE][+-]?[0-9][0-9_]*)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.forseti",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "table-delimiters": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.table-outputs.forseti",
+          "match": "\\|\\|"
+        },
+        {
+          "name": "punctuation.separator.table-column.forseti",
+          "match": "\\|"
+        },
+        {
+          "name": "constant.language.wildcard.forseti",
+          "match": "(?:^|(?<=[\\s|]))-(?=\\s*(?:\\|\\|?|;))"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.range.forseti",
+          "match": "\\.\\.=?"
+        },
+        {
+          "name": "keyword.operator.assignment.forseti",
+          "match": ":="
+        },
+        {
+          "name": "keyword.operator.comparison.forseti",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.forseti",
+          "match": "[+\\-*/%!]"
+        }
+      ]
+    }
+  }
+}
