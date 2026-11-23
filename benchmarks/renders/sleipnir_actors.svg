@@ -49,9 +49,9 @@
 <circle cx="316.0" cy="333.3" r="4" fill="#ffa657" stroke="#0d1117" stroke-width="1.5"/>
 <circle cx="550.0" cy="331.3" r="4" fill="#ffa657" stroke="#0d1117" stroke-width="1.5"/>
 <circle cx="784.0" cy="326.2" r="4" fill="#ffa657" stroke="#0d1117" stroke-width="1.5"/>
-<text class="val" x="792.0" y="215.7" text-anchor="start" fill="#58a6ff">980.19 us</text>
-<text class="val" x="792.0" y="253.1" text-anchor="start" fill="#3fb950">703.18 us</text>
-<text class="val" x="792.0" y="330.2" text-anchor="start" fill="#ffa657">131.90 us</text>
+<text class="val" x="792" y="215.7" text-anchor="start" fill="#58a6ff">980.19 us</text>
+<text class="val" x="792" y="253.1" text-anchor="start" fill="#3fb950">703.18 us</text>
+<text class="val" x="792" y="330.2" text-anchor="start" fill="#ffa657">131.90 us</text>
 <rect x="82.0" y="379.0" width="12" height="4" rx="2" fill="#58a6ff"/>
 <text class="legend" x="100.0" y="385.0">parallel_diff_replay_4_cands</text>
 <rect x="316.0" y="379.0" width="12" height="4" rx="2" fill="#3fb950"/>

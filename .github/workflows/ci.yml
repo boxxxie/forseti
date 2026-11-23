@@ -61,6 +61,15 @@ jobs:
           submodules: false
           persist-credentials: false
 
+      - name: Checkout temple v1.0.0
+        uses: actions/checkout@v7
+        with:
+          repository: boxxxie/temple
+          ref: v1.0.0
+          path: temple
+          submodules: false
+          persist-credentials: false
+
       - name: Init hugi obench submodule
         run: git -C hugi submodule update --init deps/obench
 
@@ -90,6 +99,7 @@ jobs:
           odin check cmd/forseti -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp,main
           odin check cmd/forseti-lsp -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp,main
           odin check benchmarks -collection:xitdb=../xitdb/xitdb -collection:actor=../sleipnir/actor -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,main
+          odin check benchmarks/render -collection:temple=../temple -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:bench_render
           odin check tests -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp,forseti_tests
           odin check specs -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_specs
           odin check specs_actors -no-entry-point -collection:xitdb=../xitdb/xitdb -collection:actor=../sleipnir/actor -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_actors,forseti_actors_specs
@@ -105,6 +115,10 @@ jobs:
       - name: Run leak-checked Sleipnir actor 4-layer ATDD suite
         working-directory: forseti
         run: odin test specs_actors -collection:xitdb=../xitdb/xitdb -collection:actor=../sleipnir/actor -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+
+      - name: Run leak-checked benchmark renderer tests
+        working-directory: forseti
+        run: odin test benchmarks/render -collection:temple=../temple -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
       - name: Verify package documentation generation
         working-directory: forseti
@@ -139,6 +153,15 @@ jobs:
           repository: boxxxie/sleipnir
           ref: v1.1.3
           path: sleipnir
+          submodules: false
+          persist-credentials: false
+
+      - name: Checkout temple v1.0.0
+        uses: actions/checkout@v7
+        with:
+          repository: boxxxie/temple
+          ref: v1.0.0
+          path: temple
           submodules: false
           persist-credentials: false
 

@@ -1,0 +1,85 @@
+[Root README](../README.md) · [Docs Hub](../docs/README.md) · [Benchmarks Analysis](../docs/benchmarks.md) · **Suite Renders**
+
+# Forseti Benchmarks & Visual Renders
+
+This directory contains Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) + [`obench`](https://github.com/zeybek/obench) benchmark suite (`{{ this.total_benchmarks | int }}` benchmarks across `{{ this.group_count | int }}` groups, `{{ this.total_samples_str | raw }}` samples at commit `{{ this.commit | raw }}` in [`history.hugidb`](history.hugidb)), visual SVG charts rendered via [`temple`](https://github.com/boxxxie/temple) under [`renders/`](renders/), and a `--profile-1m` telemetry sweep.
+
+> For architectural deep dives, hardware PMU counters, and Phase 2 optimization notes, see [`docs/benchmarks.md`](../docs/benchmarks.md).
+
+---
+
+## Visual Renders (`v0.1.0` Snapshot)
+
+### 1. `10` to `1,000,000` Rule Scaling
+
+Lazy `session_init` holds flat at **`20.17 us` (`O(1)`)** and `sparse_alpha_match` stays at **`1.87 us`** (`2.64 us` `.Audit_Full`) even when `1,000,000` rules are compiled into the `Rulebase`:
+
+![10 to 1,000,000 Rule Scaling](renders/1m_rule_scaling.svg)
+
+### 2. Decision Tables at `10,000` Rows (`0` Heap Allocations)
+
+Tier 3 `contextless` AOT tables execute in **`775.58 ps`**, while runtime cost-ordered decision trees (`38.78–42.90 ns`) and `u64` ternary bitset matrices (`476.20–484.96 ns`) run with **`0` heap allocations**:
+
+![Decision Tables at 10,000 Rows](renders/decision_tables.svg)
+
+### 3. PHREAK Hot Match & Incremental MDM Sync (`10`–`10,000` Facts)
+
+`phreak_hot_match_zero_alloc` holds flat at **`3.16 us` (`O(1)`, `0` allocs)** across `10`–`10,000` background facts, and `O(delta)` `xitdb` sync+fire executes in **`119.58 us` (`.Fast`) / `352.65 us` (`.Audit_Full`)**:
+
+![PHREAK Hot Match and Incremental MDM Sync](renders/phreak_and_mdm_scaling.svg)
+
+### 4. Sleipnir Multi-Threaded Actor Runtime (`1`–`8` Workers)
+
+`Parallel_Diff_Replay` over `4` candidate rulebases scales from `1.62 ms` (`1w`) down to **`939.51 us` (`4w`)**, and `Session_Actor` `Chain=K` batching drops from `1.11 ms` to **`686.03 us` (`4w`)**:
+
+![Sleipnir Multi-Threaded Actor Runtime Scaling](renders/sleipnir_actors.svg)
+
+### 5. Longitudinal Optimization Progression
+
+Tracked in [`history.hugidb`](history.hugidb) across commits `be8f675` through `434960b` (`~101,000x` speedup on `phreak_hot_match_zero_alloc[10000]` and `111x` on `incremental_sync_fire_audit_full_safe_v2[10000]` since `e9cd4fc`):
+
+![Longitudinal Optimization Progression](renders/longitudinal_history.svg)
+
+---
+
+## Reproducing & Regenerating Renders
+
+```bash
+# 1. Run smoke checks (@zero_alloc verification across non-1M groups)
+hugi run --test --groups decision_tables,xitdb_modes,beta_joins,jtms_churn,recursive_strata,mdm_e2e
+
+# 2. Run the full suite and record into benchmarks/history.hugidb
+hugi run --runs 1 --warmup 1
+
+# 3. Regenerate SVG charts in benchmarks/renders/ and tables below using temple AOT templates
+odin run benchmarks/render -collection:temple=../temple
+
+# 4. Run the standalone 10..1,000,000 rule telemetry sweep
+XITDB="-collection:xitdb=../xitdb/xitdb"
+ACTOR="-collection:actor=../sleipnir/actor"
+HUGI="-collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench"
+odin build benchmarks -out:/tmp/forseti_bench -o:speed -microarch:native $XITDB $ACTOR $HUGI
+/tmp/forseti_bench --profile-1m
+```
+
+---
+
+## Full Benchmark Results (`{{ this.total_benchmarks | int }}` Benchmarks at `{{ this.commit | raw }}`)
+
+<!-- BEGIN_BENCHMARK_TABLE -->
+{%- for group in this.groups %}
+### {{ group.title | raw }} (`{{ group.count | int }}` benchmarks)
+
+{%- if group.has_desc %}
+
+{{ group.desc | raw }}
+{%- end %}
+
+| Benchmark | Median (`p50`) | `P95` | Ops/s | `CV%` | Allocs / op |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+{%- for row in group.rows %}
+| `{{ row.name | raw }}` | **{{ row.median | raw }}** | {{ row.p95 | raw }} | {{ row.ops | raw }} | {{ row.cv | raw }} | {{ row.allocs | raw }} |
+{%- end %}
+
+{%- end %}
+<!-- END_BENCHMARK_TABLE -->

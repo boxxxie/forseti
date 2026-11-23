@@ -61,11 +61,11 @@
 <circle cx="316.0" cy="217.6" r="4" fill="#f78166" stroke="#0d1117" stroke-width="1.5"/>
 <circle cx="550.0" cy="163.4" r="4" fill="#f78166" stroke="#0d1117" stroke-width="1.5"/>
 <circle cx="784.0" cy="104.9" r="4" fill="#f78166" stroke="#0d1117" stroke-width="1.5"/>
-<text class="val" x="792.0" y="108.9" text-anchor="start" fill="#f78166">26.75 ms</text>
-<text class="val" x="792.0" y="210.4" text-anchor="start" fill="#d2a8ff">352.65 us</text>
-<text class="val" x="792.0" y="235.8" text-anchor="start" fill="#58a6ff">119.58 us</text>
-<text class="val" x="792.0" y="307.6" text-anchor="start" fill="#79c0ff">5.61 us</text>
-<text class="val" x="792.0" y="321.6" text-anchor="start" fill="#3fb950">3.16 us</text>
+<text class="val" x="792" y="108.9" text-anchor="start" fill="#f78166">26.75 ms</text>
+<text class="val" x="792" y="210.4" text-anchor="start" fill="#d2a8ff">352.65 us</text>
+<text class="val" x="792" y="235.8" text-anchor="start" fill="#58a6ff">119.58 us</text>
+<text class="val" x="792" y="307.6" text-anchor="start" fill="#79c0ff">5.61 us</text>
+<text class="val" x="792" y="321.6" text-anchor="start" fill="#3fb950">3.16 us</text>
 <rect x="82.0" y="379.0" width="12" height="4" rx="2" fill="#3fb950"/>
 <text class="legend" x="100.0" y="385.0">phreak_hot_match_zero_alloc (.Fast)</text>
 <rect x="316.0" y="379.0" width="12" height="4" rx="2" fill="#79c0ff"/>

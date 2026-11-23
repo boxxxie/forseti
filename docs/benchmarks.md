@@ -207,10 +207,11 @@ odin test tests -sanitize:address $XITDB $ACTOR -define:ODIN_TEST_FANCY=false -d
 # 2. Verify @zero_alloc + smoke assertions across functional workloads
 hugi run --test --groups decision_tables,xitdb_modes,beta_joins,jtms_churn,recursive_strata,mdm_e2e
 
-# 3. Record full longitudinal benchmark run & inspect history/comparison
+# 3. Record full longitudinal benchmark run, inspect history, and regenerate renders
 hugi run --runs 1 --warmup 1
 hugi history
 hugi compare --last --format md
+odin run benchmarks/render -collection:temple=../temple
 
 # 4. Run 10..1,000,000 rule telemetry sweep directly
 odin build benchmarks -out:/tmp/forseti_bench -o:speed -microarch:native $XITDB $ACTOR $HUGI $VET -vet-packages:forseti,main

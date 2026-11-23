@@ -2,7 +2,7 @@
 
 # Forseti Benchmarks & Visual Renders
 
-This directory contains Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) + [`obench`](https://github.com/zeybek/obench) benchmark suite (`253` benchmarks across `14` groups, `11,989` samples at commit `434960b28fd0` in [`history.hugidb`](history.hugidb)), visual SVG charts under [`renders/`](renders/), and a `--profile-1m` telemetry sweep.
+This directory contains Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) + [`obench`](https://github.com/zeybek/obench) benchmark suite (`253` benchmarks across `14` groups, `11,989` samples at commit `434960b28fd0` in [`history.hugidb`](history.hugidb)), visual SVG charts rendered via [`temple`](https://github.com/boxxxie/temple) under [`renders/`](renders/), and a `--profile-1m` telemetry sweep.
 
 > For architectural deep dives, hardware PMU counters, and Phase 2 optimization notes, see [`docs/benchmarks.md`](../docs/benchmarks.md).
 
@@ -51,8 +51,8 @@ hugi run --test --groups decision_tables,xitdb_modes,beta_joins,jtms_churn,recur
 # 2. Run the full suite and record into benchmarks/history.hugidb
 hugi run --runs 1 --warmup 1
 
-# 3. Regenerate SVG charts in benchmarks/renders/ and tables below
-python3 benchmarks/render_readme.py
+# 3. Regenerate SVG charts in benchmarks/renders/ and tables below using temple AOT templates
+odin run benchmarks/render -collection:temple=../temple
 
 # 4. Run the standalone 10..1,000,000 rule telemetry sweep
 XITDB="-collection:xitdb=../xitdb/xitdb"
@@ -109,7 +109,6 @@ Cost-ordered lazy decision trees, ternary `u64` bitset matrices, and `"contextle
 | `merge_table_outputs[10000]` | **476.52 ns** | 485.05 ns | 2.10M/s | 1.0% | **0** |
 | `reverse_merge_table_outputs[10000]` | **476.20 ns** | 485.76 ns | 2.10M/s | 0.9% | **0** |
 | `wide_string_range_table[10000]` | **32.23 ns** | 33.78 ns | 31.03M/s | 8.5% | **0** |
-
 ### `10` to `1,000,000` Rule Scaling (Alpha DAG & Lazy Session) (`30` benchmarks)
 
 Immutable `Rulebase` compilation, `O(1)` lazy `session_init`, and sparse matching up to `1,000,000` rules.
@@ -146,7 +145,6 @@ Immutable `Rulebase` compilation, `O(1)` lazy `session_init`, and sparse matchin
 | `sparse_alpha_match[1000000]` | **1.87 us** | 2.55 us | 535.7K/s | 12.6% | 6.1 (2.56 KiB) |
 | `audit_full_sparse_match[1000000]` | **2.64 us** | 3.78 us | 379.2K/s | 15.2% | 7.4 (3.04 KiB) |
 | `batch_100_alpha_match[1000000]` | **341.47 us** | 435.11 us | 2.9K/s | 9.4% | 868.0 (1.44 MiB) |
-
 ### Multi-Rule Join Scaling (`8` benchmarks)
 
 Compiled join networks and sparse `1,000`-fact working-memory matching across `10` to `10,000` join rules.
@@ -161,7 +159,6 @@ Compiled join networks and sparse `1,000`-fact working-memory matching across `1
 | `sparse_join_match_1k_facts[1000]` | **4.62 us** | 6.03 us | 216.5K/s | 14.0% | 0.1 (1.84 KiB) |
 | `compile_join_rules[10000]` | **20.68 ms** | 21.99 ms | 48/s | 4.1% | 10080.0 (14.99 MiB) |
 | `sparse_join_match_1k_facts[10000]` | **4.49 us** | 5.35 us | 222.8K/s | 9.6% | 0.1 (2.23 KiB) |
-
 ### Beta Joins, Queries & `@zero_alloc` Hot Match (`36` benchmarks)
 
 Cold 2/3-way joins, skewed fanouts, parameterized queries, and `@zero_alloc` `.Fast` PHREAK updates.
@@ -204,7 +201,6 @@ Cold 2/3-way joins, skewed fanouts, parameterized queries, and `@zero_alloc` `.F
 | `incremental_join_insert_retract[10000]` | **6.72 us** | 9.21 us | 148.8K/s | 18.2% | 0.0 (2.59 KiB) |
 | `incremental_join_audit_full[10000]` | **5.61 us** | 8.27 us | 178.3K/s | 19.7% | 0.0 (1.55 KiB) |
 | `exists_and_accum_variants[10000]` | **6.30 us** | 7.50 us | 158.7K/s | 6.8% | 0.2 (1.85 KiB) |
-
 ### End-to-End MDM Pipeline (`xitdb` Sync + Fire + Commit) (`8` benchmarks)
 
 Incremental `O(delta)` `Delta_Syncer` ingestion, PHREAK matching, and atomic `.decisions` + `.__tx` persistence.
@@ -219,7 +215,6 @@ Incremental `O(delta)` `Delta_Syncer` ingestion, PHREAK matching, and atomic `.d
 | `incremental_sync_fire_fast_safe_v2[1000]` | **99.46 us** | 113.67 us | 10.1K/s | 6.7% | 3.7 (18.39 KiB) |
 | `incremental_sync_fire_audit_full_safe_v2[10000]` | **352.65 us** | 429.26 us | 2.8K/s | 9.9% | 6.5 (337.31 KiB) |
 | `incremental_sync_fire_fast_safe_v2[10000]` | **119.58 us** | 149.38 us | 8.4K/s | 10.4% | 3.6 (106.70 KiB) |
-
 ### Z-Set JTMS Cascades & Retractable Accumulators (`12` benchmarks)
 
 Logical assertion/retraction cascades in `.Audit_Full` vs `.Fast`, plus `O(1)` incremental accumulator updates.
@@ -238,7 +233,6 @@ Logical assertion/retraction cascades in `.Audit_Full` vs `.Fast`, plus `O(1)` i
 | `cascade_retract_audit_full[10000]` | **101.20 ms** | 107.14 ms | 10/s | 3.4% | 615.0 (74.86 MiB) |
 | `cascade_retract_fast_mode[10000]` | **102.29 ms** | 114.30 ms | 10/s | 7.3% | 586.0 (73.24 MiB) |
 | `retractable_accum_sum[10000]` | **4.05 us** | 5.08 us | 246.9K/s | 10.0% | 0.1 (1.17 KiB) |
-
 ### Tarjan SCC Semi-Naive Datalog & Cycle Breaking (`12` benchmarks)
 
 Transitive closure over DAGs and cyclic graphs with incremental cycle-break retraction.
@@ -257,7 +251,6 @@ Transitive closure over DAGs and cyclic graphs with incremental cycle-break retr
 | `seminaive_dag_closure[5000]` | **51.81 ms** | 69.98 ms | 19/s | 13.3% | 514.0 (42.16 MiB) |
 | `cyclic_scc_closure_audit_full[5000]` | **296.76 ms** | 315.77 ms | 3/s | 5.0% | 618.0 (166.13 MiB) |
 | `incremental_cycle_break_and_readd[5000]` | **213.30 us** | 223.46 us | 4.7K/s | 3.1% | 9.0 (512.25 KiB) |
-
 ### Causal Explain, Impact, Semirings, `Core_Overlay` & Async Effects (`24` benchmarks)
 
 Minimal proof-tree `explain`, `impact` blast radius, `Why`/`How`/`Viterbi` semirings, `diff_replay`, and 3-phase async effects.
@@ -288,7 +281,6 @@ Minimal proof-tree `explain`, `impact` blast radius, `Why`/`How`/`Viterbi` semir
 | `semiring_how_viterbi[5000]` | **997.45 ns** | 1.08 us | 1.00M/s | 3.6% | 2.0 (90 B) |
 | `overlay_diff_replay[5000]` | **32.35 ms** | 35.20 ms | 31/s | 4.8% | 5360.0 (14.48 MiB) |
 | `async_effects_3phase[5000]` | **1.31 ms** | 1.34 ms | 761/s | 1.4% | 3791.0 (2.07 MiB) |
-
 ### Sleipnir Multi-Threaded Actor Runtime (`1`–`8` Workers) (`12` benchmarks)
 
 `Session_Actor` `Chain=K` batching, `Partitioned_Supervisor` tenant fanout, and `Parallel_Diff_Replay`.
@@ -307,10 +299,9 @@ Minimal proof-tree `explain`, `impact` blast radius, `Why`/`How`/`Viterbi` semir
 | `session_actor_chain_k_batch[8]` | **703.18 us** | 902.60 us | 1.4K/s | 11.3% | 1297.0 (1.22 MiB) |
 | `tenant_runtime_fanout[8]` | **131.90 us** | 162.46 us | 7.6K/s | 15.5% | 22.0 (928 B) |
 | `parallel_diff_replay_4_cands[8]` | **980.19 us** | 1.11 ms | 1.0K/s | 7.6% | 747.0 (2.49 MiB) |
-
 ### Compiler Frontend, Static Table Verifier & AOT Codegen (`16` benchmarks)
 
-Lexing/parsing/sema, 4/8-column static table domain partitioning, and `contextless` Odin codegen.
+Lexing/parsing/sema, 4/8-column static table domain partitioning, and `"contextless"` Odin codegen.
 
 | Benchmark | Median (`p50`) | `P95` | Ops/s | `CV%` | Allocs / op |
 | :--- | ---: | ---: | ---: | ---: | ---: |
@@ -330,7 +321,6 @@ Lexing/parsing/sema, 4/8-column static table domain partitioning, and `contextle
 | `verify_table_4col[256]` | **462.34 us** | 471.90 us | 2.2K/s | 1.1% | 5.0 (20.00 KiB) |
 | `verify_table_8col_wide[256]` | **1.02 ms** | 1.05 ms | 984/s | 1.7% | 6.0 (40.00 KiB) |
 | `codegen_aot_odin[256]` | **260.61 us** | 266.39 us | 3.8K/s | 1.1% | 12.0 (124.27 KiB) |
-
 ### 32-Bit `#must_tail` Bytecode Guard VM (`9` benchmarks)
 
 Arithmetic, string built-in, `decide` call, and fact field evaluation inside the zero-alloc VM.
@@ -346,7 +336,6 @@ Arithmetic, string built-in, `decide` call, and fact field evaluation inside the
 | `vm_arith_cmp_chain[10000]` | **1.15 ms** | 1.23 ms | 867/s | 6.1% | **0** |
 | `vm_string_and_decide[10000]` | **2.12 ms** | 2.29 ms | 471/s | 4.0% | **0** |
 | `vm_field_access_eval[10000]` | **1.31 ms** | 1.49 ms | 765/s | 8.6% | **0** |
-
 ### `xitdb` v2 Storage Substrate & File Hydration (`12` benchmarks)
 
 Safe SHA-1 HAMT + CRC-64/XZ inserts, prehashed lookups, slot-skipping diffs, and `Core_Buffered_File` commits.
@@ -365,7 +354,6 @@ Safe SHA-1 HAMT + CRC-64/XZ inserts, prehashed lookups, slot-skipping diffs, and
 | `file_buffered_write_1k_single_tx_safe_v2` | **386.55 us** | 435.10 us | 2.6K/s | 4.2% | 853.0 (105.81 KiB) |
 | `file_buffered_commit_cycle_safe_v2` | **26.15 us** | 27.90 us | 38.2K/s | 3.9% | **0** |
 | `file_reopen_hydrate_session_1k` | **7.71 ms** | 8.53 ms | 130/s | 6.0% | 435.0 (7.39 MiB) |
-
 ### Hardware SHA-NI vs Software SHA-1 Throughput (`18` benchmarks)
 
 Raw `xitdb` SHA-NI accelerated SHA-1/SHA-256 vs Odin `core:crypto` software hashing across `10`–`4096` byte keys.
@@ -390,7 +378,6 @@ Raw `xitdb` SHA-NI accelerated SHA-1/SHA-256 vs Odin `core:crypto` software hash
 | `xitdb_sha1_hw[4096]` | **1.72 us** | 1.76 us | 580.7K/s | 2.0% | **0** |
 | `xitdb_sha256_hw[4096]` | **1.89 us** | 1.94 us | 528.7K/s | 1.6% | **0** |
 | `core_crypto_sha1_sw[4096]` | **11.77 us** | 12.04 us | 85.0K/s | 1.3% | **0** |
-
 ### `xitdb` HAMT Lookup & Insert Key-Length Scaling (`20` benchmarks)
 
 End-to-end `Hash_Map` point lookups (hashed vs `Prehashed_Key`) and inserts across `10`–`1024` byte keys.
@@ -417,5 +404,4 @@ End-to-end `Hash_Map` point lookups (hashed vs `Prehashed_Key`) and inserts acro
 | `lookup_1k_safe_v2_prehashed[1024]` | **54.07 us** | 57.57 us | 18.5K/s | 3.1% | **0** |
 | `insert_1k_safe_v2_sha1_hw[1024]` | **1.10 ms** | 1.13 ms | 912/s | 1.3% | 1.0 (400 B) |
 | `insert_1k_safe_v2_sha256_hw[1024]` | **1.14 ms** | 1.19 ms | 876/s | 2.0% | 1.0 (400 B) |
-
 <!-- END_BENCHMARK_TABLE -->
