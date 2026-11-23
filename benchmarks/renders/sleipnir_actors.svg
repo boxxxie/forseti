@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 440" width="880" height="440" role="img" aria-label="Sleipnir Multi-Threaded Actor Runtime Scaling (1–8 Workers)">
+<style>
+  .bg { fill: #0d1117; }
+  .panel { fill: #161b22; stroke: #30363d; stroke-width: 1; }
+  .grid { stroke: #21262d; stroke-width: 1; }
+  .axis { stroke: #30363d; stroke-width: 1.2; }
+  .title { fill: #f0f6fc; font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .sub { fill: #8b949e; font: 400 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .tick { fill: #8b949e; font: 500 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .legend { fill: #c9d1d9; font: 500 11.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .val { font: 600 10.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+<rect class="bg" width="880" height="440" rx="10"/>
+<rect class="panel" x="82" y="74" width="702" height="270" rx="4"/>
+<text class="title" x="82" y="30">Sleipnir Multi-Threaded Actor Runtime Scaling (1–8 Workers)</text>
+<text class="sub" x="82" y="49">Commit 434960b28fd0 · Session_Actor Chain=K, Partitioned Tenants &amp; Parallel Core_Overlay · Linear latency (p50, lower is better)</text>
+<line class="grid" x1="82" y1="344.0" x2="784" y2="344.0"/>
+<text class="tick" x="74" y="348.0" text-anchor="end">0</text>
+<line class="grid" x1="82" y1="276.5" x2="784" y2="276.5"/>
+<text class="tick" x="74" y="280.5" text-anchor="end">500 us</text>
+<line class="grid" x1="82" y1="209.0" x2="784" y2="209.0"/>
+<text class="tick" x="74" y="213.0" text-anchor="end">1 ms</text>
+<line class="grid" x1="82" y1="141.5" x2="784" y2="141.5"/>
+<text class="tick" x="74" y="145.5" text-anchor="end">1.50 ms</text>
+<line class="grid" x1="82" y1="74.0" x2="784" y2="74.0"/>
+<text class="tick" x="74" y="78.0" text-anchor="end">2 ms</text>
+<line class="grid" x1="82.0" y1="74" x2="82.0" y2="344"/>
+<text class="tick" x="82.0" y="362" text-anchor="middle">1 worker</text>
+<line class="grid" x1="316.0" y1="74" x2="316.0" y2="344"/>
+<text class="tick" x="316.0" y="362" text-anchor="middle">2 workers</text>
+<line class="grid" x1="550.0" y1="74" x2="550.0" y2="344"/>
+<text class="tick" x="550.0" y="362" text-anchor="middle">4 workers</text>
+<line class="grid" x1="784.0" y1="74" x2="784.0" y2="344"/>
+<text class="tick" x="784.0" y="362" text-anchor="middle">8 workers</text>
+<line class="axis" x1="82" y1="344" x2="784" y2="344"/>
+<line class="axis" x1="82" y1="74" x2="82" y2="344"/>
+<path d="M 82.0 125.0 L 316.0 188.8 L 550.0 217.2 L 784.0 211.7" fill="none" stroke="#58a6ff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="82.0" cy="125.0" r="4" fill="#58a6ff" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="316.0" cy="188.8" r="4" fill="#58a6ff" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="550.0" cy="217.2" r="4" fill="#58a6ff" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="784.0" cy="211.7" r="4" fill="#58a6ff" stroke="#0d1117" stroke-width="1.5"/>
+<path d="M 82.0 194.0 L 316.0 237.0 L 550.0 251.4 L 784.0 249.1" fill="none" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="82.0" cy="194.0" r="4" fill="#3fb950" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="316.0" cy="237.0" r="4" fill="#3fb950" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="550.0" cy="251.4" r="4" fill="#3fb950" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="784.0" cy="249.1" r="4" fill="#3fb950" stroke="#0d1117" stroke-width="1.5"/>
+<path d="M 82.0 334.2 L 316.0 333.3 L 550.0 331.3 L 784.0 326.2" fill="none" stroke="#ffa657" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="82.0" cy="334.2" r="4" fill="#ffa657" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="316.0" cy="333.3" r="4" fill="#ffa657" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="550.0" cy="331.3" r="4" fill="#ffa657" stroke="#0d1117" stroke-width="1.5"/>
+<circle cx="784.0" cy="326.2" r="4" fill="#ffa657" stroke="#0d1117" stroke-width="1.5"/>
+<text class="val" x="792.0" y="215.7" text-anchor="start" fill="#58a6ff">980.19 us</text>
+<text class="val" x="792.0" y="253.1" text-anchor="start" fill="#3fb950">703.18 us</text>
+<text class="val" x="792.0" y="330.2" text-anchor="start" fill="#ffa657">131.90 us</text>
+<rect x="82.0" y="379.0" width="12" height="4" rx="2" fill="#58a6ff"/>
+<text class="legend" x="100.0" y="385.0">parallel_diff_replay_4_cands</text>
+<rect x="316.0" y="379.0" width="12" height="4" rx="2" fill="#3fb950"/>
+<text class="legend" x="334.0" y="385.0">session_actor_chain_k_batch</text>
+<rect x="550.0" y="379.0" width="12" height="4" rx="2" fill="#ffa657"/>
+<text class="legend" x="568.0" y="385.0">tenant_runtime_fanout</text>
+</svg>

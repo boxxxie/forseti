@@ -440,7 +440,7 @@ forseti_rulebase_destroy(rb);
 
 ## Performance Highlights (`10` to `1,000,000` Rules)
 
-Measured in the **`v0.1.0` Release Snapshot** (`434960b`, `253` benchmarks across `9` groups on Linux `x86_64`, `AMD Ryzen 7 7735U`, `performance` governor, `-o:speed -microarch:native`) using [`hugi`](https://github.com/boxxxie/hugi) + [`obench`](https://github.com/zeybek/obench) in [`benchmarks/history.hugidb`](benchmarks/history.hugidb). See the full methodology, longitudinal history, and hardware PMU counters in [`docs/benchmarks.md`](docs/benchmarks.md).
+Measured in the **`v0.1.0` Release Snapshot** (`434960b`, `253` benchmarks across `9` groups on Linux `x86_64`, `AMD Ryzen 7 7735U`, `performance` governor, `-o:speed -microarch:native`) using [`hugi`](https://github.com/boxxxie/hugi) + [`obench`](https://github.com/zeybek/obench) in [`benchmarks/history.hugidb`](benchmarks/history.hugidb). See the visual SVG charts and all `253` results in [`benchmarks/README.md`](benchmarks/README.md), and the full methodology, longitudinal history, and hardware PMU counters in [`docs/benchmarks.md`](docs/benchmarks.md).
 
 | Workload | Scale | Median `p50` | Heap Allocs / Op | Key Invariant |
 | :--- | :---: | :---: | :---: | :--- |

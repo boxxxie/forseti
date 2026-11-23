@@ -2,7 +2,7 @@
 
 # Forseti Benchmarks & Scaling Architecture
 
-This report documents Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) / [`obench`](https://github.com/zeybek/obench) benchmark suite—scaling from `93` parameterized benchmarks (`e9cd4fc`) to `253` benchmarks across `9` groups in the **`v0.1.0` release snapshot (`434960b`)** in [`benchmarks/history.hugidb`](../benchmarks/history.hugidb). It covers frontend compilation, decision-table verification/AOT, `#must_tail` VM, file-backed `xitdb`, cyclic strata, Z-set JTMS, causal provenance/`diff_replay`, Sleipnir multi-threaded actors, and `10` to `1,000,000`-rule scaling.
+This report documents Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) / [`obench`](https://github.com/zeybek/obench) benchmark suite—scaling from `93` parameterized benchmarks (`e9cd4fc`) to `253` benchmarks across `9` groups in the **`v0.1.0` release snapshot (`434960b`)** in [`benchmarks/history.hugidb`](../benchmarks/history.hugidb) (see [`benchmarks/README.md`](../benchmarks/README.md) for rendered SVG charts and the complete `253`-row table). It covers frontend compilation, decision-table verification/AOT, `#must_tail` VM, file-backed `xitdb`, cyclic strata, Z-set JTMS, causal provenance/`diff_replay`, Sleipnir multi-threaded actors, and `10` to `1,000,000`-rule scaling.
 
 > [!IMPORTANT]
 > **TL;DR Scorecard — `v0.1.0` Release (`434960b`, Ryzen 7 7735U, `-o:speed -microarch:native`):**
