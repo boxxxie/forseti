@@ -63,6 +63,29 @@ Store_Handle :: struct {
 	attached_dir: string,
 }
 
+Typed_Org_Fact :: struct {
+	id:        string `forseti:"org_id"`,
+	employees: i64    `forseti:"employees"`,
+	active:    bool   `forseti:"active"`,
+	ignored:   string `forseti:"-"`,
+}
+
+Typed_Org_Query_Row :: struct {
+	oid:       string `forseti:"oid"`,
+	tier:      string `forseti:"tier"`,
+	employees: i64    `forseti:"emp"`,
+}
+
+Typed_Tier_In :: struct {
+	count:   i64  `forseti:"employees"`,
+	enabled: bool `forseti:"active"`,
+}
+
+Typed_Tier_Out :: struct {
+	tier:  string `forseti:"tier"`,
+	limit: i64    `forseti:"limit"`,
+}
+
 World :: struct {
 	t:               ^testing.T,
 	arena:           vmem.Arena,
@@ -89,6 +112,9 @@ World :: struct {
 	effect_applied_ids: map[string][]forseti.Fact_Id,
 	last_effect_jobs:   int,
 	last_compile_err:   forseti.Compile_Error,
+	last_typed_err:     forseti.Typed_Error,
+	typed_tier_matched: bool,
+	typed_tier_out:     Typed_Tier_Out,
 	aot_check_ok:       bool,
 	aot_test_ok:        bool,
 	aot_err_msg:        string,
@@ -2334,4 +2360,111 @@ spec_harness_world_bootstrap_sanity :: proc(t: ^testing.T) {
 
 	driver_record_bootstrap_telemetry(&w.telemetry)
 	testing.expect_value(t, len(w.telemetry.events), 1)
+}
+
+upon_inserting_typed_org :: proc(
+	w: ^World,
+	sess_label: string,
+	binding_name: string,
+	key: string,
+	org_id: string,
+	employees: i64,
+	active: bool,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	item := Typed_Org_Fact{
+		id        = org_id,
+		employees = employees,
+		active    = active,
+		ignored   = "host-only",
+	}
+	w.last_typed_err = driver_insert_typed_org(sess, binding_name, key, item)
+}
+
+upon_modifying_typed_org :: proc(
+	w: ^World,
+	sess_label: string,
+	binding_name: string,
+	key: string,
+	org_id: string,
+	employees: i64,
+	active: bool,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	item := Typed_Org_Fact{
+		id        = org_id,
+		employees = employees,
+		active    = active,
+		ignored   = "host-only",
+	}
+	w.last_typed_err = driver_modify_typed_org(sess, binding_name, key, item)
+}
+
+upon_deciding_typed_tier :: proc(
+	w: ^World,
+	rb_label: string,
+	table_name: string,
+	employees: i64,
+	active: bool,
+	loc := #caller_location,
+) {
+	rb, ok := w.rulebases[rb_label]
+	if !testing.expectf(w.t, ok, "unknown rulebase %q", rb_label, loc = loc) {
+		return
+	}
+	input := Typed_Tier_In{count = employees, enabled = active}
+	out: Typed_Tier_Out
+	matched, err := driver_decide_typed_tier(rb, table_name, input, &out)
+	w.last_typed_err = err
+	w.typed_tier_matched = matched
+	w.typed_tier_out = out
+}
+
+then_typed_error_is :: proc(w: ^World, expected: forseti.Typed_Error, loc := #caller_location) {
+	testing.expect_value(w.t, w.last_typed_err, expected, loc = loc)
+}
+
+then_typed_query_returns_orgs :: proc(
+	w: ^World,
+	query_label: string,
+	sess_label: string,
+	expected: []Typed_Org_Query_Row,
+	loc := #caller_location,
+) {
+	sess, s_ok := w.sessions[sess_label]
+	qr, q_ok := &w.query_runs[query_label]
+	if !testing.expectf(w.t, s_ok && q_ok, "unknown session/query %q/%q", sess_label, query_label, loc = loc) {
+		return
+	}
+	rows, err := driver_unmarshal_typed_orgs(sess, qr)
+	defer delete(rows)
+	testing.expect_value(w.t, err, forseti.Typed_Error.None, loc = loc)
+	if !testing.expect_value(w.t, len(rows), len(expected), loc = loc) {
+		return
+	}
+	for exp, i in expected {
+		testing.expect_value(w.t, rows[i].oid, exp.oid, loc = loc)
+		testing.expect_value(w.t, rows[i].tier, exp.tier, loc = loc)
+		testing.expect_value(w.t, rows[i].employees, exp.employees, loc = loc)
+	}
+}
+
+then_typed_decide_result_is :: proc(
+	w: ^World,
+	matched: bool,
+	tier: string,
+	limit: i64,
+	loc := #caller_location,
+) {
+	testing.expect_value(w.t, w.typed_tier_matched, matched, loc = loc)
+	testing.expect_value(w.t, w.typed_tier_out.tier, tier, loc = loc)
+	testing.expect_value(w.t, w.typed_tier_out.limit, limit, loc = loc)
 }

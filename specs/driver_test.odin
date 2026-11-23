@@ -1457,3 +1457,39 @@ driver_run_effects_in_parallel_threads :: proc(
 	applied, err = forseti.session_apply_effects(sess, results)
 	return applied, job_count, err
 }
+
+driver_insert_typed_org :: proc(
+	sess: ^forseti.Session,
+	binding_name: string,
+	key: string,
+	item: Typed_Org_Fact,
+) -> forseti.Typed_Error {
+	_, err := forseti.session_insert_struct(sess, binding_name, key, item)
+	return err
+}
+
+driver_modify_typed_org :: proc(
+	sess: ^forseti.Session,
+	binding_name: string,
+	key: string,
+	item: Typed_Org_Fact,
+) -> forseti.Typed_Error {
+	return forseti.session_modify_struct(sess, binding_name, key, item)
+}
+
+driver_decide_typed_tier :: proc(
+	rb: ^forseti.Rulebase,
+	table_name: string,
+	input: Typed_Tier_In,
+	out: ^Typed_Tier_Out,
+) -> (matched: bool, err: forseti.Typed_Error) {
+	return forseti.decide_struct(rb, table_name, input, out)
+}
+
+driver_unmarshal_typed_orgs :: proc(
+	sess: ^forseti.Session,
+	res: ^forseti.Query_Result,
+) -> (rows: [dynamic]Typed_Org_Query_Row, err: forseti.Typed_Error) {
+	err = forseti.query_unmarshal(sess, res, &rows)
+	return rows, err
+}

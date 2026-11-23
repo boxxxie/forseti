@@ -300,3 +300,35 @@ Core `package forseti` stays single-threaded, zero-lock, and zero-actor. When sc
 - **`Rulebase_Coordinator` (`actors/rulebase_coordinator.odin`):** Compiles and validates updated `.forseti` policies off the hot path, atomically broadcasts `Swap_Rulebase` across subscribed `Session_Actor`s, rejects invalid policies without disrupting running sessions, and reclaims retired `Rulebase` instances via atomic reference counting (`Rulebase_Ref`).
 
 See [`examples/08_sleipnir_actor_runtime/main.odin`](../examples/08_sleipnir_actor_runtime/main.odin) for a full leak-checked end-to-end walkthrough.
+
+---
+
+## 10. Typed Odin Struct Embeds (`forseti/typed_api.odin`)
+
+For pure-Odin hosts, `session_insert_struct`, `session_modify_struct`, `decide_struct` / `decide_table_struct`, and `query_unmarshal` map Odin struct fields using `forseti:"field_name"` tags (falling back to the Odin field name, and skipping `forseti:"-"`):
+
+```odin
+Org_Input :: struct {
+	id:        string `forseti:"org_id"`,
+	employees: i64    `forseti:"employees"`,
+	active:    bool   `forseti:"active"`,
+	ignored:   string `forseti:"-"`,
+}
+
+Org_Row :: struct {
+	org_id:    string `forseti:"oid"`,
+	tier:      string `forseti:"tier"`,
+	employees: i64    `forseti:"emp"`,
+}
+
+_, _ = forseti.session_insert_struct(sess, "raw_orgs", "org:acme", Org_Input{id = "org:acme", employees = 250, active = true})
+_, _ = forseti.session_fire(sess)
+
+qr: forseti.Query_Result
+defer forseti.query_result_destroy(&qr)
+_ = forseti.session_query(sess, "list_tiered", {{name = "tier", value = "enterprise"}}, &qr)
+
+rows: [dynamic]Org_Row
+defer delete(rows)
+_ = forseti.query_unmarshal(sess, &qr, &rows) // String fields borrow `sess`/`qr` storage
+```

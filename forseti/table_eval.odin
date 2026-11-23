@@ -65,6 +65,8 @@ Compiled_Table :: struct {
 	out_count:      int,
 	row_count:      int,
 	col_types:      []Type_Ref,
+	col_names:      []String_Id,
+	out_names:      []String_Id,
 	col_costs:      []u32,
 	col_domains:    []Column_Domain,
 	row_ids:        []String_Id,
@@ -324,14 +326,20 @@ compile_table :: proc(
 	ct.row_count = len(tbl.rows)
 
 	ct.col_types = make([]Type_Ref, ct.col_count, arena_alloc) or_return
+	ct.col_names = make([]String_Id, ct.col_count, arena_alloc) or_return
+	ct.out_names = make([]String_Id, ct.out_count, arena_alloc) or_return
 	ct.col_costs = make([]u32, ct.col_count, arena_alloc) or_return
 	ct.col_domains = make([]Column_Domain, ct.col_count, arena_alloc) or_return
 
 	max_frags := max(ct.row_count * 4 + 16, 1024)
 	for c, ci in tbl.inputs {
 		ct.col_types[ci] = c.type
+		ct.col_names[ci] = c.name
 		ct.col_costs[ci] = c.cost if c.cost > 0 else 1
 		ct.col_domains[ci] = build_column_domain(ir, tbl, ci, arena_alloc, max_frags) or_return
+	}
+	for o, oi in tbl.outputs {
+		ct.out_names[oi] = o.name
 	}
 
 	ct.row_ids = make([]String_Id, ct.row_count, arena_alloc) or_return

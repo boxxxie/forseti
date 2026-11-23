@@ -18,10 +18,10 @@
 
 ## Phase 2: Typed Odin Host Ergonomics
 
-- [ ] Task: Implement `forseti:"..."` struct reflection helpers for fact insertion, table evaluation, and query unmarshaling (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 behavioral specs (`specs/typed_embed_spec_test.odin`) verifying typed struct MDM ingestion, `decide_struct`, and `query_unmarshal` with leak checks
-    - [ ] Implement `forseti/typed_api.odin`, document in `docs/odin-api.md`, and verify under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Typed Odin Host Ergonomics' (Protocol in workflow.md)
+- [x] Task: Implement `forseti:"..."` struct reflection helpers for fact insertion, table evaluation, and query unmarshaling (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 behavioral specs (`specs/typed_embed_spec_test.odin`) verifying typed struct MDM ingestion, `decide_struct`, and `query_unmarshal` with leak checks
+    - [x] Implement `forseti/typed_api.odin`, document in `docs/odin-api.md`, and verify under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Typed Odin Host Ergonomics' (Protocol in workflow.md)
 
 ---
 
