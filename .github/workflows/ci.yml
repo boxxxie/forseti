@@ -61,12 +61,12 @@ jobs:
           submodules: false
           persist-credentials: false
 
-      - name: Checkout temple
+      - name: Checkout runa
         uses: actions/checkout@v7
         with:
-          repository: boxxxie/temple
-          ref: main
-          path: temple
+          repository: boxxxie/runa
+          ref: master
+          path: runa
           submodules: false
           persist-credentials: false
 
@@ -99,7 +99,7 @@ jobs:
           odin check cmd/forseti -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp,main
           odin check cmd/forseti-lsp -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp,main
           odin check benchmarks -collection:xitdb=../xitdb/xitdb -collection:actor=../sleipnir/actor -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,main
-          odin check benchmarks/render -collection:temple=../temple -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:bench_render
+          odin check benchmarks/render -collection:runa=../runa -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:bench_render
           odin check tests -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp,forseti_tests
           odin check specs -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_specs
           odin check specs_actors -no-entry-point -collection:xitdb=../xitdb/xitdb -collection:actor=../sleipnir/actor -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_actors,forseti_actors_specs
@@ -118,7 +118,7 @@ jobs:
 
       - name: Run leak-checked benchmark renderer tests
         working-directory: forseti
-        run: odin test benchmarks/render -collection:temple=../temple -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+        run: odin test benchmarks/render -collection:runa=../runa -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
       - name: Verify package documentation generation
         working-directory: forseti
@@ -156,12 +156,12 @@ jobs:
           submodules: false
           persist-credentials: false
 
-      - name: Checkout temple
+      - name: Checkout runa
         uses: actions/checkout@v7
         with:
-          repository: boxxxie/temple
-          ref: main
-          path: temple
+          repository: boxxxie/runa
+          ref: master
+          path: runa
           submodules: false
           persist-credentials: false
 
