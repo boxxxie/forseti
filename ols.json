@@ -10,5 +10,5 @@
 	"enable_hover": true,
 	"enable_snippets": true,
 	"enable_checker_only_saved": true,
-	"checker_args": "-vet -vet-tabs -strict-style -disallow-do -warnings-as-errors"
+	"checker_args": "-vet -vet-tabs -strict-style -warnings-as-errors"
 }
