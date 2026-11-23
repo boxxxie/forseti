@@ -49,7 +49,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 10: `.forseti` Language Server (LSP), Canonical Formatter (`forseti fmt`) & TextMate / Tree-sitter Editor Tooling** *(Priority: Step 10 — Depends on Tracks 1, 2, 7, 8)*
+- [~] **Track 10: `.forseti` Language Server (LSP), Canonical Formatter (`forseti fmt`) & TextMate / Tree-sitter Editor Tooling** *(Priority: Step 10 — Depends on Tracks 1, 2, 7, 8)*
   *Link: [./tracks/forseti_lsp_formatter_and_editor_tooling_20261122/](./tracks/forseti_lsp_formatter_and_editor_tooling_20261122/)*
 
 ---

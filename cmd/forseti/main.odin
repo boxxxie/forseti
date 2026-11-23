@@ -40,6 +40,9 @@ Cli_Options :: struct {
 	has_fact_id:        bool,
 	prov_mode:          forseti.Provenance_Mode,
 	graph_kind:         Graph_Kind,
+	fmt_write:          bool,
+	fmt_check:          bool,
+	extra_files:        [dynamic]string,
 }
 
 Loaded_Fact_Spec :: struct {
@@ -92,6 +95,7 @@ print_usage :: proc() {
 Commands:
   check           Validate syntax, types, variable bindings, and lints
   verify-tables   Run domain-partitioning static verification across all tables
+  fmt             Format .forseti policy files and align decision-table columns
   gen             Generate standalone "contextless" Odin procedures for tables
   ast             Parse source and print deterministic S-expression AST
   ir              Compile source and print canonical Rulebase_IR summary
@@ -106,6 +110,8 @@ Commands:
 Options:
   --format=human|json|jsonl|chrome-trace  Output format (command-dependent)
   --warnings-as-errors     Treat compiler warnings (W*) as non-zero exit failures
+  --write, -w              Overwrite input file(s) in-place for 'fmt'
+  --check                  Exit 1 if any file is not canonically formatted ('fmt')
   --out <file>             Write command output to <file> instead of stdout
   --package <name>         Package name for 'gen' (default: generated_tables)
   --facts <facts.json>     JSON facts input ({"facts":[...]} or [...])
@@ -144,6 +150,9 @@ parse_cli_format :: proc(raw: string) -> (fmt_kind: Cli_Format, ok: bool) {
 }
 
 parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, ok: bool) {
+	defer if !ok || show_help {
+		delete(opts.extra_files)
+	}
 	if len(args) < 2 {
 		return {}, true, true
 	}
@@ -160,6 +169,10 @@ parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, o
 			return {}, true, true
 		} else if arg == "--warnings-as-errors" {
 			opts.warnings_as_errors = true
+		} else if arg == "--write" || arg == "-w" {
+			opts.fmt_write = true
+		} else if arg == "--check" {
+			opts.fmt_check = true
 		} else if arg == "--derivations" {
 			opts.graph_kind = .Derivations
 		} else if strings.has_prefix(arg, "--format=") {
@@ -240,11 +253,13 @@ parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, o
 				fmt.eprintfln("error: unknown --graph %q (expected rulebase or derivations)", raw_g)
 				return {}, false, false
 			}
-		} else if strings.has_prefix(arg, "-") {
+		} else if arg != "-" && strings.has_prefix(arg, "-") {
 			fmt.eprintfln("error: unknown option %q", arg)
 			return {}, false, false
 		} else if len(opts.file_path) == 0 {
 			opts.file_path = arg
+		} else if opts.subcmd == "fmt" {
+			append(&opts.extra_files, arg)
 		} else {
 			fmt.eprintfln("error: unexpected positional argument %q", arg)
 			return {}, false, false
@@ -954,14 +969,85 @@ run_cmd_diff_replay :: proc(
 	return 0
 }
 
+run_cmd_fmt :: proc(opts: ^Cli_Options) -> int {
+	if opts.format != .Human {
+		fmt.eprintln("error: command \"fmt\" does not support --format")
+		return 2
+	}
+	if opts.fmt_write && opts.fmt_check {
+		fmt.eprintln("error: cannot combine --write and --check")
+		return 2
+	}
+
+	paths := make([dynamic]string, 0, 1 + len(opts.extra_files), context.allocator)
+	defer delete(paths)
+	append(&paths, opts.file_path)
+	for ep in opts.extra_files {
+		append(&paths, ep)
+	}
+
+	unformatted := false
+	for p in paths {
+		raw: []u8
+		read_err: os.Error
+		if p == "-" {
+			if opts.fmt_write {
+				fmt.eprintln("error: cannot use --write with stdin '-'")
+				return 2
+			}
+			raw, read_err = os.read_entire_file(os.stdin, context.allocator)
+		} else {
+			raw, read_err = os.read_entire_file(p, context.allocator)
+		}
+		if read_err != nil {
+			fmt.eprintfln("error: unable to read %q: %v", p, read_err)
+			return 2
+		}
+		defer delete(raw)
+		src := string(raw)
+
+		formatted, fmt_err := forseti.format_source(src, context.allocator)
+		if fmt_err != nil {
+			fmt.eprintfln("error: formatting failed for %q: %v", p, fmt_err)
+			return 2
+		}
+		defer delete(formatted)
+
+		if opts.fmt_check {
+			if formatted != src {
+				fmt.eprintfln("would reformat: %s", p)
+				unformatted = true
+			}
+			continue
+		}
+		if opts.fmt_write {
+			if formatted != src {
+				if w_err := os.write_entire_file(p, formatted); w_err != nil {
+					fmt.eprintfln("error: failed writing %q: %v", p, w_err)
+					return 2
+				}
+			}
+			continue
+		}
+		if !write_text_output(formatted, opts.out_path) {
+			return 2
+		}
+	}
+	return 1 if unformatted else 0
+}
+
 run_cli :: proc() -> int {
 	opts, show_help, ok := parse_cli_args(os.args)
+	defer delete(opts.extra_files)
 	if !ok {
 		return 2
 	}
 	if show_help {
 		print_usage()
 		return 0
+	}
+	if opts.subcmd == "fmt" {
+		return run_cmd_fmt(&opts)
 	}
 
 	raw, read_err := os.read_entire_file(opts.file_path, context.allocator)

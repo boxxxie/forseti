@@ -671,6 +671,26 @@ then_workspace_file_contains :: proc(
 	}
 }
 
+then_workspace_file_equals :: proc(
+	w: ^World,
+	rel_path: string,
+	expected: string,
+	loc := #caller_location,
+) {
+	if !testing.expect(w.t, len(w.cli_dir) > 0, loc = loc) {
+		return
+	}
+	full, j_err := filepath.join({w.cli_dir, rel_path}, context.temp_allocator)
+	if !testing.expect_value(w.t, j_err, nil, loc = loc) {
+		return
+	}
+	raw, read_ok := driver_read_file(full, context.temp_allocator)
+	if !testing.expectf(w.t, read_ok, "failed reading workspace file %q", rel_path, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, raw, expected, loc = loc)
+}
+
 then_cli_json_reports_diagnostic :: proc(
 	w: ^World,
 	run_label: string,

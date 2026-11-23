@@ -390,3 +390,63 @@ rule keep_org {
 	then_cli_exits_with(&w, "mmd_deriv", 0)
 	then_workspace_file_contains(&w, "derivs.mmd", {"flowchart TD", "keep_org", "org:1", "org:2"})
 }
+
+@(test)
+spec_cli_fmt_check_write_and_table_alignment :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_cli_binary(&w)
+
+	unformatted := `// Keep comment
+module  fmt_cli  version  "1.0"
+schema Raw{id:string,emp:i64}
+source S : Raw at .raw[?id]
+table tier version "1.0" hit First {
+inputs { emp : i64 }
+outputs { out : string }
+rows {
+r_large : >= 100 || "ent" ; // top
+r_small : - || "smb" ;
+}
+}
+`
+
+	expected := `// Keep comment
+module fmt_cli version "1.0"
+
+schema Raw { id: string, emp: i64 }
+
+source S : Raw at .raw[?id]
+
+table tier version "1.0" hit First {
+  inputs { emp: i64 }
+  outputs { out: string }
+  rows {
+    r_large: >= 100 || "ent"; // top
+    r_small: -      || "smb";
+  }
+}
+`
+
+	given_workspace_file(&w, "messy.forseti", unformatted)
+
+	upon_running_cli(&w, "fmt_stdout", {"fmt", "messy.forseti"})
+	then_cli_exits_with(&w, "fmt_stdout", 0)
+	then_cli_output_contains(&w, "fmt_stdout", `r_large: >= 100 || "ent"; // top`)
+
+	upon_running_cli(&w, "fmt_check_fail", {"fmt", "--check", "messy.forseti"})
+	then_cli_exits_with(&w, "fmt_check_fail", 1)
+
+	upon_running_cli(&w, "fmt_write", {"fmt", "--write", "messy.forseti"})
+	then_cli_exits_with(&w, "fmt_write", 0)
+	then_workspace_file_equals(&w, "messy.forseti", expected)
+
+	upon_running_cli(&w, "fmt_check_pass", {"fmt", "--check", "messy.forseti"})
+	then_cli_exits_with(&w, "fmt_check_pass", 0)
+
+	given_workspace_file(&w, "extra.forseti", expected)
+	upon_running_cli(&w, "fmt_bad_flag_after_positional", {"fmt", "messy.forseti", "extra.forseti", "--graph=bogus"})
+	then_cli_exits_with(&w, "fmt_bad_flag_after_positional", 2)
+}

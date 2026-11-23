@@ -9,10 +9,10 @@
 
 ## Phase 1: Canonical `.forseti` Formatter (`forseti fmt` / `--check`)
 
-- [ ] Task: Implement trivia/comment-preserving `.forseti` formatter with DMN pipe column alignment (TDD + Pattern D)
-    - [ ] Write failing Pattern E formatting tests and Pattern D `t.seed` idempotence (`fmt(fmt(src)) == fmt(src)`) + comment-preservation tests in `tests/`
-    - [ ] Implement `forseti/format.odin` and wire `forseti fmt [--write] [--check]` into `cmd/forseti/main.odin` + `specs/cli_spec_test.odin`
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Canonical .forseti Formatter' (Protocol in workflow.md)
+- [x] Task: Implement trivia/comment-preserving `.forseti` formatter with DMN pipe column alignment (TDD + Pattern D)
+    - [x] Write failing Pattern E formatting tests and Pattern D `t.seed` idempotence (`fmt(fmt(src)) == fmt(src)`) + comment-preservation tests in `tests/`
+    - [x] Implement `forseti/format.odin` and wire `forseti fmt [--write] [--check]` into `cmd/forseti/main.odin` + `specs/cli_spec_test.odin`
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Canonical .forseti Formatter' (Protocol in workflow.md)
 
 ---
 
