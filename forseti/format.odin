@@ -483,15 +483,15 @@ _format_rows_block :: proc(
 	for &r in rows {
 		_write_indent(b, depth + 1)
 		if r.is_comment {
-			strings.write_string(b, r.comment_text)
+			_write_lf_text(b, r.comment_text)
 			strings.write_byte(b, '\n')
 			continue
 		}
 		if !r.valid {
-			strings.write_string(b, r.raw_fallback)
+			_write_lf_text(b, r.raw_fallback)
 			if len(r.trailing_note) > 0 {
 				strings.write_byte(b, ' ')
-				strings.write_string(b, r.trailing_note)
+				_write_lf_text(b, r.trailing_note)
 			}
 			strings.write_byte(b, '\n')
 			continue
@@ -521,7 +521,7 @@ _format_rows_block :: proc(
 		strings.write_byte(b, ';')
 		if len(r.trailing_note) > 0 {
 			strings.write_byte(b, ' ')
-			strings.write_string(b, r.trailing_note)
+			_write_lf_text(b, r.trailing_note)
 		}
 		strings.write_byte(b, '\n')
 	}
@@ -529,6 +529,20 @@ _format_rows_block :: proc(
 	_write_indent(b, depth)
 	strings.write_byte(b, '}')
 	return nil
+}
+
+@(private)
+_write_lf_text :: proc(b: ^strings.Builder, s: string) {
+	start := 0
+	for i := 0; i < len(s); i += 1 {
+		if s[i] == '\r' && i + 1 < len(s) && s[i + 1] == '\n' {
+			strings.write_string(b, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		strings.write_string(b, s[start:])
+	}
 }
 
 @(private)
@@ -581,7 +595,7 @@ format_source :: proc(
 		if it.kind != .Token {
 			if it.same_line && !at_line_start {
 				strings.write_byte(&b, ' ')
-				strings.write_string(&b, it.text)
+				_write_lf_text(&b, it.text)
 				strings.write_byte(&b, '\n')
 				at_line_start = true
 				has_emitted = true
@@ -596,7 +610,7 @@ format_source :: proc(
 					need_top_sep = false
 				}
 				_write_indent(&b, depth)
-				strings.write_string(&b, it.text)
+				_write_lf_text(&b, it.text)
 				if it.kind == .Line_Comment || !it.same_line {
 					strings.write_byte(&b, '\n')
 					at_line_start = true

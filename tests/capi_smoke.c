@@ -227,7 +227,7 @@ int main(void) {
 	nan_fields[0] = val_str("m1");
 	memset(&nan_fields[1], 0, sizeof(nan_fields[1]));
 	nan_fields[1].kind = FORSETI_VAL_F64;
-	nan_fields[1].as.f64 = 0.0 / 0.0;
+	nan_fields[1].as.f64 = strtod("NaN", NULL);
 	st = forseti_session_insert_fact(nan_sess, "metrics", "m1", nan_fields, 2, NULL);
 	assert(st == FORSETI_OK);
 	char *nan_json = NULL;

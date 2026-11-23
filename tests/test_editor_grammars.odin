@@ -55,7 +55,7 @@ test_editor_grammars_and_comprehensive_fixture :: proc(t: ^testing.T) {
 	fix_raw, fix_err := os.read_entire_file("editors/fixtures/comprehensive.forseti", context.allocator)
 	testing.expect_value(t, fix_err, nil)
 	defer delete(fix_raw)
-	fix_src := string(fix_raw)
+	fix_src, _ := strings.replace_all(string(fix_raw), "\r\n", "\n", context.temp_allocator)
 
 	diags: forseti.Diagnostic_List
 	testing.expect_value(t, forseti.diag_list_init(&diags), nil)

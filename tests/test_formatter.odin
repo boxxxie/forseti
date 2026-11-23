@@ -312,3 +312,14 @@ test_format_source_groups_consecutive_imports :: proc(t: ^testing.T) {
 	defer delete(out)
 	testing.expect_value(t, out, expected)
 }
+
+@(test)
+test_format_source_normalizes_crlf_block_comments :: proc(t: ^testing.T) {
+	crlf_src := "// top\r\nmodule m version \"1.0\"\r\n\r\n/* line1\r\n   line2 */\r\nschema S { id: string }\r\n"
+	expected := "// top\nmodule m version \"1.0\"\n\n/* line1\n   line2 */\nschema S { id: string }\n"
+
+	out, err := forseti.format_source(crlf_src)
+	testing.expect_value(t, err, nil)
+	defer delete(out)
+	testing.expect_value(t, out, expected)
+}
