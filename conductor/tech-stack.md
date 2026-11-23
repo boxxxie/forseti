@@ -7,6 +7,7 @@
   - `Core_Buffered_File` / `Core_File` (attachable durable disk backend)
   - `Core_Overlay` (zero-copy copy-on-write snapshot forks for counterfactual `diff_replay`)
   - `diff_collection` (slot-skipping structural delta detection)
+- **Multi-Threaded Actor Runtime (`actors/` only):** Sibling Odin [**Sleipnir (`package actor`)**](https://github.com/boxxxie/sleipnir) (`../sleipnir/actor`, `v1.1.3+`) providing work-stealing `M:N` scheduling, intrusive MPSC / `Sharded_SPSC_Mailbox` lanes, `Partitioned_Supervisor`, `Registry(string)`, and trapped `try_call` fault isolation. Core `forseti/` stays zero-actor.
 - **Benchmarking & Longitudinal History:**
   - `obench` (`../hugi/deps/obench/obench`) for allocation-aware micro-benchmarks and `Counting_Allocator` checks
   - `hugi` (`../hugi/hugi`, [`../hugi.json`](../hugi.json)) for stateful multi-phase pipelines, hardware performance counters, `.hugidb` history tracking, and statistical regression gating (`Mann-Whitney U` / `Welch's t-test`)

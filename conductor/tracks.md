@@ -44,7 +44,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 9: Sleipnir (`package actor`) Multi-Threaded Session Runtime, Partitioned Tenant Supervision & Parallel Async Effects** *(Priority: Step 9 — Depends on Tracks 3–6, 8)*
+- [~] **Track 9: Sleipnir (`package actor`) Multi-Threaded Session Runtime, Partitioned Tenant Supervision & Parallel Async Effects** *(Priority: Step 9 — Depends on Tracks 3–6, 8)*
   *Link: [./tracks/sleipnir_actor_multithreaded_runtime_20261122/](./tracks/sleipnir_actor_multithreaded_runtime_20261122/)*
 
 ---

@@ -9,13 +9,13 @@
 
 ## Phase 1: Concurrency Contract Audit (`Rulebase` & `Store_Bridge`) & Sleipnir Plumbing
 
-- [ ] Task: Wire sibling Sleipnir dependency (`-collection:actor=../sleipnir/actor`, `v1.1.3+`) into `ols.json`, CI, and `conductor/tech-stack.md`
-    - [ ] Add `actor` collection to `ols.json`, `conductor/tech-stack.md`, and `.github/workflows/ci.yml` (`boxxxie/sleipnir` checkout for `actors/` / `specs_actors/` / `examples/08_*`) while keeping `forseti/` zero-actor
-    - [ ] Scaffold `actors/` (`package forseti_actors`), `specs_actors/` (`package forseti_actors_specs`), and strict `odin check` commands
-- [ ] Task: Audit & test `Rulebase` read-only immutability and lock-free `Store_Bridge` concurrent reads (TDD)
-    - [ ] Audit `Rulebase` fields (`String_Interner.lookup`, `Alpha_Node.eq_buckets`, `Compiled_Table`, `Telemetry_Sink` pointer handling, `schema_field_hashes`, `binding_path_hashes`) for zero mutation during concurrent session evaluation
-    - [ ] Write multi-threaded stress tests spawning N concurrent `Session`s sharing one `^Rulebase` and reading one frozen `Store_Bridge` snapshot (`core_read_at`), verified under `-sanitize:address` and `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Concurrency Contract Audit & Sleipnir Plumbing' (Protocol in workflow.md)
+- [x] Task: Wire sibling Sleipnir dependency (`-collection:actor=../sleipnir/actor`, `v1.1.3+`) into `ols.json`, CI, and `conductor/tech-stack.md`
+    - [x] Add `actor` collection to `ols.json`, `conductor/tech-stack.md`, and `.github/workflows/ci.yml` (`boxxxie/sleipnir` checkout for `actors/` / `specs_actors/` / `examples/08_*`) while keeping `forseti/` zero-actor
+    - [x] Scaffold `actors/` (`package forseti_actors`), `specs_actors/` (`package forseti_actors_specs`), and strict `odin check` commands
+- [x] Task: Audit & test `Rulebase` read-only immutability and lock-free `Store_Bridge` concurrent reads (TDD)
+    - [x] Audit `Rulebase` fields (`String_Interner.lookup`, `Alpha_Node.eq_buckets`, `Compiled_Table`, `Telemetry_Sink` pointer handling, `schema_field_hashes`, `binding_path_hashes`) for zero mutation during concurrent session evaluation
+    - [x] Write multi-threaded stress tests spawning N concurrent `Session`s sharing one `^Rulebase` and reading one frozen `Store_Bridge` snapshot (`core_read_at`), verified under `-sanitize:address` and `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
+- [x] Task: Conductor - User Manual Verification 'Phase 1: CI Hygiene, Actions Upgrade & Repo Polish' -> 'Phase 1: Concurrency Contract Audit & Sleipnir Plumbing' (Protocol in workflow.md)
 
 ---
 

@@ -19,6 +19,7 @@ fork_create :: proc(
 	fork: ^Fork_Handle,
 	parent: ^Store_Bridge,
 	allocator: runtime.Allocator = context.allocator,
+	telemetry: ^Telemetry_Sink = nil,
 ) -> (err: Store_Error) {
 	if fork == nil || parent == nil || parent.db == nil || parent.db.core == nil {
 		return .Invalid_Config
@@ -48,7 +49,8 @@ fork_create :: proc(
 	fork.overlay_db = ov_db
 	fork.overlay_db.core = &fork.overlay_core
 
-	if b_err := store_bridge_init_attached(&fork.bridge, &fork.overlay_db, parent.cfg, parent.telemetry); b_err != nil {
+	fork_tel := telemetry if telemetry != nil else parent.telemetry
+	if b_err := store_bridge_init_attached(&fork.bridge, &fork.overlay_db, parent.cfg, fork_tel); b_err != nil {
 		return b_err
 	}
 

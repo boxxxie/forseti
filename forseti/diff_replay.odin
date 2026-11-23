@@ -90,15 +90,17 @@ session_diff_replay :: proc(
 	candidate_rb: ^Rulebase,
 	watched_paths: []string,
 	allocator := context.allocator,
+	telemetry: ^Telemetry_Sink = nil,
 ) -> (rep: Diff_Replay_Report, err: Store_Error) {
 	if baseline_sess == nil || baseline_sess.rb == nil || parent_bridge == nil || candidate_rb == nil {
 		return {}, .Invalid_Config
 	}
 
+	tel := telemetry if telemetry != nil else baseline_sess.telemetry
 	moments_before := store_bridge_moment_count(parent_bridge) or_return
 
 	fh: Fork_Handle
-	fork_create(&fh, parent_bridge, allocator) or_return
+	fork_create(&fh, parent_bridge, allocator, tel) or_return
 	defer fork_destroy(&fh)
 
 	cand_sess := new(Session, allocator)
@@ -110,12 +112,12 @@ session_diff_replay :: proc(
 		max_activations = baseline_sess.max_activations,
 		provenance_mode = .Audit_Full,
 	}
-	if s_err := session_init(cand_sess, candidate_rb, cfg, baseline_sess.telemetry, allocator); s_err != .None {
+	if s_err := session_init(cand_sess, candidate_rb, cfg, tel, allocator); s_err != .None {
 		return {}, .Invalid_Config
 	}
 
 	syncer: Delta_Syncer
-	delta_syncer_init(&syncer, baseline_sess.telemetry, allocator) or_return
+	delta_syncer_init(&syncer, tel, allocator) or_return
 	defer delta_syncer_destroy(&syncer)
 
 	for wp in watched_paths {
@@ -183,7 +185,7 @@ diff_replay :: proc(
 	}
 
 	base_fh: Fork_Handle
-	fork_create(&base_fh, parent_bridge, allocator) or_return
+	fork_create(&base_fh, parent_bridge, allocator, telemetry) or_return
 	defer fork_destroy(&base_fh)
 
 	base_sess := new(Session, allocator)
@@ -206,7 +208,7 @@ diff_replay :: proc(
 		return {}, f_err
 	}
 
-	return session_diff_replay(base_sess, parent_bridge, candidate_rb, watched_paths, allocator)
+	return session_diff_replay(base_sess, parent_bridge, candidate_rb, watched_paths, allocator, telemetry)
 }
 
 @(private)

@@ -155,6 +155,47 @@ telemetry_reset :: proc(sink: ^Telemetry_Sink) {
 	sink.origin_tick = time.tick_now()
 }
 
+// Merges events, counters, and watermarks from a worker/actor Telemetry_Sink into `dst` without cross-thread sharing.
+telemetry_merge :: proc(dst: ^Telemetry_Sink, src: ^Telemetry_Sink) -> (err: mem.Allocator_Error) {
+	when FORSETI_TELEMETRY {
+		if dst == nil || src == nil || !dst.enabled {
+			return nil
+		}
+		base_idx := i32(len(dst.events))
+		for ev in src.events {
+			cloned, alloc_err := strings.clone(ev.name, vmem.arena_allocator(&dst.arena))
+			if alloc_err != nil {
+				return alloc_err
+			}
+			new_parent := (ev.parent_idx + base_idx) if ev.parent_idx >= 0 else i32(-1)
+			append(&dst.events, Telemetry_Span_Event{
+				phase             = ev.phase,
+				name              = cloned,
+				parent_idx        = new_parent,
+				depth             = ev.depth,
+				start_ns          = ev.start_ns,
+				duration_ns       = ev.duration_ns,
+				alloc_bytes_delta = ev.alloc_bytes_delta,
+			}) or_return
+		}
+		for c in Telemetry_Counter {
+			dst.counters[c] += src.counters[c]
+		}
+		if src.watermarks.peak_heap_bytes > dst.watermarks.peak_heap_bytes {
+			dst.watermarks.peak_heap_bytes = src.watermarks.peak_heap_bytes
+		}
+		if src.watermarks.peak_arena_bytes > dst.watermarks.peak_arena_bytes {
+			dst.watermarks.peak_arena_bytes = src.watermarks.peak_arena_bytes
+		}
+		dst.watermarks.live_session_memories += src.watermarks.live_session_memories
+		return nil
+	} else {
+		_ = dst
+		_ = src
+		return nil
+	}
+}
+
 telemetry_span_begin :: proc(
 	sink: ^Telemetry_Sink,
 	phase: Telemetry_Phase,
