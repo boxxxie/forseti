@@ -21,13 +21,13 @@
 
 ## Phase 2: `Session_Actor`, Batched Ingestion (`Chain=K`) & Single-Writer `Xitdb_Commit_Actor`
 
-- [ ] Task: Implement `Session_Actor` with pinned `^forseti.Session`, `actor.call` / `try_call`, and `Chain=K` batching (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 behavioral specs in `specs_actors/session_actor_spec_test.odin` covering lifecycle (`on_init` / `on_stop`), synchronous `Run_Query` / `Explain_Fact` via `actor.call`, and slice-batched `Insert_Batch` (`Chain=K`)
-    - [ ] Implement `actors/session_actor.odin` (`Session_Actor`, `Session_Msg` union, pinned `^forseti.Session`, optional `Sharded_SPSC_Mailbox` ingest lane, per-actor `Telemetry_Sink`)
-- [ ] Task: Implement single-writer `Xitdb_Commit_Actor` with `Commit_Notification` broadcasting (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 specs verifying serialized multi-session derived/audit commits (`decisions`, `idx.*`, `__tx`) into `Store_Bridge` with zero `xitdb` write contention and accurate `moment_idx` notifications
-    - [ ] Implement `actors/commit_actor.odin` (`Xitdb_Commit_Actor`) and verify zero leaks under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Session_Actor & Single-Writer Xitdb_Commit_Actor' (Protocol in workflow.md)
+- [x] Task: Implement `Session_Actor` with pinned `^forseti.Session`, `actor.call` / `try_call`, and `Chain=K` batching (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 behavioral specs in `specs_actors/session_actor_spec_test.odin` covering lifecycle (`on_init` / `on_stop`), synchronous `Run_Query` / `Explain_Fact` via `actor.call`, and slice-batched `Insert_Batch` (`Chain=K`)
+    - [x] Implement `actors/session_actor.odin` (`Session_Actor`, `Session_Msg` union, pinned `^forseti.Session`, optional `Sharded_SPSC_Mailbox` ingest lane, per-actor `Telemetry_Sink`)
+- [x] Task: Implement single-writer `Xitdb_Commit_Actor` with `Commit_Notification` broadcasting (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 specs verifying serialized multi-session derived/audit commits (`decisions`, `idx.*`, `__tx`) into `Store_Bridge` with zero `xitdb` write contention and accurate `moment_idx` notifications
+    - [x] Implement `actors/commit_actor.odin` (`Xitdb_Commit_Actor`) and verify zero leaks under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Session_Actor & Single-Writer Xitdb_Commit_Actor' (Protocol in workflow.md)
 
 ---
 
