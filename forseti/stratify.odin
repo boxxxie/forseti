@@ -389,9 +389,9 @@ stratify_ir :: proc(
 				plan.first_cycle_span = first_bad.span
 			}
 			if diags != nil {
-				diag_add(
+				ir_diag_add(
 					diags,
-					ir.line_starts,
+					ir,
 					.E4001,
 					.Error,
 					first_bad.span,

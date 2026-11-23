@@ -1,7 +1,9 @@
 package forseti
 
 import "base:runtime"
+import "core:math"
 import "core:mem"
+import "core:strings"
 import xitdb "xitdb:."
 
 RUNTIME_STRING_BIT :: u32(0x80000000)
@@ -1001,6 +1003,278 @@ _op_in_range :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
 	}
 }
 
+@(private)
+_vm_case_transform :: proc(vm: ^Vm_State, s: string, upper: bool) -> (String_Id, Vm_Error) {
+	if len(s) == 0 {
+		return EMPTY_STRING, .None
+	}
+	ascii_only := true
+	for i := 0; i < len(s); i += 1 {
+		if s[i] >= 0x80 {
+			ascii_only = false
+			break
+		}
+	}
+	out_str: string
+	stack_buf: [512]u8 = ---
+	if ascii_only && len(s) <= len(stack_buf) {
+		for i := 0; i < len(s); i += 1 {
+			c := s[i]
+			if upper && c >= 'a' && c <= 'z' {
+				c -= 32
+			} else if !upper && c >= 'A' && c <= 'Z' {
+				c += 32
+			}
+			stack_buf[i] = c
+		}
+		out_str = string(stack_buf[:len(s)])
+	} else {
+		out_str = strings.to_upper(s, context.temp_allocator) if upper else strings.to_lower(s, context.temp_allocator)
+	}
+	if vm.sess_interner != nil {
+		sid, s_err := intern_session_string(vm.interner, vm.sess_interner, out_str)
+		if s_err != nil {
+			return EMPTY_STRING, .Type_Mismatch
+		}
+		return sid, .None
+	}
+	if vm.interner != nil {
+		sid, i_err := intern(vm.interner, out_str)
+		if i_err != nil {
+			return EMPTY_STRING, .Type_Mismatch
+		}
+		return sid, .None
+	}
+	return EMPTY_STRING, .Type_Mismatch
+}
+
+@(private)
+_vm_exec_str_case :: proc(vm: ^Vm_State, ins: Instruction, upper: bool) -> bool {
+	sid, ok := vm.regs[ins.lhs].(String_Id)
+	if !ok {
+		vm.err = .Type_Mismatch
+		return false
+	}
+	context = vm.saved_ctx
+	s := resolve_runtime_string(vm.interner, vm.sess_interner, sid)
+	out_id, t_err := _vm_case_transform(vm, s, upper)
+	if t_err != .None {
+		vm.err = t_err
+		return false
+	}
+	vm.regs[ins.dst] = out_id
+	vm.steps_left -= 1
+	if vm.steps_left <= 0 {
+		vm.err = .Step_Limit_Exceeded
+		return false
+	}
+	return true
+}
+
+@(private)
+_op_str_lower :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
+	context = vm.saved_ctx
+	if !_vm_exec_str_case(vm, pc[0], false) {
+		return
+	}
+	next := pc[1:]
+	when .Address in ODIN_SANITIZER_FLAGS {
+		vm.dispatch[next[0].op](vm, next)
+	} else {
+		#must_tail vm.dispatch[next[0].op](vm, next)
+	}
+}
+
+@(private)
+_op_str_upper :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
+	context = vm.saved_ctx
+	if !_vm_exec_str_case(vm, pc[0], true) {
+		return
+	}
+	next := pc[1:]
+	when .Address in ODIN_SANITIZER_FLAGS {
+		vm.dispatch[next[0].op](vm, next)
+	} else {
+		#must_tail vm.dispatch[next[0].op](vm, next)
+	}
+}
+
+@(private)
+_op_str_len :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
+	ins := pc[0]
+	sid, ok := vm.regs[ins.lhs].(String_Id)
+	if !ok {
+		vm.err = .Type_Mismatch
+		return
+	}
+	s := resolve_runtime_string(vm.interner, vm.sess_interner, sid)
+	vm.regs[ins.dst] = i64(len(s))
+	vm.steps_left -= 1
+	if vm.steps_left <= 0 {
+		vm.err = .Step_Limit_Exceeded
+		return
+	}
+	next := pc[1:]
+	when .Address in ODIN_SANITIZER_FLAGS {
+		vm.dispatch[next[0].op](vm, next)
+	} else {
+		#must_tail vm.dispatch[next[0].op](vm, next)
+	}
+}
+
+@(private)
+_vm_exec_str_pred :: proc(vm: ^Vm_State, ins: Instruction, is_prefix: bool) -> bool {
+	lsid, lok := vm.regs[ins.lhs].(String_Id)
+	rsid, rok := vm.regs[ins.rhs].(String_Id)
+	if !lok || !rok {
+		vm.err = .Type_Mismatch
+		return false
+	}
+	ls := resolve_runtime_string(vm.interner, vm.sess_interner, lsid)
+	rs := resolve_runtime_string(vm.interner, vm.sess_interner, rsid)
+	vm.regs[ins.dst] = strings.has_prefix(ls, rs) if is_prefix else strings.contains(ls, rs)
+	vm.steps_left -= 1
+	if vm.steps_left <= 0 {
+		vm.err = .Step_Limit_Exceeded
+		return false
+	}
+	return true
+}
+
+@(private)
+_op_str_starts_with :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
+	context = vm.saved_ctx
+	if !_vm_exec_str_pred(vm, pc[0], true) {
+		return
+	}
+	next := pc[1:]
+	when .Address in ODIN_SANITIZER_FLAGS {
+		vm.dispatch[next[0].op](vm, next)
+	} else {
+		#must_tail vm.dispatch[next[0].op](vm, next)
+	}
+}
+
+@(private)
+_op_str_contains :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
+	context = vm.saved_ctx
+	if !_vm_exec_str_pred(vm, pc[0], false) {
+		return
+	}
+	next := pc[1:]
+	when .Address in ODIN_SANITIZER_FLAGS {
+		vm.dispatch[next[0].op](vm, next)
+	} else {
+		#must_tail vm.dispatch[next[0].op](vm, next)
+	}
+}
+
+@(private)
+_op_math_abs :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
+	ins := pc[0]
+	#partial switch x in vm.regs[ins.lhs] {
+	case i32:
+		if x == min(i32) {
+			vm.err = .Trap_Int_Overflow
+			return
+		}
+		vm.regs[ins.dst] = -x if x < 0 else x
+	case i64:
+		if x == min(i64) {
+			vm.err = .Trap_Int_Overflow
+			return
+		}
+		vm.regs[ins.dst] = -x if x < 0 else x
+	case f64:
+		vm.regs[ins.dst] = math.abs(x)
+	case:
+		vm.err = .Type_Mismatch
+		return
+	}
+	vm.steps_left -= 1
+	if vm.steps_left <= 0 {
+		vm.err = .Step_Limit_Exceeded
+		return
+	}
+	next := pc[1:]
+	when .Address in ODIN_SANITIZER_FLAGS {
+		vm.dispatch[next[0].op](vm, next)
+	} else {
+		#must_tail vm.dispatch[next[0].op](vm, next)
+	}
+}
+
+@(private)
+_vm_exec_math_minmax :: proc "contextless" (vm: ^Vm_State, ins: Instruction, is_max: bool) -> bool {
+	lv := vm.regs[ins.lhs]
+	rv := vm.regs[ins.rhs]
+	if li32, ok1 := lv.(i32); ok1 {
+		if ri32, ok2 := rv.(i32); ok2 {
+			vm.regs[ins.dst] = max(li32, ri32) if is_max else min(li32, ri32)
+		} else if ri64, ok3 := rv.(i64); ok3 {
+			vm.regs[ins.dst] = max(i64(li32), ri64) if is_max else min(i64(li32), ri64)
+		} else if rf64, ok4 := rv.(f64); ok4 {
+			vm.regs[ins.dst] = max(f64(li32), rf64) if is_max else min(f64(li32), rf64)
+		} else {
+			vm.err = .Type_Mismatch
+			return false
+		}
+	} else if li64, ok5 := lv.(i64); ok5 {
+		if ri32, ok6 := rv.(i32); ok6 {
+			vm.regs[ins.dst] = max(li64, i64(ri32)) if is_max else min(li64, i64(ri32))
+		} else if ri64, ok7 := rv.(i64); ok7 {
+			vm.regs[ins.dst] = max(li64, ri64) if is_max else min(li64, ri64)
+		} else if rf64, ok8 := rv.(f64); ok8 {
+			vm.regs[ins.dst] = max(f64(li64), rf64) if is_max else min(f64(li64), rf64)
+		} else {
+			vm.err = .Type_Mismatch
+			return false
+		}
+	} else if lf64, ok9 := lv.(f64); ok9 {
+		rf64, fok := value_to_f64(rv)
+		if !fok {
+			vm.err = .Type_Mismatch
+			return false
+		}
+		vm.regs[ins.dst] = max(lf64, rf64) if is_max else min(lf64, rf64)
+	} else {
+		vm.err = .Type_Mismatch
+		return false
+	}
+	vm.steps_left -= 1
+	if vm.steps_left <= 0 {
+		vm.err = .Step_Limit_Exceeded
+		return false
+	}
+	return true
+}
+
+@(private)
+_op_math_min :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
+	if !_vm_exec_math_minmax(vm, pc[0], false) {
+		return
+	}
+	next := pc[1:]
+	when .Address in ODIN_SANITIZER_FLAGS {
+		vm.dispatch[next[0].op](vm, next)
+	} else {
+		#must_tail vm.dispatch[next[0].op](vm, next)
+	}
+}
+
+@(private)
+_op_math_max :: proc "preserve/none" (vm: ^Vm_State, pc: [^]Instruction) {
+	if !_vm_exec_math_minmax(vm, pc[0], true) {
+		return
+	}
+	next := pc[1:]
+	when .Address in ODIN_SANITIZER_FLAGS {
+		vm.dispatch[next[0].op](vm, next)
+	} else {
+		#must_tail vm.dispatch[next[0].op](vm, next)
+	}
+}
+
 @(rodata)
 VM_DISPATCH_TABLE := [Opcode]Vm_Op_Proc{
 	.Halt            = _op_halt,
@@ -1029,6 +1303,14 @@ VM_DISPATCH_TABLE := [Opcode]Vm_Op_Proc{
 	.Decide_Call     = _op_decide_call,
 	.Load_Decide_Out = _op_load_decide_out,
 	.In_Range        = _op_in_range,
+	.Str_Lower       = _op_str_lower,
+	.Str_Upper       = _op_str_upper,
+	.Str_Len         = _op_str_len,
+	.Str_Starts_With = _op_str_starts_with,
+	.Str_Contains    = _op_str_contains,
+	.Math_Abs        = _op_math_abs,
+	.Math_Min        = _op_math_min,
+	.Math_Max        = _op_math_max,
 }
 
 vm_eval :: proc(

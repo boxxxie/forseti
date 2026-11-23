@@ -15,7 +15,8 @@ Prescriptive rules, authoring decision trees, Odin embedding recipes, and pitfal
 
 ## Core Mental Model & Invariants
 
-- **Single Canonical `Rulebase_IR`:** External `.forseti` policies (`compile_source`), Tier 2 internal Odin builders (`ir_builder_build`), and Tier 3 AOT Odin table generators (`codegen_odin_module`) all share one IR, semantic validator (`analyze_ir`), decision-table verifier (`verify_all_tables`), and Tarjan stratifier (`stratify_ir`).
+- **Single Canonical `Rulebase_IR`:** External `.forseti` policies (`compile_source`, `compile_file`, `compile_source_with_imports`), Tier 2 internal Odin builders (`ir_builder_build`), and Tier 3 AOT Odin table generators (`codegen_odin_module`) all share one IR, semantic validator (`analyze_ir`), decision-table verifier (`verify_all_tables`), and Tarjan stratifier (`stratify_ir`).
+- **DSL v1.1 `import` & Pure Built-Ins:** Share `schema`/`table` declarations with `import "shared.forseti"` (diamond-deduplicated; cycles report `E2006`) and use pure scalar built-ins (`lower`, `upper`, `len`, `starts_with`, `contains`, `abs`, `min`, `max`) in `where` / `:=` clauses.
 - **Immutable `Rulebase` vs. Pinned `Session`:** Compile `Rulebase` once with `rulebase_compile` and share it read-only across sessions. `Session` and `Store_Bridge` hold internal self-pointers (arenas, maps, attached DB pointers) — **initialize in-place or heap-allocate via `new(...)` and never copy by value**.
 - **Lazy Sparse `Session` Memory (`1M`-Rule Scale):** Alpha and Beta memories are allocated lazily on first activation. `session_init` over `1,000,000` rules allocates O(active) containers, not O(rules).
 - **Safe `xitdb` Defaults & Audit-Full Default:** Default `Store_Bridge` uses standard `xitdb` v2 defaults (`xitdb.sha1_hasher()` HAMT + CRC-64/XZ trailers) and default `Session_Config` mode is `provenance_mode = .Audit_Full` (Z-set JTMS + `#soa[dynamic]Derivation` causal lineage).

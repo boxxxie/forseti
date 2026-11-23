@@ -2468,3 +2468,69 @@ then_typed_decide_result_is :: proc(
 	testing.expect_value(w.t, w.typed_tier_out.tier, tier, loc = loc)
 	testing.expect_value(w.t, w.typed_tier_out.limit, limit, loc = loc)
 }
+
+upon_compiling_workspace_file :: proc(
+	w: ^World,
+	label: string,
+	rel_path: string,
+	include_dirs: []string,
+	loc := #caller_location,
+) {
+	if !testing.expect(w.t, len(w.cli_dir) > 0, loc = loc) {
+		return
+	}
+	full, j_err := filepath.join({w.cli_dir, rel_path}, context.temp_allocator)
+	if !testing.expect_value(w.t, j_err, nil, loc = loc) {
+		return
+	}
+	inc_abs := make([]string, len(include_dirs), context.temp_allocator)
+	for dir, i in include_dirs {
+		joined, d_err := filepath.join({w.cli_dir, dir}, context.temp_allocator)
+		if !testing.expect_value(w.t, d_err, nil, loc = loc) {
+			return
+		}
+		inc_abs[i] = joined
+	}
+
+	if prev, has := &w.policies[label]; has {
+		if prev.builder != nil {
+			forseti.ir_builder_destroy(prev.builder)
+			free(prev.builder)
+		}
+		forseti.ir_destroy(&prev.ir)
+		forseti.diag_list_destroy(&prev.diags)
+	}
+
+	slot := Policy_Slot{
+		kind     = .External,
+		filename = strings.clone(full, vmem.arena_allocator(&w.arena)),
+	}
+	d_err := forseti.diag_list_init(&slot.diags)
+	testing.expect_value(w.t, d_err, nil, loc = loc)
+	ir, c_err := forseti.compile_file(full, inc_abs, &slot.diags, &w.telemetry)
+	testing.expect_value(w.t, c_err, nil, loc = loc)
+	slot.ir = ir
+	slot.compiled = true
+	w.policies[label] = slot
+}
+
+then_diagnostic_file_contains :: proc(
+	w: ^World,
+	label: string,
+	code: forseti.Diag_Code,
+	file_substr: string,
+	loc := #caller_location,
+) {
+	slot, ok := &w.policies[label]
+	if !testing.expectf(w.t, ok && slot.compiled, "policy %q must be compiled", label, loc = loc) {
+		return
+	}
+	found := false
+	for d in slot.diags.items {
+		if d.code == code && strings.contains(d.file, file_substr) {
+			found = true
+			break
+		}
+	}
+	testing.expectf(w.t, found, "expected diagnostic %v in file matching %q", code, file_substr, loc = loc)
+}

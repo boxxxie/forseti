@@ -2,16 +2,32 @@ package forseti
 
 import "core:mem"
 import vmem "core:mem/virtual"
+import "core:strings"
+
+@(private)
+Lower_Unit :: struct {
+	pool:        ^Ast_Pool,
+	interner:    ^String_Interner,
+	line_starts: []u32,
+	src_len:     u32,
+	file:        string,
+}
 
 @(private)
 Lower_Ctx :: struct {
 	pool:          ^Ast_Pool,
 	src_int:       ^String_Interner,
 	ir:            ^Rulebase_IR,
+	span_offset:   u32,
 	scratch_alloc: mem.Allocator,
 	enums:         [dynamic]Enum_Def,
 	exprs:         [dynamic]Expr_IR,
 	extra_exprs:   [dynamic]Expr_Id,
+}
+
+@(private)
+_shift_span :: proc "contextless" (ctx: ^Lower_Ctx, s: Span) -> Span {
+	return Span{offset = s.offset + ctx.span_offset, len = s.len}
 }
 
 @(private)
@@ -68,7 +84,7 @@ lower_expr :: proc(ctx: ^Lower_Ctx, nid: Node_Id) -> (eid: Expr_Id, err: mem.All
 		return INVALID_EXPR, nil
 	}
 	node := ctx.pool.nodes[nid]
-	ir_e := Expr_IR{span = node.span}
+	ir_e := Expr_IR{span = _shift_span(ctx, node.span)}
 
 	switch p in node.payload {
 	case Ast_Lit_Bool:
@@ -141,7 +157,7 @@ lower_field_assigns :: proc(ctx: ^Lower_Ctx, span: Node_Span) -> (out: []Field_B
 		out[i] = Field_Binding_IR{
 			name = lower_intern(ctx, fa.name) or_return,
 			expr = lower_expr(ctx, fa.expr) or_return,
-			span = fa.span,
+			span = _shift_span(ctx, fa.span),
 		}
 	}
 	return out, nil
@@ -201,18 +217,16 @@ lower_clauses :: proc(ctx: ^Lower_Ctx, span: Node_Span) -> (out: []Clause_IR, er
 			extra_expr = lower_expr(ctx, cl.extra_expr) or_return,
 			accum_op   = cl.accum_op,
 			inner_pat  = lower_clauses(ctx, cl.inner_pat) or_return,
-			span       = cl.span,
+			span       = _shift_span(ctx, cl.span),
 		}
 		out_idx += 1
 	}
 	return out, nil
 }
 
-@(require_results)
-lower_ast_to_ir :: proc(
-	pool: ^Ast_Pool,
-	src_interner: ^String_Interner,
-	line_starts: []u32 = nil,
+@(require_results, private)
+lower_units_to_ir :: proc(
+	units: []Lower_Unit,
 	telemetry: ^Telemetry_Sink = nil,
 	allocator := context.allocator,
 ) -> (ir: Rulebase_IR, err: mem.Allocator_Error) {
@@ -226,203 +240,239 @@ lower_ast_to_ir :: proc(
 	interner_init(&ir.interner, allocator) or_return
 
 	arena_alloc := vmem.arena_allocator(&ir.arena)
-	if len(line_starts) > 0 {
-		ir.line_starts = make([]u32, len(line_starts), arena_alloc) or_return
-		copy(ir.line_starts, line_starts)
+
+	total_schemas, total_bindings, total_tables, total_rules, total_queries := 0, 0, 0, 0, 0
+	for u in units {
+		total_schemas += len(u.pool.schemas)
+		total_bindings += len(u.pool.bindings)
+		total_tables += len(u.pool.tables)
+		total_rules += len(u.pool.rules)
+		total_queries += len(u.pool.queries)
+	}
+
+	ir.schemas = make([]Schema_Def, total_schemas, arena_alloc) or_return
+	ir.bindings = make([]Binding_Def, total_bindings, arena_alloc) or_return
+	ir.tables = make([]Table_Def, total_tables, arena_alloc) or_return
+	ir.rules = make([]Rule_Def, total_rules, arena_alloc) or_return
+	ir.queries = make([]Query_Def, total_queries, arena_alloc) or_return
+
+	if len(units) == 1 && len(units[0].line_starts) > 0 {
+		ir.line_starts = make([]u32, len(units[0].line_starts), arena_alloc) or_return
+		copy(ir.line_starts, units[0].line_starts)
+	}
+	if len(units) > 0 {
+		ir.file_spans = make([]IR_File_Span, len(units), arena_alloc) or_return
 	}
 
 	ctx := Lower_Ctx{
-		pool          = pool,
-		src_int       = src_interner,
 		ir            = &ir,
 		scratch_alloc = allocator,
 	}
 	ctx.enums = make([dynamic]Enum_Def, 0, 8, allocator) or_return
-	ctx.exprs = make([dynamic]Expr_IR, 0, max(len(pool.nodes) + 1, 16), allocator) or_return
-	ctx.extra_exprs = make([dynamic]Expr_Id, 0, max(len(pool.extra_children), 32), allocator) or_return
+	ctx.exprs = make([dynamic]Expr_IR, 0, 32, allocator) or_return
+	ctx.extra_exprs = make([dynamic]Expr_Id, 0, 32, allocator) or_return
 	defer {
 		delete(ctx.enums)
 		delete(ctx.exprs)
 		delete(ctx.extra_exprs)
 	}
-	append(&ctx.exprs, Expr_IR{kind = .Invalid}) or_return // INVALID_EXPR == 0
+	append(&ctx.exprs, Expr_IR{kind = .Invalid}) or_return
 
-	ir.module_name = lower_intern(&ctx, pool.module_name) or_return
-	ir.module_version = lower_intern(&ctx, pool.module_version) or_return
+	sch_idx, bind_idx, tbl_idx, rule_idx, qry_idx := 0, 0, 0, 0, 0
+	cur_offset: u32 = 0
 
-	ir.schemas = make([]Schema_Def, len(pool.schemas), arena_alloc) or_return
-	for s, si in pool.schemas {
-		fields := make([]Field_Def, s.fields.count, arena_alloc) or_return
-		for fi in 0 ..< s.fields.count {
-			af := pool.schema_fields[s.fields.start + fi]
-			fname := lower_intern(&ctx, af.name) or_return
-			fields[fi] = Field_Def{
-				name = fname,
-				type = lower_type_spec(&ctx, fname, af.type) or_return,
-				span = af.span,
-			}
-		}
-		ir.schemas[si] = Schema_Def{
-			name   = lower_intern(&ctx, s.name) or_return,
-			fields = fields,
-			span   = s.span,
-		}
-	}
+	for u, ui in units {
+		ctx.pool = u.pool
+		ctx.src_int = u.interner
+		ctx.span_offset = cur_offset
 
-	ir.bindings = make([]Binding_Def, len(pool.bindings), arena_alloc) or_return
-	for b, bi in pool.bindings {
-		segs := make([]Selector_Segment, b.segs.count, arena_alloc) or_return
-		for si in 0 ..< b.segs.count {
-			as := pool.selector_segs[b.segs.start + si]
-			sk: Selector_Seg_Kind
-			switch as.kind {
-			case .Field:
-				sk = .Field
-			case .Var_Key:
-				sk = .Var_Key
-			case .Lit_Key:
-				sk = .Lit_Key
-			case .Wildcard:
-				sk = .Wildcard
-			}
-			segs[si] = Selector_Segment{
-				kind = sk,
-				text = lower_intern(&ctx, as.text) or_return,
-				span = as.span,
-			}
+		ls_copy: []u32
+		if len(u.line_starts) > 0 {
+			ls_copy = make([]u32, len(u.line_starts), arena_alloc) or_return
+			copy(ls_copy, u.line_starts)
 		}
-		ir.bindings[bi] = Binding_Def{
-			kind        = b.kind,
-			name        = lower_intern(&ctx, b.name) or_return,
-			schema_name = lower_intern(&ctx, b.schema_name) or_return,
-			schema_id   = Schema_Id(INVALID_ID),
-			segments    = segs,
-			span        = b.span,
+		f_copy := ""
+		if len(u.file) > 0 {
+			f_copy = strings.clone(u.file, arena_alloc) or_return
 		}
-	}
+		ir.file_spans[ui] = IR_File_Span{
+			file         = f_copy,
+			start_offset = cur_offset,
+			end_offset   = cur_offset + u.src_len,
+			line_starts  = ls_copy,
+		}
+		cur_offset += u.src_len + 1
 
-	ir.tables = make([]Table_Def, len(pool.tables), arena_alloc) or_return
-	for t, ti in pool.tables {
-		inputs := make([]Table_Col_Def, t.inputs.count, arena_alloc) or_return
-		for ci in 0 ..< t.inputs.count {
-			ac := pool.table_cols[t.inputs.start + ci]
-			cname := lower_intern(&ctx, ac.name) or_return
-			inputs[ci] = Table_Col_Def{
-				name = cname,
-				type = lower_type_spec(&ctx, cname, ac.type) or_return,
-				cost = ac.cost,
-				span = ac.span,
-			}
+		if u.pool.module_name != EMPTY_STRING {
+			ir.module_name = lower_intern(&ctx, u.pool.module_name) or_return
+			ir.module_version = lower_intern(&ctx, u.pool.module_version) or_return
 		}
-		outputs := make([]Table_Col_Def, t.outputs.count, arena_alloc) or_return
-		for ci in 0 ..< t.outputs.count {
-			ac := pool.table_cols[t.outputs.start + ci]
-			cname := lower_intern(&ctx, ac.name) or_return
-			outputs[ci] = Table_Col_Def{
-				name = cname,
-				type = lower_type_spec(&ctx, cname, ac.type) or_return,
-				cost = ac.cost,
-				span = ac.span,
-			}
-		}
-		rows := make([]Table_Row_Def, t.rows.count, arena_alloc) or_return
-		for ri in 0 ..< t.rows.count {
-			ar := pool.table_rows[t.rows.start + ri]
-			cells := make([]Expr_Id, ar.cells.count, arena_alloc) or_return
-			for k in 0 ..< ar.cells.count {
-				cells[k] = lower_expr(&ctx, pool.extra_children[ar.cells.start + k]) or_return
-			}
-			outs := make([]Expr_Id, ar.outputs.count, arena_alloc) or_return
-			for k in 0 ..< ar.outputs.count {
-				outs[k] = lower_expr(&ctx, pool.extra_children[ar.outputs.start + k]) or_return
-			}
-			rows[ri] = Table_Row_Def{
-				id      = lower_intern(&ctx, ar.id) or_return,
-				cells   = cells,
-				outputs = outs,
-				span    = ar.span,
-			}
-		}
-		ir.tables[ti] = Table_Def{
-			name         = lower_intern(&ctx, t.name) or_return,
-			version      = lower_intern(&ctx, t.version) or_return,
-			hit_policy   = t.hit_policy,
-			verify_flags = t.verify_flags,
-			inputs       = inputs,
-			outputs      = outputs,
-			rows         = rows,
-			span         = t.span,
-		}
-	}
 
-	ir.rules = make([]Rule_Def, len(pool.rules), arena_alloc) or_return
-	for r, ri in pool.rules {
-		valid_acts := 0
-		for ai in 0 ..< r.then_actions.count {
-			if pool.actions[r.then_actions.start + ai].kind != .Error {
-				valid_acts += 1
+		for s in u.pool.schemas {
+			fields := make([]Field_Def, s.fields.count, arena_alloc) or_return
+			for fi in 0 ..< s.fields.count {
+				af := u.pool.schema_fields[s.fields.start + fi]
+				fname := lower_intern(&ctx, af.name) or_return
+				fields[fi] = Field_Def{
+					name = fname,
+					type = lower_type_spec(&ctx, fname, af.type) or_return,
+					span = _shift_span(&ctx, af.span),
+				}
 			}
+			ir.schemas[sch_idx] = Schema_Def{
+				name   = lower_intern(&ctx, s.name) or_return,
+				fields = fields,
+				span   = _shift_span(&ctx, s.span),
+			}
+			sch_idx += 1
 		}
-		acts: []Action_IR
-		if valid_acts > 0 {
-			acts = make([]Action_IR, valid_acts, arena_alloc) or_return
-			act_idx := 0
+
+		for b in u.pool.bindings {
+			segs := make([]Selector_Segment, b.segs.count, arena_alloc) or_return
+			for si in 0 ..< b.segs.count {
+				as := u.pool.selector_segs[b.segs.start + si]
+				sk: Selector_Seg_Kind
+				switch as.kind {
+				case .Field:    sk = .Field
+				case .Var_Key:  sk = .Var_Key
+				case .Lit_Key:  sk = .Lit_Key
+				case .Wildcard: sk = .Wildcard
+				}
+				segs[si] = Selector_Segment{
+					kind = sk,
+					text = lower_intern(&ctx, as.text) or_return,
+					span = _shift_span(&ctx, as.span),
+				}
+			}
+			ir.bindings[bind_idx] = Binding_Def{
+				kind        = b.kind,
+				name        = lower_intern(&ctx, b.name) or_return,
+				schema_name = lower_intern(&ctx, b.schema_name) or_return,
+				schema_id   = Schema_Id(INVALID_ID),
+				segments    = segs,
+				span        = _shift_span(&ctx, b.span),
+			}
+			bind_idx += 1
+		}
+
+		for t in u.pool.tables {
+			inputs := make([]Table_Col_Def, t.inputs.count, arena_alloc) or_return
+			for ci in 0 ..< t.inputs.count {
+				ac := u.pool.table_cols[t.inputs.start + ci]
+				cname := lower_intern(&ctx, ac.name) or_return
+				inputs[ci] = Table_Col_Def{
+					name = cname,
+					type = lower_type_spec(&ctx, cname, ac.type) or_return,
+					cost = ac.cost,
+					span = _shift_span(&ctx, ac.span),
+				}
+			}
+			outputs := make([]Table_Col_Def, t.outputs.count, arena_alloc) or_return
+			for ci in 0 ..< t.outputs.count {
+				ac := u.pool.table_cols[t.outputs.start + ci]
+				cname := lower_intern(&ctx, ac.name) or_return
+				outputs[ci] = Table_Col_Def{
+					name = cname,
+					type = lower_type_spec(&ctx, cname, ac.type) or_return,
+					cost = ac.cost,
+					span = _shift_span(&ctx, ac.span),
+				}
+			}
+			rows := make([]Table_Row_Def, t.rows.count, arena_alloc) or_return
+			for ri in 0 ..< t.rows.count {
+				ar := u.pool.table_rows[t.rows.start + ri]
+				cells := make([]Expr_Id, ar.cells.count, arena_alloc) or_return
+				for k in 0 ..< ar.cells.count {
+					cells[k] = lower_expr(&ctx, u.pool.extra_children[ar.cells.start + k]) or_return
+				}
+				outs := make([]Expr_Id, ar.outputs.count, arena_alloc) or_return
+				for k in 0 ..< ar.outputs.count {
+					outs[k] = lower_expr(&ctx, u.pool.extra_children[ar.outputs.start + k]) or_return
+				}
+				rows[ri] = Table_Row_Def{
+					id      = lower_intern(&ctx, ar.id) or_return,
+					cells   = cells,
+					outputs = outs,
+					span    = _shift_span(&ctx, ar.span),
+				}
+			}
+			ir.tables[tbl_idx] = Table_Def{
+				name         = lower_intern(&ctx, t.name) or_return,
+				version      = lower_intern(&ctx, t.version) or_return,
+				hit_policy   = t.hit_policy,
+				verify_flags = t.verify_flags,
+				inputs       = inputs,
+				outputs      = outputs,
+				rows         = rows,
+				span         = _shift_span(&ctx, t.span),
+			}
+			tbl_idx += 1
+		}
+
+		for r in u.pool.rules {
+			valid_acts := 0
 			for ai in 0 ..< r.then_actions.count {
-				aa := pool.actions[r.then_actions.start + ai]
-				ak: Action_Kind_IR
-				switch aa.kind {
-				case .Assert:
-					ak = .Assert
-				case .Assert_Eav:
-					ak = .Assert_Eav
-				case .Retract:
-					ak = .Retract
-				case .Effect:
-					ak = .Effect
-				case .Error:
-					continue
+				if u.pool.actions[r.then_actions.start + ai].kind != .Error {
+					valid_acts += 1
 				}
-				acts[act_idx] = Action_IR{
-					kind          = ak,
-					target        = lower_intern(&ctx, aa.target) or_return,
-					unconditional = aa.unconditional,
-					fields        = lower_field_assigns(&ctx, aa.fields) or_return,
-					expr          = lower_expr(&ctx, aa.expr) or_return,
-					attr_expr     = lower_expr(&ctx, aa.attr_expr) or_return,
-					val_expr      = lower_expr(&ctx, aa.val_expr) or_return,
-					span          = aa.span,
-				}
-				act_idx += 1
 			}
+			acts: []Action_IR
+			if valid_acts > 0 {
+				acts = make([]Action_IR, valid_acts, arena_alloc) or_return
+				act_idx := 0
+				for ai in 0 ..< r.then_actions.count {
+					aa := u.pool.actions[r.then_actions.start + ai]
+					ak: Action_Kind_IR
+					switch aa.kind {
+					case .Assert:     ak = .Assert
+					case .Assert_Eav: ak = .Assert_Eav
+					case .Retract:    ak = .Retract
+					case .Effect:     ak = .Effect
+					case .Error:      continue
+					}
+					acts[act_idx] = Action_IR{
+						kind          = ak,
+						target        = lower_intern(&ctx, aa.target) or_return,
+						unconditional = aa.unconditional,
+						fields        = lower_field_assigns(&ctx, aa.fields) or_return,
+						expr          = lower_expr(&ctx, aa.expr) or_return,
+						attr_expr     = lower_expr(&ctx, aa.attr_expr) or_return,
+						val_expr      = lower_expr(&ctx, aa.val_expr) or_return,
+						span          = _shift_span(&ctx, aa.span),
+					}
+					act_idx += 1
+				}
+			}
+			ir.rules[rule_idx] = Rule_Def{
+				name         = lower_intern(&ctx, r.name) or_return,
+				phase        = lower_intern(&ctx, r.phase) or_return,
+				salience     = r.salience,
+				has_salience = r.has_salience,
+				when_clauses = lower_clauses(&ctx, r.when_clauses) or_return,
+				then_actions = acts,
+				span         = _shift_span(&ctx, r.span),
+			}
+			rule_idx += 1
 		}
-		ir.rules[ri] = Rule_Def{
-			name         = lower_intern(&ctx, r.name) or_return,
-			phase        = lower_intern(&ctx, r.phase) or_return,
-			salience     = r.salience,
-			has_salience = r.has_salience,
-			when_clauses = lower_clauses(&ctx, r.when_clauses) or_return,
-			then_actions = acts,
-			span         = r.span,
-		}
-	}
 
-	ir.queries = make([]Query_Def, len(pool.queries), arena_alloc) or_return
-	for q, qi in pool.queries {
-		params := make([]Query_Param_Def, q.params.count, arena_alloc) or_return
-		for pi in 0 ..< q.params.count {
-			ap := pool.query_params[q.params.start + pi]
-			pname := lower_intern(&ctx, ap.name) or_return
-			params[pi] = Query_Param_Def{
-				name = pname,
-				type = lower_type_spec(&ctx, pname, ap.type) or_return,
-				span = ap.span,
+		for q in u.pool.queries {
+			params := make([]Query_Param_Def, q.params.count, arena_alloc) or_return
+			for pi in 0 ..< q.params.count {
+				ap := u.pool.query_params[q.params.start + pi]
+				pname := lower_intern(&ctx, ap.name) or_return
+				params[pi] = Query_Param_Def{
+					name = pname,
+					type = lower_type_spec(&ctx, pname, ap.type) or_return,
+					span = _shift_span(&ctx, ap.span),
+				}
 			}
-		}
-		ir.queries[qi] = Query_Def{
-			name         = lower_intern(&ctx, q.name) or_return,
-			params       = params,
-			when_clauses = lower_clauses(&ctx, q.when_clauses) or_return,
-			span         = q.span,
+			ir.queries[qry_idx] = Query_Def{
+				name         = lower_intern(&ctx, q.name) or_return,
+				params       = params,
+				when_clauses = lower_clauses(&ctx, q.when_clauses) or_return,
+				span         = _shift_span(&ctx, q.span),
+			}
+			qry_idx += 1
 		}
 	}
 
@@ -446,6 +496,22 @@ lower_ast_to_ir :: proc(
 }
 
 @(require_results)
+lower_ast_to_ir :: proc(
+	pool: ^Ast_Pool,
+	src_interner: ^String_Interner,
+	line_starts: []u32 = nil,
+	telemetry: ^Telemetry_Sink = nil,
+	allocator := context.allocator,
+) -> (ir: Rulebase_IR, err: mem.Allocator_Error) {
+	unit := Lower_Unit{
+		pool        = pool,
+		interner    = src_interner,
+		line_starts = line_starts,
+	}
+	return lower_units_to_ir({unit}, telemetry, allocator)
+}
+
+@(require_results)
 compile_source :: proc(
 	src: string,
 	source_name: string = "",
@@ -453,13 +519,5 @@ compile_source :: proc(
 	telemetry: ^Telemetry_Sink = nil,
 	allocator := context.allocator,
 ) -> (ir: Rulebase_IR, err: mem.Allocator_Error) {
-	parsed := parse_source_to_ast(src, source_name, diags, telemetry, allocator) or_return
-	defer parsed_ast_destroy(&parsed)
-
-	ir = lower_ast_to_ir(&parsed.pool, &parsed.interner, parsed.line_starts[:], telemetry, allocator) or_return
-	defer if err != nil {
-		ir_destroy(&ir)
-	}
-	analyze_ir(&ir, diags, telemetry) or_return
-	return ir, nil
+	return compile_source_with_imports(src, source_name, nil, diags, telemetry, allocator)
 }

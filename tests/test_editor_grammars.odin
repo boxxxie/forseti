@@ -7,8 +7,8 @@ import "core:testing"
 import "../forseti"
 
 @(private = "file")
-_FORSETI_KEYWORDS :: [35]string{
-	"module", "version", "schema", "source", "derived", "at",
+_FORSETI_KEYWORDS :: [36]string{
+	"module", "import", "version", "schema", "source", "derived", "at",
 	"table", "hit", "verify", "inputs", "outputs", "rows", "cost",
 	"rule", "phase", "salience", "when", "then", "effect", "where",
 	"decide", "assert", "assert!", "unconditional", "retract",

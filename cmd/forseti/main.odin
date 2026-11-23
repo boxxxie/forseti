@@ -44,6 +44,7 @@ Cli_Options :: struct {
 	fmt_write:          bool,
 	fmt_check:          bool,
 	extra_files:        [dynamic]string,
+	include_paths:      [dynamic]string,
 }
 
 Loaded_Fact_Spec :: struct {
@@ -112,6 +113,7 @@ Commands:
 Options:
   --format=human|json|jsonl|chrome-trace  Output format (command-dependent)
   --warnings-as-errors     Treat compiler warnings (W*) as non-zero exit failures
+  --include, -I <dir>      Add import search directory (repeatable)
   --write, -w              Overwrite input file(s) in-place for 'fmt'
   --check                  Exit 1 if any file is not canonically formatted ('fmt')
   --out <file>             Write command output to <file> instead of stdout
@@ -154,6 +156,7 @@ parse_cli_format :: proc(raw: string) -> (fmt_kind: Cli_Format, ok: bool) {
 parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, ok: bool) {
 	defer if !ok || show_help {
 		delete(opts.extra_files)
+		delete(opts.include_paths)
 	}
 	if len(args) < 2 {
 		return {}, true, true
@@ -190,6 +193,13 @@ parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, o
 			opts.out_path = parse_cli_value_arg(args, &i, "--out") or_return
 		} else if strings.has_prefix(arg, "--out=") {
 			opts.out_path = arg[len("--out="):]
+		} else if arg == "--include" || arg == "-I" {
+			inc := parse_cli_value_arg(args, &i, arg) or_return
+			append(&opts.include_paths, inc)
+		} else if strings.has_prefix(arg, "--include=") {
+			append(&opts.include_paths, arg[len("--include="):])
+		} else if strings.has_prefix(arg, "-I") && len(arg) > 2 {
+			append(&opts.include_paths, arg[2:])
 		} else if arg == "--package" {
 			opts.pkg_name = parse_cli_value_arg(args, &i, "--package") or_return
 		} else if strings.has_prefix(arg, "--package=") {
@@ -630,12 +640,13 @@ compile_source_to_rulebase :: proc(
 	diags: ^forseti.Diagnostic_List,
 	telemetry: ^forseti.Telemetry_Sink,
 	warnings_as_errors: bool,
+	include_paths: []string = nil,
 ) -> (
 	rb: forseti.Rulebase,
 	exit_code: int,
 	ok: bool,
 ) {
-	ir, c_err := forseti.compile_source(src, file_path, diags, telemetry, context.allocator)
+	ir, c_err := forseti.compile_source_with_imports(src, file_path, include_paths, diags, telemetry, context.allocator)
 	if c_err != nil {
 		fmt.eprintfln("error: compilation failed: %v", c_err)
 		return {}, 2, false
@@ -1040,7 +1051,10 @@ run_cmd_fmt :: proc(opts: ^Cli_Options) -> int {
 
 run_cli :: proc() -> int {
 	opts, show_help, ok := parse_cli_args(os.args)
-	defer delete(opts.extra_files)
+	defer {
+		delete(opts.extra_files)
+		delete(opts.include_paths)
+	}
 	if !ok {
 		return 2
 	}
@@ -1093,7 +1107,7 @@ run_cli :: proc() -> int {
 
 	switch opts.subcmd {
 	case "check", "verify-tables":
-		ir, c_err := forseti.compile_source(src, opts.file_path, &diags, &telemetry, context.allocator)
+		ir, c_err := forseti.compile_source_with_imports(src, opts.file_path, opts.include_paths[:], &diags, &telemetry, context.allocator)
 		if c_err != nil {
 			fmt.eprintfln("error: compilation failed: %v", c_err)
 			return 2
@@ -1133,7 +1147,7 @@ run_cli :: proc() -> int {
 		return 0
 
 	case "gen":
-		ir, c_err := forseti.compile_source(src, opts.file_path, &diags, &telemetry, context.allocator)
+		ir, c_err := forseti.compile_source_with_imports(src, opts.file_path, opts.include_paths[:], &diags, &telemetry, context.allocator)
 		if c_err != nil {
 			fmt.eprintfln("error: compile failed: %v", c_err)
 			return 2
@@ -1189,7 +1203,7 @@ run_cli :: proc() -> int {
 		return 1 if diags.error_count > 0 else 0
 
 	case "ir":
-		ir, c_err := forseti.compile_source(src, opts.file_path, &diags, &telemetry, context.allocator)
+		ir, c_err := forseti.compile_source_with_imports(src, opts.file_path, opts.include_paths[:], &diags, &telemetry, context.allocator)
 		if c_err != nil {
 			fmt.eprintfln("error: compile failed: %v", c_err)
 			return 2

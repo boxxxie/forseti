@@ -157,7 +157,7 @@ _is_value_like_token :: proc "contextless" (k: Token_Kind) -> bool {
 @(private)
 _is_top_decl_kw :: proc "contextless" (k: Token_Kind) -> bool {
 	#partial switch k {
-	case .Kw_Module, .Kw_Schema, .Kw_Enum, .Kw_Source, .Kw_Derived, .Kw_Table, .Kw_Rule, .Kw_Query:
+	case .Kw_Module, .Kw_Import, .Kw_Schema, .Kw_Enum, .Kw_Source, .Kw_Derived, .Kw_Table, .Kw_Rule, .Kw_Query:
 		return true
 	}
 	return false
@@ -636,7 +636,7 @@ format_source :: proc(
 			has_prev_tok = false
 		}
 
-		if cur == .Kw_Module {
+		if cur == .Kw_Module || cur == .Kw_Import {
 			in_module_header = true
 		} else if cur == .Kw_Source || cur == .Kw_Derived {
 			in_binding_header = true

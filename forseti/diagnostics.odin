@@ -23,6 +23,7 @@ Diag_Code :: enum u16 {
 	E2003,
 	E2004,
 	E2005,
+	E2006,
 	E3001,
 	E3002,
 	E4001,
@@ -52,6 +53,7 @@ diag_code_strings := [Diag_Code]string{
 	.E2003 = "E2003",
 	.E2004 = "E2004",
 	.E2005 = "E2005",
+	.E2006 = "E2006",
 	.E3001 = "E3001",
 	.E3002 = "E3002",
 	.E4001 = "E4001",
@@ -75,6 +77,7 @@ diag_code_string :: proc "contextless" (code: Diag_Code) -> string {
 Diagnostic :: struct {
 	code:     Diag_Code,
 	severity: Diagnostic_Severity,
+	file:     string,
 	span:     Span,
 	line:     u32,
 	col:      u32,
@@ -121,6 +124,7 @@ diag_add :: proc(
 	message: string,
 	hint: string = "",
 	telemetry: ^Telemetry_Sink = nil,
+	file: string = "",
 ) -> mem.Allocator_Error {
 	if list == nil {
 		return nil
@@ -134,10 +138,15 @@ diag_add :: proc(
 	if len(hint) > 0 {
 		cloned_hint = strings.clone(hint, arena_alloc) or_return
 	}
+	cloned_file := ""
+	if len(file) > 0 {
+		cloned_file = strings.clone(file, arena_alloc) or_return
+	}
 
 	append(&list.items, Diagnostic{
 		code     = code,
 		severity = severity,
+		file     = cloned_file,
 		span     = span,
 		line     = line,
 		col      = col,
@@ -161,6 +170,19 @@ diag_add :: proc(
 
 diag_has_errors :: proc "contextless" (list: ^Diagnostic_List) -> bool {
 	return list != nil && list.error_count > 0
+}
+
+diag_attach_file :: proc(list: ^Diagnostic_List, start_idx: int, file: string) -> mem.Allocator_Error {
+	if list == nil || len(file) == 0 || start_idx >= len(list.items) {
+		return nil
+	}
+	arena_alloc := vmem.arena_allocator(&list.arena)
+	for i := max(start_idx, 0); i < len(list.items); i += 1 {
+		if len(list.items[i].file) == 0 {
+			list.items[i].file = strings.clone(file, arena_alloc) or_return
+		}
+	}
+	return nil
 }
 
 diag_has_warnings :: proc "contextless" (list: ^Diagnostic_List) -> bool {
@@ -187,10 +209,11 @@ format_diagnostic_human :: proc(
 		strings.builder_destroy(&b)
 	}
 
+	eff_file := d.file if len(d.file) > 0 else filename
 	fmt.sbprintf(
 		&b,
 		"%s:%d:%d: %s[%s]: %s\n",
-		filename,
+		eff_file,
 		d.line,
 		d.col,
 		diag_severity_strings[d.severity],
@@ -198,7 +221,7 @@ format_diagnostic_human :: proc(
 		d.message,
 	)
 
-	if len(src) > 0 && int(d.span.offset) <= len(src) {
+	if len(src) > 0 && (len(d.file) == 0 || d.file == filename) && int(d.span.offset) <= len(src) {
 		line_start := int(d.span.offset)
 		for line_start > 0 && src[line_start - 1] != '\n' {
 			line_start -= 1
@@ -284,6 +307,10 @@ format_diagnostics_json :: proc(
 			write_json_escaped_string(&b, d.message)
 			strings.write_string(&b, `,"hint":`)
 			write_json_escaped_string(&b, d.hint)
+			if len(d.file) > 0 {
+				strings.write_string(&b, `,"file":`)
+				write_json_escaped_string(&b, d.file)
+			}
 			strings.write_byte(&b, '}')
 		}
 	}

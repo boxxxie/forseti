@@ -49,7 +49,7 @@ sema_error :: proc(
 	msg: string,
 	hint: string = "",
 ) -> mem.Allocator_Error {
-	return diag_add(ctx.diags, ctx.ir.line_starts, code, .Error, span, msg, hint, ctx.telemetry)
+	return ir_diag_add(ctx.diags, ctx.ir, code, .Error, span, msg, hint, ctx.telemetry)
 }
 
 @(private)
@@ -60,7 +60,7 @@ sema_warn :: proc(
 	msg: string,
 	hint: string = "",
 ) -> mem.Allocator_Error {
-	return diag_add(ctx.diags, ctx.ir.line_starts, code, .Warning, span, msg, hint, ctx.telemetry)
+	return ir_diag_add(ctx.diags, ctx.ir, code, .Warning, span, msg, hint, ctx.telemetry)
 }
 
 @(private)
@@ -348,10 +348,76 @@ sema_eval_expr :: proc(
 		rt := sema_eval_expr(ctx, scope, e.rhs, mark_used, used_outer, outer_depth, max_join_gen) or_return
 		return rt, nil
 	case .Call:
-		for i in e.extra_span.start ..< e.extra_span.start + e.extra_span.count {
-			_ = sema_eval_expr(ctx, scope, ctx.ir.extra_exprs[i], mark_used, used_outer, outer_depth, max_join_gen) or_return
+		fname := ir_string(ctx.ir, e.str_id)
+		arg_start := e.extra_span.start
+		arg_count := e.extra_span.count
+		arg_types: [8]Type_Ref
+		for i in 0 ..< arg_count {
+			at := sema_eval_expr(ctx, scope, ctx.ir.extra_exprs[arg_start + i], mark_used, used_outer, outer_depth, max_join_gen) or_return
+			if i < len(arg_types) {
+				arg_types[i] = at
+			}
 		}
-		return Type_Ref{kind = .Unknown}, nil
+		_expect_arity :: proc(ctx: ^Sema_Ctx, fn_name: string, want, got: u32, sp: Span) -> (ok: bool, err: mem.Allocator_Error) {
+			if got == want {
+				return true, nil
+			}
+			sema_error(ctx, .E2002, sp, fmt.tprintf("%s() expects %d argument(s), got %d", fn_name, want, got)) or_return
+			return false, nil
+		}
+		switch fname {
+		case "lower", "upper":
+			if !(_expect_arity(ctx, fname, 1, arg_count, e.span) or_return) {
+				return Type_Ref{kind = .String}, nil
+			}
+			if arg_types[0].kind != .Unknown && arg_types[0].kind != .String {
+				sema_error(ctx, .E2002, e.span, fmt.tprintf("%s() expects string argument, got %s", fname, type_kind_str(arg_types[0].kind))) or_return
+			}
+			return Type_Ref{kind = .String}, nil
+		case "len":
+			if !(_expect_arity(ctx, fname, 1, arg_count, e.span) or_return) {
+				return Type_Ref{kind = .I64}, nil
+			}
+			if arg_types[0].kind != .Unknown && arg_types[0].kind != .String {
+				sema_error(ctx, .E2002, e.span, fmt.tprintf("len() expects string argument, got %s", type_kind_str(arg_types[0].kind))) or_return
+			}
+			return Type_Ref{kind = .I64}, nil
+		case "starts_with", "contains":
+			if !(_expect_arity(ctx, fname, 2, arg_count, e.span) or_return) {
+				return Type_Ref{kind = .Bool}, nil
+			}
+			if (arg_types[0].kind != .Unknown && arg_types[0].kind != .String) || (arg_types[1].kind != .Unknown && arg_types[1].kind != .String) {
+				sema_error(ctx, .E2002, e.span, fmt.tprintf("%s() expects (string, string) arguments, got (%s, %s)", fname, type_kind_str(arg_types[0].kind), type_kind_str(arg_types[1].kind))) or_return
+			}
+			return Type_Ref{kind = .Bool}, nil
+		case "abs":
+			if !(_expect_arity(ctx, fname, 1, arg_count, e.span) or_return) {
+				return Type_Ref{kind = .Unknown}, nil
+			}
+			if arg_types[0].kind != .Unknown && !is_numeric_kind(arg_types[0].kind) {
+				sema_error(ctx, .E2002, e.span, fmt.tprintf("abs() expects numeric argument, got %s", type_kind_str(arg_types[0].kind))) or_return
+				return Type_Ref{kind = .Unknown}, nil
+			}
+			return arg_types[0], nil
+		case "min", "max":
+			if !(_expect_arity(ctx, fname, 2, arg_count, e.span) or_return) {
+				return Type_Ref{kind = .Unknown}, nil
+			}
+			if (arg_types[0].kind != .Unknown && !is_numeric_kind(arg_types[0].kind)) || (arg_types[1].kind != .Unknown && !is_numeric_kind(arg_types[1].kind)) {
+				sema_error(ctx, .E2002, e.span, fmt.tprintf("%s() expects numeric arguments, got (%s, %s)", fname, type_kind_str(arg_types[0].kind), type_kind_str(arg_types[1].kind))) or_return
+				return Type_Ref{kind = .Unknown}, nil
+			}
+			if arg_types[0].kind == .F64 || arg_types[1].kind == .F64 {
+				return Type_Ref{kind = .F64}, nil
+			}
+			if arg_types[0].kind == .I64 || arg_types[1].kind == .I64 {
+				return Type_Ref{kind = .I64}, nil
+			}
+			return arg_types[0] if arg_types[0].kind != .Unknown else arg_types[1], nil
+		case:
+			sema_error(ctx, .E2002, e.span, fmt.tprintf("unknown built-in function %q", fname)) or_return
+			return Type_Ref{kind = .Unknown}, nil
+		}
 	}
 	return Type_Ref{kind = .Unknown}, nil
 }

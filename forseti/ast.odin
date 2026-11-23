@@ -220,6 +220,11 @@ Ast_Rule_Decl :: struct {
 	span:         Span,
 }
 
+Ast_Import_Decl :: struct {
+	path: String_Id,
+	span: Span,
+}
+
 Ast_Query_Decl :: struct {
 	name:         String_Id,
 	params:       Node_Span, // Slice into pool.query_params
@@ -248,6 +253,7 @@ Ast_Pool :: struct {
 	rules:          [dynamic]Ast_Rule_Decl,
 	query_params:   [dynamic]Ast_Schema_Field,
 	queries:        [dynamic]Ast_Query_Decl,
+	imports:        [dynamic]Ast_Import_Decl,
 }
 
 @(require_results)
@@ -276,12 +282,14 @@ ast_pool_init :: proc(
 	pool.rules = make([dynamic]Ast_Rule_Decl, 0, 32, allocator) or_return
 	pool.query_params = make([dynamic]Ast_Schema_Field, 0, 16, allocator) or_return
 	pool.queries = make([dynamic]Ast_Query_Decl, 0, 16, allocator) or_return
+	pool.imports = make([dynamic]Ast_Import_Decl, 0, 8, allocator) or_return
 
 	append(&pool.nodes, Ast_Node{}) or_return // Index 0 = INVALID_NODE
 	return nil
 }
 
 ast_pool_destroy :: proc(pool: ^Ast_Pool) {
+	delete(pool.imports)
 	delete(pool.queries)
 	delete(pool.query_params)
 	delete(pool.rules)

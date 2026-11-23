@@ -281,6 +281,10 @@ driver_prepare_cli_binary :: proc(w: ^World) -> string {
 }
 
 driver_write_file :: proc(full_path, content: string) -> bool {
+	dir := filepath.dir(full_path)
+	if len(dir) > 0 && dir != "." && !os.exists(dir) {
+		_ = os.make_directory_all(dir)
+	}
 	return os.write_entire_file(full_path, content) == nil
 }
 

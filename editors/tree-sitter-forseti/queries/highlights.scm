@@ -2,6 +2,7 @@
 
 [
   "module"
+  "import"
   "version"
   "schema"
   "source"

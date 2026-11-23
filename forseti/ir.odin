@@ -174,10 +174,18 @@ Query_Def :: struct {
 	span:         Span,
 }
 
+IR_File_Span :: struct {
+	file:         string,
+	start_offset: u32,
+	end_offset:   u32,
+	line_starts:  []u32,
+}
+
 Rulebase_IR :: struct {
 	arena:          vmem.Arena,
 	interner:       String_Interner,
 	line_starts:    []u32,
+	file_spans:     []IR_File_Span,
 	module_name:    String_Id,
 	module_version: String_Id,
 	enums:          []Enum_Def,
@@ -188,6 +196,31 @@ Rulebase_IR :: struct {
 	queries:        []Query_Def,
 	exprs:          []Expr_IR,
 	extra_exprs:    []Expr_Id,
+}
+
+ir_diag_add :: proc(
+	diags: ^Diagnostic_List,
+	ir: ^Rulebase_IR,
+	code: Diag_Code,
+	severity: Diagnostic_Severity,
+	span: Span,
+	message: string,
+	hint: string = "",
+	telemetry: ^Telemetry_Sink = nil,
+) -> mem.Allocator_Error {
+	if diags == nil {
+		return nil
+	}
+	if ir != nil && len(ir.file_spans) > 0 {
+		for fs in ir.file_spans {
+			if span.offset >= fs.start_offset && span.offset <= fs.end_offset {
+				local_span := Span{offset = span.offset - fs.start_offset, len = span.len}
+				return diag_add(diags, fs.line_starts, code, severity, local_span, message, hint, telemetry, fs.file)
+			}
+		}
+	}
+	ls := ir.line_starts if ir != nil else nil
+	return diag_add(diags, ls, code, severity, span, message, hint, telemetry)
 }
 
 ir_destroy :: proc(ir: ^Rulebase_IR) {

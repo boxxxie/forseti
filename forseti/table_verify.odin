@@ -142,9 +142,9 @@ verify_decision_table :: proc(
 		return nil
 	}
 	if len(tbl.rows) > MAX_VERIFY_ROWS && tbl.verify_flags == {} {
-		diag_add(
+		ir_diag_add(
 			diags,
-			ir.line_starts,
+			ir,
 			.W3006,
 			.Warning,
 			tbl.span,
@@ -197,9 +197,9 @@ verify_decision_table :: proc(
 			}
 			if mask_is_empty(mask) {
 				row_has_unsat[ri] = true
-				diag_add(
+				ir_diag_add(
 					diags,
-					ir.line_starts,
+					ir,
 					.E3002,
 					.Error,
 					cell_expr.span,
@@ -213,9 +213,9 @@ verify_decision_table :: proc(
 					telemetry,
 				) or_return
 			} else if cell_expr.kind != .Wildcard && mask_is_full(mask, len(doms[ci].atoms)) {
-				diag_add(
+				ir_diag_add(
 					diags,
-					ir.line_starts,
+					ir,
 					.W3004,
 					.Warning,
 					cell_expr.span,
@@ -269,9 +269,9 @@ verify_decision_table :: proc(
 				if overlaps {
 					if check_unique || (check_any && !row_outputs_equal(ir, tbl.rows[i], tbl.rows[j])) {
 						witness := format_witness(ir, tbl, doms, overlap_box, context.temp_allocator) or_return
-						diag_add(
+						ir_diag_add(
 							diags,
-							ir.line_starts,
+							ir,
 							.E3001,
 							.Error,
 							tbl.rows[j].span,
@@ -328,9 +328,9 @@ verify_decision_table :: proc(
 						}
 					}
 					if mergeable {
-						diag_add(
+						ir_diag_add(
 							diags,
-							ir.line_starts,
+							ir,
 							.W3003,
 							.Warning,
 							tbl.rows[j].span,
@@ -405,9 +405,9 @@ verify_decision_table :: proc(
 	}
 
 	if ctx.budget_exceeded || any_truncated {
-		diag_add(
+		ir_diag_add(
 			diags,
-			ir.line_starts,
+			ir,
 			.W3006,
 			.Warning,
 			tbl.span,
@@ -434,9 +434,9 @@ verify_decision_table :: proc(
 							strings.write_string(&shadow_b, ir_string(ir, tbl.rows[pi].id))
 						}
 					}
-					diag_add(
+					ir_diag_add(
 						diags,
-						ir.line_starts,
+						ir,
 						.W3002,
 						.Warning,
 						tbl.rows[ri].span,
@@ -462,9 +462,9 @@ verify_decision_table :: proc(
 				}
 				strings.write_string(&gb, gw)
 			}
-			diag_add(
+			ir_diag_add(
 				diags,
-				ir.line_starts,
+				ir,
 				.W3001,
 				.Warning,
 				tbl.span,
@@ -496,9 +496,9 @@ verify_decision_table :: proc(
 				}
 			}
 			if !produced {
-				diag_add(
+				ir_diag_add(
 					diags,
-					ir.line_starts,
+					ir,
 					.W3005,
 					.Warning,
 					tbl.span,

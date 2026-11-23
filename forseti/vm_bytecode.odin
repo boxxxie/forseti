@@ -29,6 +29,14 @@ Opcode :: enum u8 {
 	Decide_Call,
 	Load_Decide_Out,
 	In_Range,
+	Str_Lower,
+	Str_Upper,
+	Str_Len,
+	Str_Starts_With,
+	Str_Contains,
+	Math_Abs,
+	Math_Min,
+	Math_Max,
 }
 
 Instruction :: struct {
@@ -550,8 +558,66 @@ vmc_compile_expr :: proc(c: ^Vm_Compiler, eid: Expr_Id) -> (reg: u8, err: Vm_Err
 		reg_free(&c.ra, lhs_r)
 		return res_r, .None
 
-	case .Cell_Cmp, .Call:
+	case .Cell_Cmp:
 		return 0, .Unsupported_Expr
+
+	case .Call:
+		fname := ir_string(c.env.ir, e.str_id)
+		arg_start := e.extra_span.start
+		arg_count := e.extra_span.count
+		op: Opcode
+		want_args: u32 = 1
+		switch fname {
+		case "lower":
+			op = .Str_Lower
+		case "upper":
+			op = .Str_Upper
+		case "len":
+			op = .Str_Len
+		case "starts_with":
+			op = .Str_Starts_With
+			want_args = 2
+		case "contains":
+			op = .Str_Contains
+			want_args = 2
+		case "abs":
+			op = .Math_Abs
+		case "min":
+			op = .Math_Min
+			want_args = 2
+		case "max":
+			op = .Math_Max
+			want_args = 2
+		case:
+			return 0, .Unsupported_Expr
+		}
+		if arg_count != want_args {
+			return 0, .Unsupported_Expr
+		}
+		lhs_r := vmc_compile_expr(c, c.env.ir.extra_exprs[arg_start]) or_return
+		rhs_r: u8
+		if want_args == 2 {
+			var_err: Vm_Error
+			rhs_r, var_err = vmc_compile_expr(c, c.env.ir.extra_exprs[arg_start + 1])
+			if var_err != .None {
+				reg_free(&c.ra, lhs_r)
+				return 0, var_err
+			}
+		}
+		dst, ok := reg_alloc(&c.ra)
+		if !ok {
+			reg_free(&c.ra, lhs_r)
+			if want_args == 2 {
+				reg_free(&c.ra, rhs_r)
+			}
+			return 0, .Register_Overflow
+		}
+		append(&c.code, Instruction{op = op, dst = dst, lhs = lhs_r, rhs = rhs_r})
+		reg_free(&c.ra, lhs_r)
+		if want_args == 2 {
+			reg_free(&c.ra, rhs_r)
+		}
+		return dst, .None
 	}
 	return 0, .Unsupported_Expr
 }

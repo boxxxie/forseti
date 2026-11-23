@@ -14,6 +14,7 @@ Token_Kind :: enum u8 {
 
 	// Keywords
 	Kw_Module,
+	Kw_Import,
 	Kw_Version,
 	Kw_Schema,
 	Kw_Source,
@@ -128,6 +129,8 @@ keyword_or_ident :: proc "contextless" (word: string) -> Token_Kind {
 	switch word {
 	case "module":
 		return .Kw_Module
+	case "import":
+		return .Kw_Import
 	case "version":
 		return .Kw_Version
 	case "schema":

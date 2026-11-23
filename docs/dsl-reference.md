@@ -39,6 +39,7 @@
 - **Operators:** `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `not`, `and`, `or`, `in`, `..`, `..=`
 - **Table Delimiters:** `|` separates input columns or output columns; `||` separates inputs from outputs; `-` denotes a wildcard input cell (`- | ...`) or an unset/omitted output in `Merge` / `Reverse_Merge` tables (`|| "Primary" | -`).
 - **Logical vs. Unconditional Assertion:** `assert` creates a logically justified assertion tracked by Z-set JTMS; `assert!` (optionally followed by `unconditional`) creates an unconditional fact that survives premise retractions (ideal for immutable audit trails).
+- **Imports & Pure Built-Ins (DSL v1.1):** Top-level `import "path.forseti"` deduplicates diamond graphs, checks cycles (`E2006`), and searches `--include` / `-I` directories. Pure scalar built-ins in `where` / `:=` expressions: `lower(s)`, `upper(s)`, `len(s)`, `starts_with(s, prefix)`, `contains(s, sub)`, `abs(x)`, `min(a, b)`, `max(a, b)`.
 
 ---
 
@@ -46,7 +47,8 @@
 
 ```ebnf
 Module      ::= ("module" Ident ("version" String)?)? Decl*
-Decl        ::= SchemaDecl | BindingDecl | TableDecl | RuleDecl | QueryDecl
+Decl        ::= ImportDecl | SchemaDecl | BindingDecl | TableDecl | RuleDecl | QueryDecl
+ImportDecl  ::= "import" String
 
 SchemaDecl  ::= "schema" Ident "{" (FieldDecl ("," | ";")?)* "}"
 FieldDecl   ::= Ident ":" TypeSpec
@@ -286,6 +288,7 @@ defer forseti.ir_destroy(&ir)
 | `E2003` | Error | Unbound `?variable` (or leaked out of `not` / `exists` / `from`) | Bind `?var` in a positive clause or query parameter before reading it. |
 | `E2004` | Error | Duplicate schema, field, binding, table, column, row ID, rule, or query | Rename duplicate declarations or table row labels. |
 | `E2005` | Error | Wrong arity / duplicate / missing argument in `decide` or `assert` | Supply every required table input / schema field once. |
+| `E2006` | Error | Unresolved `import` path or circular import cycle | Verify the relative path / `--include` dir and break cyclic imports. |
 | `E3001` | Error | Overlapping rules in `Unique`/`no_overlap` table or conflicting `Any` overlap | Tighten predicates so rows are disjoint, or switch policy to `First`. |
 | `E3002` | Error | Unsatisfiable decision table cell (contradictory range or compound predicate) | Fix impossible bounds (e.g. `> 10 and < 5`). |
 | `E4001` | Error | Unstratified `not` or aggregation cycle across rule dependency SCC | Separate base derivation from negated/aggregated stratum. |

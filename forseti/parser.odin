@@ -48,6 +48,7 @@ infix_bp := #partial [Token_Kind]Binding_Power{
 @(private)
 Parser :: struct {
 	src:         string,
+	source_name: string,
 	tokens:      []Token,
 	pos:         int,
 	depth:       int,
@@ -94,7 +95,7 @@ report_parse_error :: proc(
 	msg: string,
 	hint: string = "",
 ) -> mem.Allocator_Error {
-	return diag_add(p.diags, p.line_starts, code, .Error, span, msg, hint, p.telemetry)
+	return diag_add(p.diags, p.line_starts, code, .Error, span, msg, hint, p.telemetry, p.source_name)
 }
 
 @(private)
@@ -110,7 +111,7 @@ expect_token :: proc(p: ^Parser, kind: Token_Kind, msg: string) -> (tok: Token, 
 @(private)
 is_decl_start :: proc "contextless" (kind: Token_Kind) -> bool {
 	#partial switch kind {
-	case .Kw_Module, .Kw_Schema, .Kw_Source, .Kw_Derived, .Kw_Table, .Kw_Rule, .Kw_Query:
+	case .Kw_Module, .Kw_Import, .Kw_Schema, .Kw_Source, .Kw_Derived, .Kw_Table, .Kw_Rule, .Kw_Query:
 		return true
 	}
 	return false
@@ -1158,42 +1159,65 @@ parse_clause :: proc(p: ^Parser) -> (cl: Ast_Clause, err: mem.Allocator_Error) {
 		}
 
 		if rhs.kind == .Ident {
+			is_accum_call := false
 			if acc_op, is_acc := parse_accum_op(lexeme(p, rhs)); is_acc && peek(p, 1).kind == .LParen {
-				_ = advance(p) // op
-				_ = advance(p) // '('
-				agg_expr := parse_expr(p, 0) or_return
-				if peek(p).kind == .RParen {
-					_ = advance(p)
-				} else {
-					report_parse_error(p, peek(p).span, .E1002, "expected ')' after accumulator expression") or_return
+				// Disambiguate `min(?x) from Pat` (accum) vs `min(a, b)` (scalar built-in).
+				depth := 0
+				off := 1
+				for {
+					tk := peek(p, off).kind
+					if tk == .EOF {
+						break
+					}
+					if tk == .LParen {
+						depth += 1
+					} else if tk == .RParen {
+						depth -= 1
+						if depth == 0 {
+							is_accum_call = peek(p, off + 1).kind == .Kw_From
+							break
+						}
+					}
+					off += 1
 				}
-				_, from_ok := expect_token(p, .Kw_From, "expected 'from' after accumulator") or_return
-				inner_pat := make([dynamic]Ast_Clause, 0, 1, context.temp_allocator)
-				end_span := rhs.span
-				if from_ok {
-					pat_cl := parse_clause(p) or_return
-					append(&inner_pat, pat_cl)
-					end_span = pat_cl.span
+				if is_accum_call {
+					_ = advance(p) // op
+					_ = advance(p) // '('
+					agg_expr := parse_expr(p, 0) or_return
+					if peek(p).kind == .RParen {
+						_ = advance(p)
+					} else {
+						report_parse_error(p, peek(p).span, .E1002, "expected ')' after accumulator expression") or_return
+					}
+					_, from_ok := expect_token(p, .Kw_From, "expected 'from' after accumulator") or_return
+					inner_pat := make([dynamic]Ast_Clause, 0, 1, context.temp_allocator)
+					end_span := rhs.span
+					if from_ok {
+						pat_cl := parse_clause(p) or_return
+						append(&inner_pat, pat_cl)
+						end_span = pat_cl.span
+					}
+					guard := INVALID_NODE
+					if peek(p).kind == .Kw_Where {
+						_ = advance(p)
+						guard = parse_expr(p, 0) or_return
+						end_span = p.pool.nodes[guard].span
+					}
+					ip_span := ast_add_clauses(p.pool, inner_pat[:]) or_return
+					return Ast_Clause{
+						kind       = .Accum,
+						bind_var   = bind_id,
+						accum_op   = acc_op,
+						expr       = agg_expr,
+						inner_pat  = ip_span,
+						guard_expr = guard,
+						span       = merge_spans(var_tok.span, end_span),
+					}, nil
 				}
-				guard := INVALID_NODE
-				if peek(p).kind == .Kw_Where {
-					_ = advance(p)
-					guard = parse_expr(p, 0) or_return
-					end_span = p.pool.nodes[guard].span
-				}
-				ip_span := ast_add_clauses(p.pool, inner_pat[:]) or_return
-				return Ast_Clause{
-					kind       = .Accum,
-					bind_var   = bind_id,
-					accum_op   = acc_op,
-					expr       = agg_expr,
-					inner_pat  = ip_span,
-					guard_expr = guard,
-					span       = merge_spans(var_tok.span, end_span),
-				}, nil
 			}
 
-			if peek(p, 1).kind == .LParen {
+			is_pat_call := (peek(p, 2).kind == .RParen || (peek(p, 2).kind == .Ident && peek(p, 3).kind == .Colon))
+			if peek(p, 1).kind == .LParen && is_pat_call {
 				t_tok := advance(p)
 				fspan, end_span, _ := parse_field_assigns(p, .LParen, .RParen) or_return
 				tid := intern(p.interner, lexeme(p, t_tok)) or_return
@@ -1572,6 +1596,22 @@ parse_query_decl :: proc(p: ^Parser) -> mem.Allocator_Error {
 	return nil
 }
 
+@(private)
+parse_import_decl :: proc(p: ^Parser) -> mem.Allocator_Error {
+	kw := advance(p)
+	path_tok, path_ok := expect_token(p, .String, "expected import path string literal") or_return
+	if !path_ok {
+		sync_to_top_level(p)
+		return nil
+	}
+	path_id := decode_string_token(p, path_tok) or_return
+	append(&p.pool.imports, Ast_Import_Decl{
+		path = path_id,
+		span = merge_spans(kw.span, path_tok.span),
+	}) or_return
+	return nil
+}
+
 @(require_results)
 parse_source_to_ast :: proc(
 	src: string,
@@ -1580,7 +1620,6 @@ parse_source_to_ast :: proc(
 	telemetry: ^Telemetry_Sink = nil,
 	allocator := context.allocator,
 ) -> (pa: Parsed_Ast, err: mem.Allocator_Error) {
-	_ = source_name
 	pa.src = src
 	ast_pool_init(&pa.pool, allocator) or_return
 	defer if err != nil {
@@ -1588,14 +1627,17 @@ parse_source_to_ast :: proc(
 	}
 	interner_init(&pa.interner, allocator) or_return
 
+	lex_diag_start := len(diags.items) if diags != nil else 0
 	tokens := lex_all(src, allocator, diags, telemetry, &pa.line_starts) or_return
 	defer delete(tokens)
+	diag_attach_file(diags, lex_diag_start, source_name) or_return
 
 	scope := telemetry_span_begin(telemetry, .Parse, "parse")
 	defer telemetry_span_end(telemetry, scope)
 
 	p := Parser{
 		src         = src,
+		source_name = source_name,
 		tokens      = tokens[:],
 		line_starts = pa.line_starts[:],
 		pool        = &pa.pool,
@@ -1609,6 +1651,8 @@ parse_source_to_ast :: proc(
 		#partial switch tok.kind {
 		case .Kw_Module:
 			parse_module_decl(&p) or_return
+		case .Kw_Import:
+			parse_import_decl(&p) or_return
 		case .Kw_Schema:
 			parse_schema_decl(&p) or_return
 		case .Kw_Source:
@@ -1623,7 +1667,7 @@ parse_source_to_ast :: proc(
 			parse_query_decl(&p) or_return
 		case:
 			_ = advance(&p)
-			report_parse_error(&p, tok.span, .E1002, "expected top-level declaration ('module', 'schema', 'source', 'derived', 'table', 'rule', 'query')") or_return
+			report_parse_error(&p, tok.span, .E1002, "expected top-level declaration ('module', 'import', 'schema', 'source', 'derived', 'table', 'rule', 'query')") or_return
 			sync_to_top_level(&p)
 		}
 	}

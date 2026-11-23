@@ -314,3 +314,77 @@ append_clone_temp :: proc(b: []u8) -> []u8 {
 	copy(out, b)
 	return out
 }
+
+@(test)
+test_vm_pure_builtin_opcodes_and_string_scoping :: proc(t: ^testing.T) {
+	rb_int, sess_int: forseti.String_Interner
+	testing.expect_value(t, forseti.interner_init(&rb_int), nil)
+	defer forseti.interner_destroy(&rb_int)
+	testing.expect_value(t, forseti.interner_init(&sess_int), nil)
+	defer forseti.interner_destroy(&sess_int)
+
+	hello_id, _ := forseti.intern(&rb_int, "HeLLo World")
+	pre_id, _ := forseti.intern(&rb_int, "hello")
+	sub_id, _ := forseti.intern(&rb_int, "lo w")
+
+	// 1. Str_Lower + Str_Starts_With + Str_Contains
+	prog_str := forseti.Bytecode_Program{
+		consts = {hello_id, pre_id, sub_id},
+		code = {
+			{op = .Load_Const, dst = 0, rhs = 0},
+			{op = .Str_Lower, dst = 1, lhs = 0},
+			{op = .Load_Const, dst = 2, rhs = 1},
+			{op = .Str_Starts_With, dst = 3, lhs = 1, rhs = 2},
+			{op = .Load_Const, dst = 4, rhs = 2},
+			{op = .Str_Contains, dst = 5, lhs = 1, rhs = 4},
+			{op = .And, dst = 6, lhs = 3, rhs = 5},
+			{op = .Halt, dst = 6},
+		},
+		max_regs = 7,
+	}
+	res, err := forseti.vm_eval(&prog_str, nil, nil, nil, &rb_int, nil, &sess_int)
+	testing.expect_value(t, err, forseti.Vm_Error.None)
+	testing.expect_value(t, res, forseti.Value(true))
+
+	// 2. Str_Upper + Str_Len
+	prog_len := forseti.Bytecode_Program{
+		consts = {hello_id},
+		code = {
+			{op = .Load_Const, dst = 0, rhs = 0},
+			{op = .Str_Upper, dst = 1, lhs = 0},
+			{op = .Str_Len, dst = 2, lhs = 1},
+			{op = .Halt, dst = 2},
+		},
+		max_regs = 3,
+	}
+	res_len, err_len := forseti.vm_eval(&prog_len, nil, nil, nil, &rb_int, nil, &sess_int)
+	testing.expect_value(t, err_len, forseti.Vm_Error.None)
+	testing.expect_value(t, res_len, forseti.Value(i64(11)))
+
+	// 3. Math_Abs + Math_Min + Math_Max
+	prog_math := forseti.Bytecode_Program{
+		consts = {i64(-15), i64(20), i64(8)},
+		code = {
+			{op = .Load_Const, dst = 0, rhs = 0},
+			{op = .Math_Abs, dst = 1, lhs = 0},
+			{op = .Load_Const, dst = 2, rhs = 1},
+			{op = .Math_Min, dst = 3, lhs = 1, rhs = 2},
+			{op = .Load_Const, dst = 4, rhs = 2},
+			{op = .Math_Max, dst = 5, lhs = 3, rhs = 4},
+			{op = .Halt, dst = 5},
+		},
+		max_regs = 6,
+	}
+	res_math, err_math := forseti.vm_eval(&prog_math, nil, nil, nil, &rb_int, nil, &sess_int)
+	testing.expect_value(t, err_math, forseti.Vm_Error.None)
+	testing.expect_value(t, res_math, forseti.Value(i64(15)))
+
+	// Repeated evaluations of already-seen lowercase value cause zero extra interner entries.
+	before_len := forseti.interner_len(&sess_int)
+	for _ in 0 ..< 50 {
+		r2, e2 := forseti.vm_eval(&prog_str, nil, nil, nil, &rb_int, nil, &sess_int)
+		testing.expect_value(t, e2, forseti.Vm_Error.None)
+		testing.expect_value(t, r2, forseti.Value(true))
+	}
+	testing.expect_value(t, forseti.interner_len(&sess_int), before_len)
+}

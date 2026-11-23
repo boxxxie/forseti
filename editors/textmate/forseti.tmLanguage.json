@@ -61,7 +61,7 @@
         },
         {
           "name": "keyword.declaration.forseti",
-          "match": "\\b(module|version|schema|source|derived|table|rule|query|enum)\\b"
+          "match": "\\b(module|import|version|schema|source|derived|table|rule|query|enum)\\b"
         },
         {
           "name": "keyword.control.forseti",

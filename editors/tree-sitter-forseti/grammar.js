@@ -19,6 +19,7 @@ module.exports = grammar({
     ),
 
     _declaration: ($) => choice(
+      $.import_decl,
       $.schema_decl,
       $.binding_decl,
       $.table_decl,
@@ -27,6 +28,7 @@ module.exports = grammar({
     ),
 
     module_decl: ($) => seq("module", $.identifier, "version", $.string_literal),
+    import_decl: ($) => seq("import", $.string_literal),
 
     schema_decl: ($) => seq(
       "schema",
