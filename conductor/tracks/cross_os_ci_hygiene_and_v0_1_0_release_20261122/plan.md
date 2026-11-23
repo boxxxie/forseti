@@ -36,7 +36,7 @@
 - [x] Task: Author `CHANGELOG.md` and reconcile `v0.1.0` benchmark/version documentation
     - [x] Write Keep-a-Changelog / SemVer `CHANGELOG.md` summarizing Tracks 1–11 and Cross-OS CI support
     - [x] Verify `benchmarks/history.hugidb` (`hugi history`, `hugi inspect`) matches `docs/benchmarks.md` and add/update version badge in `README.md`
-- [~] Task: Run full pre-release verification gate and tag `v0.1.0` (only upon explicit user approval)
+- [x] Task: Run full pre-release verification gate and tag `v0.1.0` (only upon explicit user approval)
     - [x] Execute `odin check`, leak-checked `tests` and `specs` / `specs_actors`, ASan check, `hugi run --test`, and `odin doc forseti`
-    - [ ] Prepare annotated `v0.1.0` tag / GitHub Release notes and obtain explicit user authorization before pushing `master` or `v0.1.0`
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: v0.1.0 Release Prep' (Protocol in workflow.md)
+    - [x] Prepare annotated `v0.1.0` tag / GitHub Release notes and obtain explicit user authorization before pushing `master` or `v0.1.0`
+- [x] Task: Conductor - User Manual Verification 'Phase 3: v0.1.0 Release Prep' (Protocol in workflow.md)

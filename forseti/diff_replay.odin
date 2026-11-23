@@ -62,7 +62,7 @@ _collect_derived_signatures :: proc(
 			continue
 		}
 		out[summary] = Diff_Fact_Change{
-			binding_name = strings.clone(bname, alloc),
+			binding_name = bname,
 			summary      = summary,
 		}
 	}
@@ -130,12 +130,8 @@ session_diff_replay :: proc(
 		return {}, f_err
 	}
 
-	sig_arena: vmem.Arena
-	if s_a_err := vmem.arena_init_growing(&sig_arena); s_a_err != nil {
-		return {}, s_a_err
-	}
-	defer vmem.arena_destroy(&sig_arena)
-	sig_alloc := vmem.arena_allocator(&sig_arena)
+	vmem.arena_free_all(&syncer.scratch_arena)
+	sig_alloc := vmem.arena_allocator(&syncer.scratch_arena)
 
 	base_sigs := _collect_derived_signatures(baseline_sess, sig_alloc)
 	cand_sigs := _collect_derived_signatures(cand_sess, sig_alloc)
@@ -175,7 +171,6 @@ session_diff_replay :: proc(
 		parent_moments_after  = moments_after,
 		allocator             = allocator,
 	}
-	_ = fmt.tprintf
 	return rep, nil
 }
 

@@ -218,9 +218,9 @@ _fold_fp_into_frame :: #force_inline proc(parent: ^_Fp_Frame, child_fp: u64) {
 _cursor_content_fingerprint :: proc(
 	root_cur: xitdb.Read_Cursor,
 	scratch: mem.Allocator,
+	frames: ^[dynamic]_Fp_Frame,
 ) -> (fp: u64, err: Store_Error) {
-	frames := make([dynamic]_Fp_Frame, 0, 8, scratch)
-	defer delete(frames)
+	clear(frames)
 
 	stack_buf: [258]u8 = ---
 	key_buf: [256]u8 = ---
@@ -284,30 +284,30 @@ _cursor_content_fingerprint :: proc(
 	if !root_is_container {
 		return root_leaf, nil
 	}
-	if _, a_err := append(&frames, root_frame); a_err != nil {
+	if _, a_err := append(frames, root_frame); a_err != nil {
 		return 0, a_err
 	}
 
-	for len(frames) > 0 {
-		top_idx := len(frames) - 1
-		m, n_err := xitdb.cursor_iterator_next(&frames[top_idx].it)
+	for len(frames^) > 0 {
+		top_idx := len(frames^) - 1
+		m, n_err := xitdb.cursor_iterator_next(&frames^[top_idx].it)
 		if n_err != nil {
 			return 0, xitdb_to_store_err(n_err)
 		}
 		entry, ok := m.?
 		if !ok {
-			done := frames[top_idx]
-			pop(&frames)
+			done := frames^[top_idx]
+			pop(frames)
 			res := _mix64(done.acc1 ~ done.acc2 ~ done.count) if done.is_map else done.acc1
-			if len(frames) == 0 {
+			if len(frames^) == 0 {
 				return res, nil
 			}
-			_fold_fp_into_frame(&frames[len(frames) - 1], res)
+			_fold_fp_into_frame(&frames^[len(frames^) - 1], res)
 			continue
 		}
 
 		child_cur: xitdb.Read_Cursor
-		if !frames[top_idx].is_map {
+		if !frames^[top_idx].is_map {
 			child_cur = entry
 		} else {
 			kc, vc, kv_err := xitdb.cursor_read_kv_pair_slots(entry)
@@ -315,16 +315,16 @@ _cursor_content_fingerprint :: proc(
 				return 0, xitdb_to_store_err(kv_err)
 			}
 			kbytes := _read_cursor_key_temp(kc, key_buf[:], scratch) or_return
-			frames[top_idx].pending_kh = _hash_bytes64(0x3000000000000003, kbytes)
+			frames^[top_idx].pending_kh = _hash_bytes64(0x3000000000000003, kbytes)
 			child_cur = vc
 		}
 
-		child_leaf, child_frame, child_is_container := eval_node(child_cur, len(frames), scratch, stack_buf[:]) or_return
+		child_leaf, child_frame, child_is_container := eval_node(child_cur, len(frames^), scratch, stack_buf[:]) or_return
 		if !child_is_container {
-			_fold_fp_into_frame(&frames[top_idx], child_leaf)
+			_fold_fp_into_frame(&frames^[top_idx], child_leaf)
 			continue
 		}
-		if _, a_err := append(&frames, child_frame); a_err != nil {
+		if _, a_err := append(frames, child_frame); a_err != nil {
 			return 0, a_err
 		}
 	}
@@ -474,6 +474,7 @@ _sync_full_scan :: proc(
 	out: ^Sync_Result,
 	pending_ops: ^[dynamic]_Pending_Key_Op,
 	scratch: mem.Allocator,
+	fp_frames: ^[dynamic]_Fp_Frame,
 ) -> Store_Error {
 	need_seen := is_resync && len(wc.logical_keys) > 0
 	seen: map[string]struct{}
@@ -507,7 +508,7 @@ _sync_full_scan :: proc(
 				kbytes := _read_cursor_key_temp(kc, key_buf[:], scratch) or_return
 				out.keys_decoded += 1
 				k_str := string(kbytes)
-				fp := _cursor_content_fingerprint(vc, scratch) or_return
+				fp := _cursor_content_fingerprint(vc, scratch, fp_frames) or_return
 				vc_live := vc
 				vc_live.db = live_db
 
@@ -601,6 +602,8 @@ _delta_syncer_sync_impl :: proc(
 	vmem.arena_free_all(&s.scratch_arena)
 	defer vmem.arena_free_all(&s.scratch_arena)
 	scratch := vmem.arena_allocator(&s.scratch_arena)
+	fp_frames: [dynamic]_Fp_Frame
+	fp_frames.allocator = scratch
 
 	out^ = {}
 	vmem.arena_init_growing(&out.arena) or_return
@@ -699,7 +702,7 @@ _delta_syncer_sync_impl :: proc(
 		}
 
 		if !s.has_synced || !wc.has_prev || compacted {
-			_sync_full_scan(&wc, col_path, cur_col_cur, cur_ok, s.has_synced && wc.has_prev, bridge.db, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, cur_col_cur, cur_ok, s.has_synced && wc.has_prev, bridge.db, out, &pending_ops, scratch, &fp_frames) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_has_prev         = true,
@@ -733,7 +736,7 @@ _delta_syncer_sync_impl :: proc(
 			continue
 		}
 		if !prev_ok && cur_ok {
-			_sync_full_scan(&wc, col_path, cur_col_cur, true, false, bridge.db, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, cur_col_cur, true, false, bridge.db, out, &pending_ops, scratch, &fp_frames) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_prev_slot        = true,
@@ -744,7 +747,7 @@ _delta_syncer_sync_impl :: proc(
 			continue
 		}
 		if prev_ok && !cur_ok {
-			_sync_full_scan(&wc, col_path, {}, false, true, bridge.db, out, &pending_ops, scratch) or_return
+			_sync_full_scan(&wc, col_path, {}, false, true, bridge.db, out, &pending_ops, scratch, &fp_frames) or_return
 			if _, a_err := append(&pending_wc, _Pending_Wc_State{
 				wc                   = &wc,
 				set_prev_slot        = true,
@@ -772,7 +775,7 @@ _delta_syncer_sync_impl :: proc(
 			new_live.db = bridge.db
 			switch ch.op {
 			case .Added:
-				fp := _cursor_content_fingerprint(ch.new_value, scratch) or_return
+				fp := _cursor_content_fingerprint(ch.new_value, scratch, &fp_frames) or_return
 				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, fp = fp}); a_err != nil {
 					return a_err
 				}
@@ -783,7 +786,7 @@ _delta_syncer_sync_impl :: proc(
 				}
 				_emit_delta(out, col_path, k_str, .Removed, old_live, {}) or_return
 			case .Changed:
-				fp := _cursor_content_fingerprint(ch.new_value, scratch) or_return
+				fp := _cursor_content_fingerprint(ch.new_value, scratch, &fp_frames) or_return
 				if _, a_err := append(&pending_ops, _Pending_Key_Op{wc = &wc, key = k_str, fp = fp}); a_err != nil {
 					return a_err
 				}
