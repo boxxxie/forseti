@@ -173,12 +173,13 @@ rulebase_coordinator_receive :: proc(
 		old_ref := st.active_ref
 		st.active_ref = new_ref
 
+		kept := 0
 		for sub in st.subscribers {
 			if sub.ref == nil {
 				continue
 			}
 			rulebase_ref_acquire(new_ref)
-			_ = actor.call(ctx.sched, sub, Session_Msg(Swap_Rulebase{
+			_, call_err := actor.try_call(ctx.sched, sub, Session_Msg(Swap_Rulebase{
 				rb               = new_ref.rb,
 				rehydrate_store  = st.rehydrate_store,
 				watched_paths    = st.rehydrate_paths,
@@ -187,7 +188,14 @@ rulebase_coordinator_receive :: proc(
 				next_on_retired  = _coord_release_rb_cb,
 				next_retired_ctx = new_ref,
 			}), Session_Op_Reply)
+			if call_err == .Target_Stopped || call_err == .Stale_Generation {
+				_ = rulebase_ref_release(new_ref)
+				continue
+			}
+			st.subscribers[kept] = sub
+			kept += 1
 		}
+		resize(&st.subscribers, kept)
 
 		if old_ref != nil && rulebase_ref_release(old_ref) {
 			st.retired_freed += 1

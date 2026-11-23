@@ -187,6 +187,15 @@ parallel_diff_replay :: proc(
 		req:       _Diff_Task_Req,
 		collector: actor.PID(_Diff_Collector_Msg),
 	}
+	Worker_Handle :: ^actor.Actor(_Diff_Worker_State, Worker_Task)
+	workers := make([dynamic]Worker_Handle, 0, len(candidates), allocator)
+	defer {
+		for w_actor in workers {
+			actor.destroy(w_actor)
+		}
+		delete(workers)
+		actor.destroy(collector)
+	}
 	for cand, i in candidates {
 		w_actor, w_err := actor.spawn(sched, _Diff_Worker_State{alloc = allocator}, proc(ctx: ^actor.Context, self: ^actor.Actor(_Diff_Worker_State, Worker_Task), msg: ^Worker_Task) {
 			_ = self
@@ -218,9 +227,24 @@ parallel_diff_replay :: proc(
 			}))
 		}, allocator = allocator)
 		if w_err != nil {
-			parallel_diff_results_destroy(results)
+			if i > 0 {
+				_ = actor.call(sched, collector, _Diff_Collector_Msg(_Diff_Collect_Wait{expected = i}), bool)
+			}
+			has_any_alloc := false
+			for &r in results {
+				if r.allocator.procedure != nil {
+					has_any_alloc = true
+					break
+				}
+			}
+			if has_any_alloc {
+				parallel_diff_results_destroy(results)
+			} else {
+				delete(results, allocator)
+			}
 			return nil, w_err
 		}
+		append(&workers, w_actor)
 		actor.send(sched, w_actor, Worker_Task{
 			req = _Diff_Task_Req{
 				idx           = i,

@@ -39,6 +39,9 @@ Tenant_Runtime_Slot :: struct {
 
 Effect_Disp_Slot :: struct {
 	disp:             ^actors.Effect_Dispatcher,
+	crash_bad_org:    bool,
+	has_track_alloc:  bool,
+	track_alloc:      mem.Tracking_Allocator,
 	last_jobs:        int,
 	last_applied:     int,
 	last_failed:      int,
@@ -56,10 +59,11 @@ Actor_World :: struct {
 	snap_stores:     map[string]^forseti.Store_Bridge,
 	tenant_runtimes: map[string]^Tenant_Runtime_Slot,
 	effect_disps:    map[string]^Effect_Disp_Slot,
-	coordinators:    map[string]^actors.Rulebase_Coordinator_Handle,
-	diff_runs:       map[string][]actors.Parallel_Diff_Candidate_Result,
-	scratch_facts:   [dynamic][]actors.Actor_Fact_Input,
-	scratch_fields:  [dynamic][]actors.Actor_Field_Value,
+	coordinators:         map[string]^actors.Rulebase_Coordinator_Handle,
+	diff_runs:            map[string][]actors.Parallel_Diff_Candidate_Result,
+	scratch_facts:        [dynamic][]actors.Actor_Fact_Input,
+	scratch_fields:       [dynamic][]actors.Actor_Field_Value,
+	sched_actor_baseline: int,
 }
 
 actor_world_init :: proc(w: ^Actor_World, t: ^testing.T, num_workers := 4, loc := #caller_location) {
@@ -100,14 +104,21 @@ actor_world_destroy :: proc(w: ^Actor_World) {
 	for _, eslot in w.effect_disps {
 		actors.effect_dispatcher_destroy(eslot.disp)
 		free(eslot.disp)
-		free(eslot)
 	}
-	delete(w.effect_disps)
 	if w.sched_owned && w.sched != nil {
 		actor.scheduler_scope_end(w.sched)
 		w.sched = nil
 		w.sched_owned = false
 	}
+	for _, eslot in w.effect_disps {
+		if eslot.has_track_alloc {
+			testing.expect_value(w.t, len(eslot.track_alloc.allocation_map), 0)
+			testing.expect_value(w.t, len(eslot.track_alloc.bad_free_array), 0)
+			mem.tracking_allocator_destroy(&eslot.track_alloc)
+		}
+		free(eslot)
+	}
+	delete(w.effect_disps)
 	for _, res in w.diff_runs {
 		actors.parallel_diff_results_destroy(res)
 	}
@@ -167,11 +178,24 @@ given_actor_policy :: proc(w: ^Actor_World, label: string, src: string, loc := #
 }
 
 given_session_actor :: proc(w: ^Actor_World, actor_label: string, policy_label: string, loc := #caller_location) {
+	given_session_actor_with_mode(w, actor_label, policy_label, .Audit_Full, loc = loc)
+}
+
+given_session_actor_with_mode :: proc(
+	w: ^Actor_World,
+	actor_label: string,
+	policy_label: string,
+	provenance_mode: forseti.Provenance_Mode,
+	loc := #caller_location,
+) {
 	pol, has := &w.policies[policy_label]
 	if !testing.expectf(w.t, has && pol.rb != nil, "unknown policy %q", policy_label, loc = loc) {
 		return
 	}
-	h, err := actors.session_actor_spawn(w.sched, pol.rb)
+	cfg := actors.Session_Actor_Config{
+		session_cfg = forseti.Session_Config{provenance_mode = provenance_mode},
+	}
+	h, err := actors.session_actor_spawn(w.sched, pol.rb, cfg)
 	if !testing.expect_value(w.t, err, nil, loc = loc) {
 		return
 	}
@@ -337,6 +361,16 @@ upon_committing_session_derived_to_writer :: proc(
 	commit_label: string,
 	loc := #caller_location,
 ) {
+	upon_committing_session_derived_to_writer_expect(w, actor_label, commit_label, nil, loc = loc)
+}
+
+upon_committing_session_derived_to_writer_expect :: proc(
+	w: ^Actor_World,
+	actor_label: string,
+	commit_label: string,
+	expected_err: forseti.Store_Error,
+	loc := #caller_location,
+) {
 	sa, has_s := w.session_actors[actor_label]
 	ca, has_c := w.commit_actors[commit_label]
 	if !testing.expectf(w.t, has_s && has_c, "unknown session %q or commit actor %q", actor_label, commit_label, loc = loc) {
@@ -345,7 +379,35 @@ upon_committing_session_derived_to_writer :: proc(
 	rep := actor.call(w.sched, sa, actors.Session_Msg(actors.Commit_Derived_To_Writer{
 		writer = actor.pid(ca),
 	}), actors.Commit_Reply)
-	testing.expect_value(w.t, rep.err, nil, loc = loc)
+	testing.expect_value(w.t, rep.err, expected_err, loc = loc)
+}
+
+upon_stopping_commit_actor :: proc(w: ^Actor_World, commit_label: string, loc := #caller_location) {
+	ca, has_c := w.commit_actors[commit_label]
+	if !testing.expectf(w.t, has_c, "unknown commit actor %q", commit_label, loc = loc) {
+		return
+	}
+	actor.scheduler_wait_idle(w.sched)
+	intrinsics.atomic_store_explicit(&ca.base.status, u32(actor.Actor_Status.Stopped), .Seq_Cst)
+	actors.commit_actor_cleanup_state(&ca.state)
+}
+
+upon_stopping_session_actor :: proc(w: ^Actor_World, actor_label: string, loc := #caller_location) {
+	sa, has_s := w.session_actors[actor_label]
+	if !testing.expectf(w.t, has_s, "unknown session actor %q", actor_label, loc = loc) {
+		return
+	}
+	actor.scheduler_wait_idle(w.sched)
+	intrinsics.atomic_store_explicit(&sa.base.status, u32(actor.Actor_Status.Stopped), .Seq_Cst)
+	actors.session_actor_cleanup_state(&sa.state)
+}
+
+upon_capturing_scheduler_actor_baseline :: proc(w: ^Actor_World) {
+	w.sched_actor_baseline = len(w.sched.owned_actors)
+}
+
+then_scheduler_actor_count_matches_baseline :: proc(w: ^Actor_World, loc := #caller_location) {
+	testing.expect_value(w.t, len(w.sched.owned_actors), w.sched_actor_baseline, loc = loc)
 }
 
 upon_waiting_actor_scheduler_idle :: proc(w: ^Actor_World) {
@@ -396,6 +458,32 @@ then_session_actor_explain_contains :: proc(
 	testing.expect(w.t, rep.found, loc = loc)
 	for needle in needles {
 		testing.expectf(w.t, strings.contains(rep.text, needle), "explain text missing %q in:\n%s", needle, rep.text, loc = loc)
+	}
+}
+
+then_session_actor_explain_lacks :: proc(
+	w: ^Actor_World,
+	actor_label: string,
+	binding_name: string,
+	fields: []actors.Actor_Field_Value,
+	forbidden: []string,
+	loc := #caller_location,
+) {
+	sa, has := w.session_actors[actor_label]
+	if !testing.expectf(w.t, has, "unknown session actor %q", actor_label, loc = loc) {
+		return
+	}
+	rep := actor.call(w.sched, sa, actors.Session_Msg(actors.Explain_Fact{
+		binding_name = binding_name,
+		fields       = fields,
+	}), actors.Session_Text_Reply)
+	defer if len(rep.text) > 0 {
+		delete(rep.text)
+	}
+	testing.expect_value(w.t, rep.err, forseti.Session_Error.None, loc = loc)
+	testing.expect(w.t, rep.found, loc = loc)
+	for needle in forbidden {
+		testing.expectf(w.t, !strings.contains(rep.text, needle), "explain text unexpectedly contained %q in:\n%s", needle, rep.text, loc = loc)
 	}
 }
 
@@ -713,29 +801,41 @@ _test_enrich_effect_handler :: proc(
 	return out, true, ""
 }
 
-@(private = "file")
-_crash_bad_org_flag: bool = true
-
 given_effect_dispatcher :: proc(
 	w: ^Actor_World,
 	label: string,
 	crash_on_bad_org: bool,
+	use_distinct_track_alloc: bool = false,
 	loc := #caller_location,
 ) {
-	_crash_bad_org_flag = crash_on_bad_org
+	slot := new(Effect_Disp_Slot)
+	slot.crash_bad_org = crash_on_bad_org
+	disp_alloc := context.allocator
+	if use_distinct_track_alloc {
+		mem.tracking_allocator_init(&slot.track_alloc, context.allocator)
+		slot.has_track_alloc = true
+		disp_alloc = mem.tracking_allocator(&slot.track_alloc)
+	}
 	disp := new(actors.Effect_Dispatcher)
-	err := actors.effect_dispatcher_init(disp, w.sched)
+	err := actors.effect_dispatcher_init(disp, w.sched, disp_alloc)
 	if !testing.expect_value(w.t, err, nil, loc = loc) {
 		free(disp)
+		if slot.has_track_alloc {
+			mem.tracking_allocator_destroy(&slot.track_alloc)
+		}
+		free(slot)
 		return
 	}
-	r_err := actors.effect_dispatcher_register(disp, "enrich", _test_enrich_effect_handler, &_crash_bad_org_flag)
+	r_err := actors.effect_dispatcher_register(disp, "enrich", _test_enrich_effect_handler, &slot.crash_bad_org)
 	if !testing.expect_value(w.t, r_err, nil, loc = loc) {
 		actors.effect_dispatcher_destroy(disp)
 		free(disp)
+		if slot.has_track_alloc {
+			mem.tracking_allocator_destroy(&slot.track_alloc)
+		}
+		free(slot)
 		return
 	}
-	slot := new(Effect_Disp_Slot)
 	slot.disp = disp
 	w.effect_disps[label] = slot
 }
@@ -902,4 +1002,18 @@ then_coordinator_retired_count_is :: proc(
 	}
 	rep := actor.call(w.sched, ch, actors.Coordinator_Msg(actors.Get_Coordinator_Stats{}), actors.Coordinator_Stats_Reply)
 	testing.expect_value(w.t, rep.retired_freed, expected_retired, loc = loc)
+}
+
+then_coordinator_subscriber_count_is :: proc(
+	w: ^Actor_World,
+	coord_label: string,
+	expected_subscribers: int,
+	loc := #caller_location,
+) {
+	ch, has := w.coordinators[coord_label]
+	if !testing.expectf(w.t, has, "unknown coordinator %q", coord_label, loc = loc) {
+		return
+	}
+	rep := actor.call(w.sched, ch, actors.Coordinator_Msg(actors.Get_Coordinator_Stats{}), actors.Coordinator_Stats_Reply)
+	testing.expect_value(w.t, rep.subscribers, expected_subscribers, loc = loc)
 }

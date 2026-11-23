@@ -217,7 +217,8 @@ effect_dispatcher_run_session :: proc(
 		summary.fired = app.fired
 		summary.err = app.err
 		if app.applied != nil {
-			delete(app.applied, d.alloc)
+			del_alloc := app.alloc if app.alloc.procedure != nil else d.alloc
+			delete(app.applied, del_alloc)
 		}
 	}
 	return summary

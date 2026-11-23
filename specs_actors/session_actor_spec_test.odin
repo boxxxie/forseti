@@ -150,3 +150,44 @@ rule make_canon {
 	then_session_actor_received_commit_notifications(&w, "sa", expected_count = 2, last_moment = 1)
 	then_session_actor_received_commit_notifications(&w, "sb", expected_count = 2, last_moment = 1)
 }
+
+@(test)
+spec_session_actor_honors_fast_mode_and_stopped_writer_commit :: proc(t: ^testing.T) {
+	w: Actor_World
+	actor_world_init(&w, t, num_workers = 2)
+	defer actor_world_destroy(&w)
+
+	policy := `module fast_commit version "1.0"
+schema RawOrg { org_id: string, employees: i64 }
+schema CanonOrg { org_id: string, tier: string }
+
+source Raw : RawOrg at .orgs.raw[?id]
+derived Canon : CanonOrg at .orgs.canon[?id]
+
+rule make_canon {
+  when {
+    Raw(org_id: ?oid, employees: ?emp)
+    where ?emp >= 100
+  }
+  then { assert Canon(org_id: ?oid, tier: "enterprise") }
+}
+
+query all_canon() {
+  Canon(org_id: ?oid, tier: ?tier)
+}`
+
+	given_actor_policy(&w, "p_fast", policy)
+	given_session_actor_with_mode(&w, "s_fast", "p_fast", .Fast)
+	given_commit_actor(&w, "stopped_writer")
+
+	upon_sending_fact(&w, "s_fast", "Raw", "org:1", {"org:1", i64(250)})
+	upon_firing_session_actor(&w, "s_fast")
+
+	// .Fast mode evaluates rules without recording .Audit_Full explain lineage
+	then_session_actor_query_returns_count(&w, "s_fast", "all_canon", {}, 1)
+	then_session_actor_explain_lacks(&w, "s_fast", "Canon", {"org:1"}, {"via rule=", "make_canon"})
+
+	// Stopping the writer causes Commit_Derived_To_Writer to fail cleanly without leaking the batch
+	upon_stopping_commit_actor(&w, "stopped_writer")
+	upon_committing_session_derived_to_writer_expect(&w, "s_fast", "stopped_writer", .Invalid_Config)
+}

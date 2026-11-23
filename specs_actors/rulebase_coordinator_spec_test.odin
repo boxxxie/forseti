@@ -112,3 +112,59 @@ query ent_orgs() {
 	then_session_actor_query_returns_count(&w, "s_a", "ent_orgs", {}, 1)
 	then_session_actor_query_returns_count(&w, "s_b", "ent_orgs", {}, 1)
 }
+
+@(test)
+spec_rulebase_coordinator_prunes_stopped_and_swaps_uninitialized_sessions :: proc(t: ^testing.T) {
+	w: Actor_World
+	actor_world_init(&w, t, num_workers = 2)
+	defer actor_world_destroy(&w)
+
+	v1_policy := `module reload_prune version "1.0"
+schema RawOrg { org_id: string, employees: i64 }
+schema CanonOrg { org_id: string, tier: string }
+
+source Raw : RawOrg at .orgs.raw[?id]
+derived Canon : CanonOrg at .orgs.canon[?id]
+
+rule classify {
+  when { Raw(org_id: ?oid, employees: ?emp); where ?emp >= 100 }
+  then { assert Canon(org_id: ?oid, tier: "enterprise") }
+}
+
+query ent_orgs() {
+  Canon(org_id: ?oid, tier: "enterprise")
+}`
+
+	v2_policy := `module reload_prune version "2.0"
+schema RawOrg { org_id: string, employees: i64 }
+schema CanonOrg { org_id: string, tier: string }
+
+source Raw : RawOrg at .orgs.raw[?id]
+derived Canon : CanonOrg at .orgs.canon[?id]
+
+rule classify {
+  when { Raw(org_id: ?oid, employees: ?emp); where ?emp >= 300 }
+  then { assert Canon(org_id: ?oid, tier: "enterprise") }
+}
+
+query ent_orgs() {
+  Canon(org_id: ?oid, tier: "enterprise")
+}`
+
+	given_frozen_snapshot_store(&w, "rehyd_db", {
+		{org_id = "org:1", employees = 150},
+		{org_id = "org:2", employees = 400},
+	})
+	given_rulebase_coordinator(&w, "coord", v1_policy, "rehyd_db", {".orgs.raw"})
+	given_coordinated_session_actor(&w, "coord", "s_stopped")
+	given_coordinated_session_actor(&w, "coord", "s_idle")
+
+	// Stop s_stopped before reload; leave s_idle uninitialized (no messages sent yet)
+	upon_stopping_session_actor(&w, "s_stopped")
+
+	upon_reloading_coordinator_policy(&w, "coord", v2_policy, expect_ok = true)
+	then_coordinator_version_is(&w, "coord", 2)
+	then_coordinator_subscriber_count_is(&w, "coord", 1)
+	then_coordinator_retired_count_is(&w, "coord", 1)
+	then_session_actor_query_returns_count(&w, "s_idle", "ent_orgs", {}, 1)
+}

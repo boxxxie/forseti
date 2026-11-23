@@ -202,6 +202,7 @@ Session_Apply_Reply :: struct {
 	applied: []forseti.Fact_Id,
 	fired:   u64,
 	err:     forseti.Session_Error,
+	alloc:   mem.Allocator,
 }
 
 Session_Stats_Reply :: struct {
@@ -233,6 +234,8 @@ Session_Actor_State :: struct {
 	tel_inited:           bool,
 	temp_arena:           vmem.Arena,
 	temp_inited:          bool,
+	saved_temp_alloc:     mem.Allocator,
+	has_saved_temp:       bool,
 	rehydrate_store:      ^forseti.Store_Bridge,
 	rehydrate_paths:      []string,
 	pre_fire_hook:        proc(state: ^Session_Actor_State),
@@ -568,7 +571,12 @@ _Spsc_Drain_Ctx :: struct {
 
 @(private)
 _session_actor_fault_cleanup :: proc(arg: rawptr) {
-	session_actor_cleanup_state((^Session_Actor_State)(arg))
+	st := (^Session_Actor_State)(arg)
+	if st != nil && st.has_saved_temp {
+		context.temp_allocator = st.saved_temp_alloc
+		st.has_saved_temp = false
+	}
+	session_actor_cleanup_state(st)
 }
 
 session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, msg: ^Session_Msg) {
@@ -579,6 +587,8 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 		}
 	}
 	prev_temp := context.temp_allocator
+	state.saved_temp_alloc = prev_temp
+	state.has_saved_temp = true
 	if state.temp_inited {
 		context.temp_allocator = vmem.arena_allocator(&state.temp_arena)
 	}
@@ -587,35 +597,40 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 			vmem.arena_free_all(&state.temp_arena)
 		}
 		context.temp_allocator = prev_temp
+		state.has_saved_temp = false
 	}
 	actor.defer_on_fault(_session_actor_fault_cleanup, rawptr(state))
-	if init_err := _session_actor_ensure_init(state); init_err != .None {
-		switch m in msg^ {
-		case Insert_Fact, Retract_Fact, Swap_Rulebase:
-			actor.reply(ctx, Session_Op_Reply{err = init_err})
-		case Insert_Batch, Drain_SPSC:
-			actor.reply(ctx, Session_Batch_Reply{err = init_err})
-		case Fire_Session:
-			actor.reply(ctx, Session_Fire_Reply{err = init_err})
-		case Sync_And_Fire:
-			actor.reply(ctx, Session_Sync_Reply{err = .Invalid_Config})
-		case Run_Query:
-			actor.reply(ctx, Session_Query_Reply{err = init_err})
-		case Explain_Fact:
-			actor.reply(ctx, Session_Text_Reply{err = init_err})
-		case Impact_Rule:
-			actor.reply(ctx, Session_Impact_Reply{err = init_err})
-		case Prepare_Effects:
-			actor.reply(ctx, Session_Prepared_Effects_Reply{err = init_err})
-		case Apply_Effects, Apply_Actor_Effects:
-			actor.reply(ctx, Session_Apply_Reply{err = init_err})
-		case Commit_Derived_To_Writer:
-			actor.reply(ctx, Commit_Reply{err = .Invalid_Config})
-		case Get_Session_Stats:
-			actor.reply(ctx, Session_Stats_Reply{generation = actor.current_generation()})
-		case Commit_Notification:
+	_, is_swap := msg^.(Swap_Rulebase)
+	_, is_note := msg^.(Commit_Notification)
+	if !is_swap && !is_note {
+		if init_err := _session_actor_ensure_init(state); init_err != .None {
+			switch m in msg^ {
+			case Insert_Fact, Retract_Fact, Swap_Rulebase:
+				actor.reply(ctx, Session_Op_Reply{err = init_err})
+			case Insert_Batch, Drain_SPSC:
+				actor.reply(ctx, Session_Batch_Reply{err = init_err})
+			case Fire_Session:
+				actor.reply(ctx, Session_Fire_Reply{err = init_err})
+			case Sync_And_Fire:
+				actor.reply(ctx, Session_Sync_Reply{err = .Invalid_Config})
+			case Run_Query:
+				actor.reply(ctx, Session_Query_Reply{err = init_err})
+			case Explain_Fact:
+				actor.reply(ctx, Session_Text_Reply{err = init_err})
+			case Impact_Rule:
+				actor.reply(ctx, Session_Impact_Reply{err = init_err})
+			case Prepare_Effects:
+				actor.reply(ctx, Session_Prepared_Effects_Reply{err = init_err})
+			case Apply_Effects, Apply_Actor_Effects:
+				actor.reply(ctx, Session_Apply_Reply{err = init_err})
+			case Commit_Derived_To_Writer:
+				actor.reply(ctx, Commit_Reply{err = .Invalid_Config})
+			case Get_Session_Stats:
+				actor.reply(ctx, Session_Stats_Reply{generation = actor.current_generation()})
+			case Commit_Notification:
+			}
+			return
 		}
-		return
 	}
 
 	switch &m in msg^ {
@@ -732,7 +747,7 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 			fired, err = forseti.session_fire(state.sess)
 			state.fired_total += fired
 		}
-		actor.reply(ctx, Session_Apply_Reply{applied = applied, fired = fired, err = err})
+		actor.reply(ctx, Session_Apply_Reply{applied = applied, fired = fired, err = err, alloc = state.alloc})
 
 	case Apply_Actor_Effects:
 		alloc := state.alloc
@@ -754,6 +769,7 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 			res_buf[ri].job_id = ar.job_id
 			if len(ar.facts) > 0 {
 				rf_slice := make([]forseti.Effect_Result_Fact, len(ar.facts), alloc)
+				res_buf[ri].facts = rf_slice
 				for af, fi in ar.facts {
 					vals, v_err := _actor_fields_to_values(state.sess, af.fields, alloc)
 					if v_err != .None {
@@ -767,7 +783,6 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 						unconditional = af.unconditional,
 					}
 				}
-				res_buf[ri].facts = rf_slice
 			}
 		}
 		applied, err := forseti.session_apply_effects(state.sess, res_buf, alloc)
@@ -776,7 +791,7 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 			fired, err = forseti.session_fire(state.sess)
 			state.fired_total += fired
 		}
-		actor.reply(ctx, Session_Apply_Reply{applied = applied, fired = fired, err = err})
+		actor.reply(ctx, Session_Apply_Reply{applied = applied, fired = fired, err = err, alloc = alloc})
 
 	case Swap_Rulebase:
 		if m.rb == nil {
@@ -787,10 +802,13 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 		old_cb := m.on_retired if m.on_retired != nil else state.on_retired_rb
 		old_ctx := m.retired_ctx if m.on_retired != nil else state.retired_rb_ctx
 
-		// Clear before cleanup so cleanup doesn't double-release; release after session_destroy below.
+		// Clear before cleanup so cleanup doesn't double-release; release immediately after session_destroy.
 		state.on_retired_rb = nil
 		state.retired_rb_ctx = nil
 		session_actor_cleanup_state(state)
+		if old_cb != nil && old_rb != nil {
+			old_cb(old_rb, old_ctx)
+		}
 
 		state.rb = m.rb
 		state.on_retired_rb = m.next_on_retired
@@ -802,9 +820,6 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 			state.rehydrate_paths = m.watched_paths
 		}
 		init_err := _session_actor_ensure_init(state)
-		if old_cb != nil && old_rb != nil {
-			old_cb(old_rb, old_ctx)
-		}
 		actor.reply(ctx, Session_Op_Reply{err = init_err})
 
 	case Drain_SPSC:
@@ -823,12 +838,21 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 		actor.reply(ctx, Session_Batch_Reply{inserted = dctx.inserted, fired = fired, err = dctx.err})
 
 	case Commit_Derived_To_Writer:
+		if m.writer.ref == nil {
+			actor.reply(ctx, Commit_Reply{err = .Invalid_Config})
+			return
+		}
 		batch, b_err := _extract_commit_batch(state, state.alloc)
 		if b_err != nil {
 			actor.reply(ctx, Commit_Reply{err = b_err})
 			return
 		}
-		rep := actor.call(ctx.sched, m.writer, Commit_Msg(batch), Commit_Reply)
+		rep, call_err := actor.try_call(ctx.sched, m.writer, Commit_Msg(batch), Commit_Reply)
+		if call_err != .None {
+			commit_batch_destroy(&batch)
+			actor.reply(ctx, Commit_Reply{err = .Invalid_Config})
+			return
+		}
 		actor.reply(ctx, rep)
 
 	case Get_Session_Stats:
@@ -928,9 +952,6 @@ session_actor_make_init_state :: proc(
 	alloc := context.allocator,
 ) -> Session_Actor_State {
 	scfg := cfg.session_cfg
-	if scfg.max_activations == 0 && len(scfg.initial_phases) == 0 {
-		scfg.provenance_mode = .Audit_Full
-	}
 	seq := intrinsics.atomic_add_explicit(&_global_session_actor_seq, 1, .Relaxed) + 1
 	return Session_Actor_State{
 		alloc              = alloc,
