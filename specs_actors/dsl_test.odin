@@ -760,6 +760,7 @@ upon_sweeping_idle_tenants :: proc(w: ^Actor_World, rt_label: string, expected_e
 	if !testing.expectf(w.t, has, "unknown tenant runtime %q", rt_label, loc = loc) {
 		return
 	}
+	actor.scheduler_wait_idle(w.sched)
 	evicted := actors.tenant_runtime_sweep_idle(slot.rt)
 	testing.expect_value(w.t, evicted, expected_evicted, loc = loc)
 }

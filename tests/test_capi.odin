@@ -32,7 +32,9 @@ test_capi_smoke :: proc(t: ^testing.T) {
 	lib_path, _ := filepath.join({tmp_dir, lib_name}, context.temp_allocator)
 	exe_path, _ := filepath.join({tmp_dir, exe_name}, context.temp_allocator)
 
-	build_lib_cmd := []string{
+	build_lib_cmd := make([dynamic]string, 0, 12, context.temp_allocator)
+	append(
+		&build_lib_cmd,
 		"odin",
 		"build",
 		"capi",
@@ -42,9 +44,12 @@ test_capi_smoke :: proc(t: ^testing.T) {
 		"-vet-tabs",
 		"-strict-style",
 		"-warnings-as-errors",
-		fmt.tprintf("-out:%s", lib_path),
+	)
+	when ODIN_OS == .Windows {
+		append(&build_lib_cmd, "-linker:lld")
 	}
-	bs, bout, berr, bex := os.process_exec(os.Process_Desc{command = build_lib_cmd}, context.temp_allocator)
+	append(&build_lib_cmd, fmt.tprintf("-out:%s", lib_path))
+	bs, bout, berr, bex := os.process_exec(os.Process_Desc{command = build_lib_cmd[:]}, context.temp_allocator)
 	testing.expectf(
 		t,
 		bex == nil && bs.exit_code == 0,
