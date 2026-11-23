@@ -1,6 +1,8 @@
 package forseti_specs
 
 import "core:encoding/json"
+import "core:fmt"
+import "core:os"
 import "core:path/filepath"
 import "core:strings"
 import vmem "core:mem/virtual"
@@ -69,6 +71,7 @@ World :: struct {
 	cli_dir:         string,
 	cli_bin:         string,
 	cli_runs:        map[string]Cli_Run,
+	lsp_clients:     map[string]^Lsp_Client_Handle,
 	decision_runs:   map[string]Decision_Run,
 	stores:          map[string]^Store_Handle,
 	forks:           map[string]^forseti.Fork_Handle,
@@ -102,6 +105,7 @@ world_init :: proc(w: ^World, t: ^testing.T, loc := #caller_location) {
 
 	w.policies = make(map[string]Policy_Slot, 8)
 	w.cli_runs = make(map[string]Cli_Run, 8)
+	w.lsp_clients = make(map[string]^Lsp_Client_Handle, 4)
 	w.decision_runs = make(map[string]Decision_Run, 8)
 	w.stores = make(map[string]^Store_Handle, 8)
 	w.forks = make(map[string]^forseti.Fork_Handle, 8)
@@ -187,6 +191,10 @@ world_destroy :: proc(w: ^World) {
 		delete(run.stderr)
 	}
 	delete(w.cli_runs)
+	for _, lh in w.lsp_clients {
+		driver_lsp_destroy(lh)
+	}
+	delete(w.lsp_clients)
 	forseti.telemetry_destroy(&w.telemetry)
 	vmem.arena_destroy(&w.arena)
 	w^ = {}
@@ -689,6 +697,335 @@ then_workspace_file_equals :: proc(
 		return
 	}
 	testing.expect_value(w.t, raw, expected, loc = loc)
+}
+
+@(private = "file")
+_lsp_send_req :: proc(h: ^Lsp_Client_Handle, method: string, params_json: string) -> (id: i64, ok: bool) {
+	id = h.next_id
+	h.next_id += 1
+	msg := fmt.tprintf(`{{"jsonrpc":"2.0","id":%d,"method":%q,"params":%s}}`, id, method, params_json)
+	return id, driver_lsp_write_frame(h.stdin_w, msg)
+}
+
+@(private = "file")
+_lsp_send_notif :: proc(h: ^Lsp_Client_Handle, method: string, params_json: string) -> bool {
+	msg := fmt.tprintf(`{{"jsonrpc":"2.0","method":%q,"params":%s}}`, method, params_json)
+	return driver_lsp_write_frame(h.stdin_w, msg)
+}
+
+@(private = "file")
+_lsp_write_json_escaped :: proc(b: ^strings.Builder, s: string) {
+	strings.write_byte(b, '"')
+	for i := 0; i < len(s); i += 1 {
+		ch := s[i]
+		switch ch {
+		case '"':  strings.write_string(b, `\"`)
+		case '\\': strings.write_string(b, `\\`)
+		case '\n': strings.write_string(b, `\n`)
+		case '\r': strings.write_string(b, `\r`)
+		case '\t': strings.write_string(b, `\t`)
+		case:
+			if ch < 0x20 {
+				fmt.sbprintf(b, "\\u%04x", ch)
+			} else {
+				strings.write_byte(b, ch)
+			}
+		}
+	}
+	strings.write_byte(b, '"')
+}
+
+@(private = "file")
+_lsp_json_str :: proc(s: string) -> string {
+	b: strings.Builder
+	strings.builder_init(&b, context.temp_allocator)
+	_lsp_write_json_escaped(&b, s)
+	return strings.to_string(b)
+}
+
+given_lsp_session :: proc(w: ^World, label: string, loc := #caller_location) {
+	if !testing.expect(w.t, len(w.cli_bin) > 0, loc = loc) {
+		return
+	}
+	h, ok := driver_lsp_start(w.cli_dir, w.cli_bin)
+	if !testing.expect(w.t, ok, loc = loc) {
+		return
+	}
+	if prev, has := w.lsp_clients[label]; has {
+		driver_lsp_destroy(prev)
+	}
+	w.lsp_clients[label] = h
+
+	init_id, w_ok := _lsp_send_req(h, "initialize", `{"processId":null,"rootUri":null,"capabilities":{}}`)
+	if !testing.expect(w.t, w_ok, loc = loc) {
+		return
+	}
+	raw, val, r_ok := driver_lsp_read_until_id(h, init_id)
+	testing.expect(w.t, r_ok, loc = loc)
+	if r_ok {
+		json.destroy_value(val)
+		delete(raw)
+	}
+	testing.expect(w.t, _lsp_send_notif(h, "initialized", `{}`), loc = loc)
+}
+
+upon_lsp_opening_document :: proc(w: ^World, label, uri, text: string, version := 1, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(`{{"textDocument":{{"uri":%s,"languageId":"forseti","version":%d,"text":%s}}}}`, _lsp_json_str(uri), version, _lsp_json_str(text))
+	testing.expect(w.t, _lsp_send_notif(h, "textDocument/didOpen", params), loc = loc)
+	testing.expect(w.t, driver_lsp_read_publish_diags(h, uri), loc = loc)
+}
+
+upon_lsp_changing_document :: proc(w: ^World, label, uri, text: string, version: int, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(`{{"textDocument":{{"uri":%s,"version":%d}},"contentChanges":[{{"text":%s}}]}}`, _lsp_json_str(uri), version, _lsp_json_str(text))
+	testing.expect(w.t, _lsp_send_notif(h, "textDocument/didChange", params), loc = loc)
+	testing.expect(w.t, driver_lsp_read_publish_diags(h, uri), loc = loc)
+}
+
+upon_lsp_changing_document_range :: proc(
+	w: ^World,
+	label, uri: string,
+	start_line, start_char, end_line, end_char: u32,
+	new_text: string,
+	version: int,
+	loc := #caller_location,
+) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(
+		`{{"textDocument":{{"uri":%s,"version":%d}},"contentChanges":[{{"range":{{"start":{{"line":%d,"character":%d}},"end":{{"line":%d,"character":%d}}}},"text":%s}}]}}`,
+		_lsp_json_str(uri), version, start_line, start_char, end_line, end_char, _lsp_json_str(new_text),
+	)
+	testing.expect(w.t, _lsp_send_notif(h, "textDocument/didChange", params), loc = loc)
+	testing.expect(w.t, driver_lsp_read_publish_diags(h, uri), loc = loc)
+}
+
+upon_lsp_closing_document :: proc(w: ^World, label, uri: string, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(`{{"textDocument":{{"uri":%s}}}}`, _lsp_json_str(uri))
+	testing.expect(w.t, _lsp_send_notif(h, "textDocument/didClose", params), loc = loc)
+	testing.expect(w.t, driver_lsp_read_publish_diags(h, uri), loc = loc)
+}
+
+upon_lsp_shutting_down :: proc(w: ^World, label: string, expected_exit := 0, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	sid, w_ok := _lsp_send_req(h, "shutdown", `null`)
+	testing.expect(w.t, w_ok, loc = loc)
+	raw, val, r_ok := driver_lsp_read_until_id(h, sid)
+	testing.expect(w.t, r_ok, loc = loc)
+	if r_ok {
+		json.destroy_value(val)
+		delete(raw)
+	}
+	testing.expect(w.t, _lsp_send_notif(h, "exit", `null`), loc = loc)
+	if h.stdin_w != nil {
+		_ = os.close(h.stdin_w)
+		h.stdin_w = nil
+	}
+	st, w_err := os.process_wait(h.proc_handle)
+	h.running = false
+	testing.expect_value(w.t, w_err, nil, loc = loc)
+	testing.expect_value(w.t, st.exit_code, expected_exit, loc = loc)
+}
+
+then_lsp_diagnostics_count_is :: proc(w: ^World, label, uri: string, expected_count: int, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	list := h.diags_by_uri[uri]
+	testing.expect_value(w.t, len(list), expected_count, loc = loc)
+}
+
+then_lsp_has_diagnostic :: proc(
+	w: ^World,
+	label, uri, code: string,
+	start_line, start_char, end_line, end_char: u32,
+	loc := #caller_location,
+) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	list := h.diags_by_uri[uri]
+	for d in list {
+		if d.code == code && d.start_line == start_line && d.start_char == start_char && d.end_line == end_line && d.end_char == end_char {
+			return
+		}
+	}
+	testing.expectf(w.t, false, "diagnostic %s at (%d:%d..%d:%d) not found in %v", code, start_line, start_char, end_line, end_char, list, loc = loc)
+}
+
+then_lsp_hover_contains :: proc(w: ^World, label, uri: string, line, character: u32, needles: []string, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(`{{"textDocument":{{"uri":%s}},"position":{{"line":%d,"character":%d}}}}`, _lsp_json_str(uri), line, character)
+	rid, w_ok := _lsp_send_req(h, "textDocument/hover", params)
+	if !testing.expect(w.t, w_ok, loc = loc) {
+		return
+	}
+	raw, val, r_ok := driver_lsp_read_until_id(h, rid)
+	if !testing.expect(w.t, r_ok, loc = loc) {
+		return
+	}
+	defer {
+		json.destroy_value(val)
+		delete(raw)
+	}
+	for n in needles {
+		testing.expectf(w.t, strings.contains(raw, n), "hover reply missing %q in %s", n, raw, loc = loc)
+	}
+}
+
+then_lsp_definition_is :: proc(w: ^World, label, uri: string, line, character, expected_line, expected_char: u32, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(`{{"textDocument":{{"uri":%s}},"position":{{"line":%d,"character":%d}}}}`, _lsp_json_str(uri), line, character)
+	rid, w_ok := _lsp_send_req(h, "textDocument/definition", params)
+	if !testing.expect(w.t, w_ok, loc = loc) {
+		return
+	}
+	raw, val, r_ok := driver_lsp_read_until_id(h, rid)
+	if !testing.expect(w.t, r_ok, loc = loc) {
+		return
+	}
+	defer {
+		json.destroy_value(val)
+		delete(raw)
+	}
+	obj, is_obj := val.(json.Object)
+	res_obj, is_res := obj["result"].(json.Object)
+	if !testing.expectf(w.t, is_obj && is_res, "expected location result in %s", raw, loc = loc) {
+		return
+	}
+	rng := res_obj["range"].(json.Object)
+	st := rng["start"].(json.Object)
+	testing.expect_value(w.t, st["line"].(json.Integer), i64(expected_line), loc = loc)
+	testing.expect_value(w.t, st["character"].(json.Integer), i64(expected_char), loc = loc)
+}
+
+then_lsp_document_symbols_include :: proc(w: ^World, label, uri: string, names: []string, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(`{{"textDocument":{{"uri":%s}}}}`, _lsp_json_str(uri))
+	rid, w_ok := _lsp_send_req(h, "textDocument/documentSymbol", params)
+	if !testing.expect(w.t, w_ok, loc = loc) {
+		return
+	}
+	raw, val, r_ok := driver_lsp_read_until_id(h, rid)
+	if !testing.expect(w.t, r_ok, loc = loc) {
+		return
+	}
+	defer {
+		json.destroy_value(val)
+		delete(raw)
+	}
+	for n in names {
+		testing.expectf(w.t, strings.contains(raw, n), "documentSymbol missing %q in %s", n, raw, loc = loc)
+	}
+}
+
+then_lsp_completion_includes :: proc(w: ^World, label, uri: string, line, character: u32, labels: []string, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(`{{"textDocument":{{"uri":%s}},"position":{{"line":%d,"character":%d}}}}`, _lsp_json_str(uri), line, character)
+	rid, w_ok := _lsp_send_req(h, "textDocument/completion", params)
+	if !testing.expect(w.t, w_ok, loc = loc) {
+		return
+	}
+	raw, val, r_ok := driver_lsp_read_until_id(h, rid)
+	if !testing.expect(w.t, r_ok, loc = loc) {
+		return
+	}
+	defer {
+		json.destroy_value(val)
+		delete(raw)
+	}
+	for lbl in labels {
+		testing.expectf(w.t, strings.contains(raw, lbl), "completion missing %q in %s", lbl, raw, loc = loc)
+	}
+}
+
+then_lsp_formatting_produces :: proc(w: ^World, label, uri, expected_text: string, loc := #caller_location) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(`{{"textDocument":{{"uri":%s}},"options":{{"tabSize":2,"insertSpaces":true}}}}`, _lsp_json_str(uri))
+	rid, w_ok := _lsp_send_req(h, "textDocument/formatting", params)
+	if !testing.expect(w.t, w_ok, loc = loc) {
+		return
+	}
+	raw, val, r_ok := driver_lsp_read_until_id(h, rid)
+	if !testing.expect(w.t, r_ok, loc = loc) {
+		return
+	}
+	defer {
+		json.destroy_value(val)
+		delete(raw)
+	}
+	obj := val.(json.Object)
+	arr, is_arr := obj["result"].(json.Array)
+	if !testing.expectf(w.t, is_arr && len(arr) == 1, "expected 1 formatting edit in %s", raw, loc = loc) {
+		return
+	}
+	edit_obj := arr[0].(json.Object)
+	testing.expect_value(w.t, string(edit_obj["newText"].(json.String)), expected_text, loc = loc)
+}
+
+then_lsp_code_action_fixes_to :: proc(
+	w: ^World,
+	label, uri, diag_code: string,
+	start_line, start_char, end_line, end_char: u32,
+	expected_title_substr, expected_new_text_substr: string,
+	loc := #caller_location,
+) {
+	h, ok := w.lsp_clients[label]
+	if !testing.expectf(w.t, ok, "unknown lsp session %q", label, loc = loc) {
+		return
+	}
+	params := fmt.tprintf(
+		`{{"textDocument":{{"uri":%s}},"range":{{"start":{{"line":%d,"character":%d}},"end":{{"line":%d,"character":%d}}}},"context":{{"diagnostics":[{{"code":%s,"range":{{"start":{{"line":%d,"character":%d}},"end":{{"line":%d,"character":%d}}}},"message":"diag"}}]}}}}`,
+		_lsp_json_str(uri), start_line, start_char, end_line, end_char,
+		_lsp_json_str(diag_code), start_line, start_char, end_line, end_char,
+	)
+	rid, w_ok := _lsp_send_req(h, "textDocument/codeAction", params)
+	if !testing.expect(w.t, w_ok, loc = loc) {
+		return
+	}
+	raw, val, r_ok := driver_lsp_read_until_id(h, rid)
+	if !testing.expect(w.t, r_ok, loc = loc) {
+		return
+	}
+	defer {
+		json.destroy_value(val)
+		delete(raw)
+	}
+	testing.expectf(w.t, strings.contains(raw, expected_title_substr), "codeAction missing title %q in %s", expected_title_substr, raw, loc = loc)
+	testing.expectf(w.t, strings.contains(raw, expected_new_text_substr), "codeAction missing newText %q in %s", expected_new_text_substr, raw, loc = loc)
 }
 
 then_cli_json_reports_diagnostic :: proc(

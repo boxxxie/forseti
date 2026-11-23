@@ -1,12 +1,14 @@
 package forseti_specs
 
 import "base:runtime"
+import "core:encoding/json"
 import "core:fmt"
 import "core:log"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:os"
 import "core:path/filepath"
+import "core:strconv"
 import "core:strings"
 import "core:testing"
 import "core:thread"
@@ -309,6 +311,267 @@ driver_exec_cli :: proc(working_dir, bin_path: string, args: []string) -> (run: 
 		stdout    = string(stdout),
 		stderr    = string(stderr),
 	}, ""
+}
+
+Lsp_Diag_Item :: struct {
+	code:       string,
+	severity:   i64,
+	start_line: u32,
+	start_char: u32,
+	end_line:   u32,
+	end_char:   u32,
+	message:    string,
+}
+
+Lsp_Client_Handle :: struct {
+	proc_handle: os.Process,
+	running:     bool,
+	stdin_w:     ^os.File,
+	stdout_r:    ^os.File,
+	next_id:     i64,
+	diags_by_uri: map[string][dynamic]Lsp_Diag_Item,
+	last_exit:   int,
+}
+
+driver_lsp_read_frame :: proc(f: ^os.File) -> (payload: string, ok: bool) {
+	hdr_buf: [dynamic]byte
+	hdr_buf = make([dynamic]byte, 0, 128, context.temp_allocator)
+	b: [1]byte
+	content_len := -1
+	for {
+		n, err := os.read(f, b[:])
+		if err != nil || n == 0 {
+			return "", false
+		}
+		append(&hdr_buf, b[0])
+		cur := string(hdr_buf[:])
+		if strings.has_suffix(cur, "\r\n\r\n") || strings.has_suffix(cur, "\n\n") {
+			for line in strings.split_lines(cur, context.temp_allocator) {
+				trimmed := strings.trim_space(line)
+				if len(trimmed) == 0 {
+					continue
+				}
+				lower := strings.to_lower(trimmed, context.temp_allocator)
+				if strings.has_prefix(lower, "content-length:") {
+					val_str := strings.trim_space(trimmed[len("content-length:"):])
+					if v, pok := strconv.parse_int(val_str); pok && v >= 0 {
+						content_len = v
+					}
+				}
+			}
+			break
+		}
+	}
+	if content_len < 0 {
+		return "", false
+	}
+	body := make([]byte, content_len, context.allocator)
+	got := 0
+	for got < content_len {
+		n, err := os.read(f, body[got:])
+		if err != nil || n == 0 {
+			delete(body)
+			return "", false
+		}
+		got += n
+	}
+	return string(body), true
+}
+
+driver_lsp_write_frame :: proc(f: ^os.File, payload: string) -> bool {
+	hdr := fmt.tprintf("Content-Length: %d\r\n\r\n", len(payload))
+	full := strings.concatenate({hdr, payload}, context.temp_allocator)
+	raw := transmute([]byte)full
+	written := 0
+	for written < len(raw) {
+		n, err := os.write(f, raw[written:])
+		if err != nil || n <= 0 {
+			return false
+		}
+		written += n
+	}
+	return true
+}
+
+driver_lsp_destroy_diags_for_uri :: proc(h: ^Lsp_Client_Handle, uri: string) {
+	if list, has := h.diags_by_uri[uri]; has {
+		stored_key := ""
+		for k in h.diags_by_uri {
+			if k == uri {
+				stored_key = k
+				break
+			}
+		}
+		for item in list {
+			delete(item.code)
+			delete(item.message)
+		}
+		delete(list)
+		delete_key(&h.diags_by_uri, uri)
+		delete(stored_key)
+	}
+}
+
+driver_lsp_store_publish_diags :: proc(h: ^Lsp_Client_Handle, params_obj: json.Object) {
+	uri_val, has_uri := params_obj["uri"].(json.String)
+	if !has_uri {
+		return
+	}
+	uri := string(uri_val)
+	driver_lsp_destroy_diags_for_uri(h, uri)
+	items := make([dynamic]Lsp_Diag_Item, 0, 4)
+	if arr, has_arr := params_obj["diagnostics"].(json.Array); has_arr {
+		for elem in arr {
+			dobj, is_obj := elem.(json.Object)
+			if !is_obj {
+				continue
+			}
+			item: Lsp_Diag_Item
+			if c, ok := dobj["code"].(json.String); ok {
+				item.code = strings.clone(string(c))
+			}
+			if sv, ok := dobj["severity"].(json.Integer); ok {
+				item.severity = sv
+			}
+			if msg, ok := dobj["message"].(json.String); ok {
+				item.message = strings.clone(string(msg))
+			}
+			if rng, ok := dobj["range"].(json.Object); ok {
+				if st, ok2 := rng["start"].(json.Object); ok2 {
+					if ln, ok3 := st["line"].(json.Integer); ok3 { item.start_line = u32(ln) }
+					if ch, ok3 := st["character"].(json.Integer); ok3 { item.start_char = u32(ch) }
+				}
+				if en, ok2 := rng["end"].(json.Object); ok2 {
+					if ln, ok3 := en["line"].(json.Integer); ok3 { item.end_line = u32(ln) }
+					if ch, ok3 := en["character"].(json.Integer); ok3 { item.end_char = u32(ch) }
+				}
+			}
+			append(&items, item)
+		}
+	}
+	h.diags_by_uri[strings.clone(uri)] = items
+}
+
+driver_lsp_read_until_id :: proc(h: ^Lsp_Client_Handle, target_id: i64) -> (raw_msg: string, parsed: json.Value, ok: bool) {
+	for _ in 0 ..< 64 {
+		frame, f_ok := driver_lsp_read_frame(h.stdout_r)
+		if !f_ok {
+			return "", nil, false
+		}
+		val, p_err := json.parse_string(frame, parse_integers = true)
+		if p_err != nil {
+			delete(frame)
+			return "", nil, false
+		}
+		obj, is_obj := val.(json.Object)
+		if !is_obj {
+			json.destroy_value(val)
+			delete(frame)
+			continue
+		}
+		if id_val, has_id := obj["id"].(json.Integer); has_id && id_val == target_id {
+			return frame, val, true
+		}
+		if m_val, has_m := obj["method"].(json.String); has_m && string(m_val) == "textDocument/publishDiagnostics" {
+			if p_obj, has_p := obj["params"].(json.Object); has_p {
+				driver_lsp_store_publish_diags(h, p_obj)
+			}
+		}
+		json.destroy_value(val)
+		delete(frame)
+	}
+	return "", nil, false
+}
+
+driver_lsp_read_publish_diags :: proc(h: ^Lsp_Client_Handle, target_uri: string) -> bool {
+	for _ in 0 ..< 32 {
+		frame, f_ok := driver_lsp_read_frame(h.stdout_r)
+		if !f_ok {
+			return false
+		}
+		val, p_err := json.parse_string(frame, parse_integers = true)
+		delete(frame)
+		if p_err != nil {
+			return false
+		}
+		defer json.destroy_value(val)
+		obj, is_obj := val.(json.Object)
+		if !is_obj {
+			continue
+		}
+		if m_val, has_m := obj["method"].(json.String); has_m && string(m_val) == "textDocument/publishDiagnostics" {
+			if p_obj, has_p := obj["params"].(json.Object); has_p {
+				driver_lsp_store_publish_diags(h, p_obj)
+				if u, has_u := p_obj["uri"].(json.String); has_u && string(u) == target_uri {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+driver_lsp_start :: proc(working_dir, bin_path: string) -> (h: ^Lsp_Client_Handle, ok: bool) {
+	in_r, in_w, err1 := os.pipe()
+	if err1 != nil {
+		return nil, false
+	}
+	out_r, out_w, err2 := os.pipe()
+	if err2 != nil {
+		_ = os.close(in_r)
+		_ = os.close(in_w)
+		return nil, false
+	}
+	p, p_err := os.process_start(os.Process_Desc{
+		working_dir = working_dir,
+		command     = {bin_path, "lsp"},
+		stdin       = in_r,
+		stdout      = out_w,
+		stderr      = nil,
+	})
+	_ = os.close(in_r)
+	_ = os.close(out_w)
+	if p_err != nil {
+		_ = os.close(in_w)
+		_ = os.close(out_r)
+		return nil, false
+	}
+	h = new(Lsp_Client_Handle)
+	h.proc_handle = p
+	h.running = true
+	h.stdin_w = in_w
+	h.stdout_r = out_r
+	h.next_id = 1
+	h.diags_by_uri = make(map[string][dynamic]Lsp_Diag_Item, 4)
+	return h, true
+}
+
+driver_lsp_destroy :: proc(h: ^Lsp_Client_Handle) {
+	if h == nil {
+		return
+	}
+	if h.stdin_w != nil {
+		_ = os.close(h.stdin_w)
+		h.stdin_w = nil
+	}
+	if h.stdout_r != nil {
+		_ = os.close(h.stdout_r)
+		h.stdout_r = nil
+	}
+	if h.running {
+		_ = os.process_kill(h.proc_handle)
+		_, _ = os.process_wait(h.proc_handle)
+		h.running = false
+	}
+	keys := make([dynamic]string, 0, len(h.diags_by_uri), context.temp_allocator)
+	for k in h.diags_by_uri {
+		append(&keys, k)
+	}
+	for k in keys {
+		driver_lsp_destroy_diags_for_uri(h, k)
+	}
+	delete(h.diags_by_uri)
+	free(h)
 }
 
 driver_create_standalone_store :: proc(cfg: forseti.Xitdb_Config, telemetry: ^forseti.Telemetry_Sink) -> (sh: ^Store_Handle, err: forseti.Store_Error) {

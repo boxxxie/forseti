@@ -8,6 +8,7 @@ import "core:strconv"
 import "core:strings"
 import xitdb "xitdb:."
 import "../../forseti"
+import "../../lsp"
 
 Cli_Format :: enum u8 {
 	Human,
@@ -96,6 +97,7 @@ Commands:
   check           Validate syntax, types, variable bindings, and lints
   verify-tables   Run domain-partitioning static verification across all tables
   fmt             Format .forseti policy files and align decision-table columns
+  lsp             Start JSON-RPC 2.0 Language Server on stdio
   gen             Generate standalone "contextless" Odin procedures for tables
   ast             Parse source and print deterministic S-expression AST
   ir              Compile source and print canonical Rulebase_IR summary
@@ -267,7 +269,7 @@ parse_cli_args :: proc(args: []string) -> (opts: Cli_Options, show_help: bool, o
 		i += 1
 	}
 
-	if len(opts.file_path) == 0 {
+	if len(opts.file_path) == 0 && opts.subcmd != "lsp" {
 		fmt.eprintln("error: missing <file.forseti> argument")
 		return {}, false, false
 	}
@@ -1048,6 +1050,9 @@ run_cli :: proc() -> int {
 	}
 	if opts.subcmd == "fmt" {
 		return run_cmd_fmt(&opts)
+	}
+	if opts.subcmd == "lsp" {
+		return lsp.server_run_stdio()
 	}
 
 	raw, read_err := os.read_entire_file(opts.file_path, context.allocator)
