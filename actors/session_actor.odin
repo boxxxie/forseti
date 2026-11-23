@@ -98,6 +98,16 @@ Apply_Effects :: struct {
 	auto_fire: bool,
 }
 
+Actor_Effect_Result :: struct {
+	job_id: u64,
+	facts:  []Actor_Fact_Input,
+}
+
+Apply_Actor_Effects :: struct {
+	results:   []Actor_Effect_Result,
+	auto_fire: bool,
+}
+
 Swap_Rulebase :: struct {
 	rb:              ^forseti.Rulebase,
 	rehydrate_store: ^forseti.Store_Bridge,
@@ -135,6 +145,7 @@ Session_Msg :: union {
 	Impact_Rule,
 	Prepare_Effects,
 	Apply_Effects,
+	Apply_Actor_Effects,
 	Swap_Rulebase,
 	Drain_SPSC,
 	Commit_Derived_To_Writer,
@@ -538,8 +549,14 @@ _Spsc_Drain_Ctx :: struct {
 	err:      forseti.Session_Error,
 }
 
+@(private)
+_session_actor_fault_cleanup :: proc(arg: rawptr) {
+	session_actor_cleanup_state((^Session_Actor_State)(arg))
+}
+
 session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, msg: ^Session_Msg) {
 	state := &self.state
+	actor.defer_on_fault(_session_actor_fault_cleanup, rawptr(state))
 	if init_err := _session_actor_ensure_init(state); init_err != .None {
 		switch m in msg^ {
 		case Insert_Fact, Retract_Fact, Swap_Rulebase:
@@ -558,7 +575,7 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 			actor.reply(ctx, Session_Impact_Reply{err = init_err})
 		case Prepare_Effects:
 			actor.reply(ctx, Session_Prepared_Effects_Reply{err = init_err})
-		case Apply_Effects:
+		case Apply_Effects, Apply_Actor_Effects:
 			actor.reply(ctx, Session_Apply_Reply{err = init_err})
 		case Commit_Derived_To_Writer:
 			actor.reply(ctx, Commit_Reply{err = .Invalid_Config})
@@ -678,6 +695,50 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 
 	case Apply_Effects:
 		applied, err := forseti.session_apply_effects(state.sess, m.results, state.alloc)
+		fired := u64(0)
+		if err == .None && m.auto_fire {
+			fired, err = forseti.session_fire(state.sess)
+			state.fired_total += fired
+		}
+		actor.reply(ctx, Session_Apply_Reply{applied = applied, fired = fired, err = err})
+
+	case Apply_Actor_Effects:
+		alloc := state.alloc
+		res_buf := make([]forseti.Effect_Result, len(m.results), alloc)
+		defer {
+			for r in res_buf {
+				for rf in r.facts {
+					if rf.fields != nil {
+						delete(rf.fields, alloc)
+					}
+				}
+				if r.facts != nil {
+					delete(r.facts, alloc)
+				}
+			}
+			delete(res_buf, alloc)
+		}
+		for ar, ri in m.results {
+			res_buf[ri].job_id = ar.job_id
+			if len(ar.facts) > 0 {
+				rf_slice := make([]forseti.Effect_Result_Fact, len(ar.facts), alloc)
+				for af, fi in ar.facts {
+					vals, v_err := _actor_fields_to_values(state.sess, af.fields, alloc)
+					if v_err != .None {
+						actor.reply(ctx, Session_Apply_Reply{err = v_err})
+						return
+					}
+					rf_slice[fi] = forseti.Effect_Result_Fact{
+						binding_name  = af.binding_name,
+						key           = af.key,
+						fields        = vals,
+						unconditional = af.unconditional,
+					}
+				}
+				res_buf[ri].facts = rf_slice
+			}
+		}
+		applied, err := forseti.session_apply_effects(state.sess, res_buf, alloc)
 		fired := u64(0)
 		if err == .None && m.auto_fire {
 			fired, err = forseti.session_fire(state.sess)

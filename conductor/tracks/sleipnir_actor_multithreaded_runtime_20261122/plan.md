@@ -33,13 +33,13 @@
 
 ## Phase 3: Multi-Tenant `Partitioned_Rule_Supervisor`, Sleipnir `Effect_Dispatcher` & Parallel `diff_replay`
 
-- [ ] Task: Implement `Tenant_Rule_Runtime` on Sleipnir `Partitioned_Supervisor` + `Registry(string)` (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 specs covering lazy tenant spawn, trapped worker fault recovery (`actor.try_call` + `.One_For_One` restart re-hydrating state from `xitdb`), and `sweep_idle_tenants` cleanup
-    - [ ] Implement `actors/tenant_supervisor.odin` (`Tenant_Rule_Runtime`, lifecycle hooks, per-tenant isolation)
-- [ ] Task: Implement Sleipnir `Effect_Dispatcher` (3-phase async effects) and `Parallel_Diff_Replay` over `Core_Overlay` forks (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 specs verifying `Effect_Job` routing by `kind`, worker crash isolation via supervisor, `actor.reply` correlation back into `session_apply_effects`, and concurrent multi-candidate `Parallel_Diff_Replay` with zero parent store mutation
-    - [ ] Implement `actors/effect_dispatcher.odin` and `actors/parallel_diff_replay.odin`
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Partitioned Tenant Supervision, Effect Dispatcher & Parallel Diff Replay' (Protocol in workflow.md)
+- [x] Task: Implement `Tenant_Rule_Runtime` on Sleipnir `Partitioned_Supervisor` + `Registry(string)` (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 specs covering lazy tenant spawn, trapped worker fault recovery (`actor.try_call` + `.One_For_One` restart re-hydrating state from `xitdb`), and `sweep_idle_tenants` cleanup
+    - [x] Implement `actors/tenant_supervisor.odin` (`Tenant_Rule_Runtime`, lifecycle hooks, per-tenant isolation)
+- [x] Task: Implement Sleipnir `Effect_Dispatcher` (3-phase async effects) and `Parallel_Diff_Replay` over `Core_Overlay` forks (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 specs verifying `Effect_Job` routing by `kind`, worker crash isolation via supervisor, `actor.reply` correlation back into `session_apply_effects`, and concurrent multi-candidate `Parallel_Diff_Replay` with zero parent store mutation
+    - [x] Implement `actors/effect_dispatcher.odin` and `actors/parallel_diff_replay.odin`
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Partitioned Tenant Supervision, Effect Dispatcher & Parallel Diff Replay' (Protocol in workflow.md)
 
 ---
 

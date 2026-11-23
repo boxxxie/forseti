@@ -1,8 +1,12 @@
 package forseti_actors_specs
 
+import "base:intrinsics"
 import "core:fmt"
+import "core:mem"
 import "core:strings"
+import "core:sync"
 import "core:testing"
+import "core:time"
 import vmem "core:mem/virtual"
 import actor "actor:."
 import xitdb "xitdb:."
@@ -15,17 +19,46 @@ Policy_Entry :: struct {
 	rb:    ^forseti.Rulebase,
 }
 
+Snapshot_Org_Seed :: struct {
+	org_id:    string,
+	employees: i64,
+}
+
+Parallel_Cand_Spec :: struct {
+	name:         string,
+	policy_label: string,
+}
+
+Tenant_Runtime_Slot :: struct {
+	rt:               ^actors.Tenant_Rule_Runtime,
+	clock_ns:         i64,
+	panic_tenant_id:  u64,
+	panicked_once:    bool,
+	evicted_seen:     int,
+}
+
+Effect_Disp_Slot :: struct {
+	disp:             ^actors.Effect_Dispatcher,
+	last_jobs:        int,
+	last_applied:     int,
+	last_failed:      int,
+}
+
 Actor_World :: struct {
-	t:              ^testing.T,
-	arena:          vmem.Arena,
-	sched:          ^actor.Scheduler,
-	sched_owned:    bool,
-	policies:       map[string]Policy_Entry,
-	session_actors: map[string]^actors.Session_Actor_Handle,
-	commit_actors:  map[string]^actors.Commit_Actor_Handle,
-	spsc_boxes:     map[string]^actors.Session_SPSC_Mailbox,
-	scratch_facts:  [dynamic][]actors.Actor_Fact_Input,
-	scratch_fields: [dynamic][]actors.Actor_Field_Value,
+	t:               ^testing.T,
+	arena:           vmem.Arena,
+	sched:           ^actor.Scheduler,
+	sched_owned:     bool,
+	policies:        map[string]Policy_Entry,
+	session_actors:  map[string]^actors.Session_Actor_Handle,
+	commit_actors:   map[string]^actors.Commit_Actor_Handle,
+	spsc_boxes:      map[string]^actors.Session_SPSC_Mailbox,
+	snap_stores:     map[string]^forseti.Store_Bridge,
+	tenant_runtimes: map[string]^Tenant_Runtime_Slot,
+	effect_disps:    map[string]^Effect_Disp_Slot,
+	diff_runs:       map[string][]actors.Parallel_Diff_Candidate_Result,
+	scratch_facts:   [dynamic][]actors.Actor_Fact_Input,
+	scratch_fields:  [dynamic][]actors.Actor_Field_Value,
 }
 
 actor_world_init :: proc(w: ^Actor_World, t: ^testing.T, num_workers := 4, loc := #caller_location) {
@@ -44,16 +77,44 @@ actor_world_init :: proc(w: ^Actor_World, t: ^testing.T, num_workers := 4, loc :
 	w.session_actors = make(map[string]^actors.Session_Actor_Handle, 8)
 	w.commit_actors = make(map[string]^actors.Commit_Actor_Handle, 8)
 	w.spsc_boxes = make(map[string]^actors.Session_SPSC_Mailbox, 8)
+	w.snap_stores = make(map[string]^forseti.Store_Bridge, 8)
+	w.tenant_runtimes = make(map[string]^Tenant_Runtime_Slot, 8)
+	w.effect_disps = make(map[string]^Effect_Disp_Slot, 8)
+	w.diff_runs = make(map[string][]actors.Parallel_Diff_Candidate_Result, 8)
 	w.scratch_facts = make([dynamic][]actors.Actor_Fact_Input, 0, 8)
 	w.scratch_fields = make([dynamic][]actors.Actor_Field_Value, 0, 16)
 }
 
 actor_world_destroy :: proc(w: ^Actor_World) {
+	if w.sched != nil {
+		actor.scheduler_wait_idle(w.sched)
+	}
+	for _, slot in w.tenant_runtimes {
+		actors.tenant_runtime_destroy(slot.rt)
+		free(slot.rt)
+		free(slot)
+	}
+	delete(w.tenant_runtimes)
+	for _, eslot in w.effect_disps {
+		actors.effect_dispatcher_destroy(eslot.disp)
+		free(eslot.disp)
+		free(eslot)
+	}
+	delete(w.effect_disps)
 	if w.sched_owned && w.sched != nil {
 		actor.scheduler_scope_end(w.sched)
 		w.sched = nil
 		w.sched_owned = false
 	}
+	for _, res in w.diff_runs {
+		actors.parallel_diff_results_destroy(res)
+	}
+	delete(w.diff_runs)
+	for _, sb in w.snap_stores {
+		forseti.store_bridge_destroy(sb)
+		free(sb)
+	}
+	delete(w.snap_stores)
 	for _, box in w.spsc_boxes {
 		actors.session_spsc_destroy(box)
 		free(box)
@@ -394,4 +455,366 @@ then_session_actor_received_commit_notifications :: proc(
 	testing.expect_value(w.t, rep.last_commit_moment, last_moment, loc = loc)
 	_ = fmt.tprintf
 	_ = xitdb.Xitdb_Error.None
+}
+
+@(private = "file")
+_tenant_clock_proc :: proc(user_data: rawptr) -> time.Tick {
+	slot := (^Tenant_Runtime_Slot)(user_data)
+	return time.Tick{_nsec = intrinsics.atomic_load_explicit(&slot.clock_ns, .Acquire)}
+}
+
+@(private = "file")
+_tenant_panic_hook :: proc(state: ^actors.Session_Actor_State) {
+	if state.rb == nil {
+		return
+	}
+	slot := (^Tenant_Runtime_Slot)(state.retired_rb_ctx)
+	if slot == nil {
+		return
+	}
+	if slot.panic_tenant_id != 0 && u64(state.sess.rb != nil ? 1 : 0) == 1 {
+		// Trigger panic once for the designated tenant via actor_seq/id stored on actor
+		if !slot.panicked_once && state.cfg.max_activations == 777 {
+			slot.panicked_once = true
+			panic("simulated tenant policy panic")
+		}
+	}
+}
+
+given_frozen_snapshot_store :: proc(
+	w: ^Actor_World,
+	label: string,
+	orgs: []Snapshot_Org_Seed,
+	loc := #caller_location,
+) {
+	sb, ok, msg := driver_create_frozen_org_store(orgs)
+	if !testing.expectf(w.t, ok, "frozen snapshot store %q failed: %s", label, msg, loc = loc) {
+		return
+	}
+	if prev, has := w.snap_stores[label]; has {
+		forseti.store_bridge_destroy(prev)
+		free(prev)
+	}
+	w.snap_stores[label] = sb
+}
+
+given_tenant_rule_runtime :: proc(
+	w: ^Actor_World,
+	label: string,
+	policy_label: string,
+	snap_label: string,
+	watched_paths: []string,
+	idle_timeout: time.Duration,
+	panic_first_fire_for_tenant: string = "",
+	loc := #caller_location,
+) {
+	pol, has_p := &w.policies[policy_label]
+	snap, has_s := w.snap_stores[snap_label]
+	if !testing.expectf(w.t, has_p && pol.rb != nil && has_s, "missing policy %q or snap %q", policy_label, snap_label, loc = loc) {
+		return
+	}
+
+	slot := new(Tenant_Runtime_Slot)
+	slot.clock_ns = i64(time.Second)
+
+	rt := new(actors.Tenant_Rule_Runtime)
+	cfg := actors.Tenant_Runtime_Config{
+		num_partitions  = 8,
+		idle_timeout    = idle_timeout,
+		rb              = pol.rb,
+		rehydrate_store = snap,
+		rehydrate_paths = watched_paths,
+		now_proc        = _tenant_clock_proc,
+		clock_data      = slot,
+		user_data       = slot,
+	}
+	if len(panic_first_fire_for_tenant) > 0 {
+		cfg.panic_on_first_tenant = panic_first_fire_for_tenant
+	}
+	err := actors.tenant_runtime_init(rt, w.sched, cfg)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		free(rt)
+		free(slot)
+		return
+	}
+	slot.rt = rt
+	w.tenant_runtimes[label] = slot
+	_ = sync.Mutex{}
+	_ = _tenant_panic_hook
+}
+
+upon_tenant_inserting_and_firing :: proc(
+	w: ^Actor_World,
+	rt_label: string,
+	tenant_name: string,
+	binding_name: string,
+	key: string,
+	fields: []actors.Actor_Field_Value,
+	expect_crash: bool,
+	loc := #caller_location,
+) {
+	slot, has := w.tenant_runtimes[rt_label]
+	if !testing.expectf(w.t, has, "unknown tenant runtime %q", rt_label, loc = loc) {
+		return
+	}
+	cloned := make([]actors.Actor_Field_Value, len(fields))
+	copy(cloned, fields)
+	append(&w.scratch_fields, cloned)
+
+	rep, err := actors.tenant_runtime_try_call_name(
+		slot.rt,
+		tenant_name,
+		actors.Session_Msg(actors.Insert_Fact{
+			fact = actors.Actor_Fact_Input{
+				binding_name = binding_name,
+				key          = key,
+				fields       = cloned,
+			},
+			auto_fire = true,
+		}),
+		actors.Session_Op_Reply,
+	)
+	if expect_crash {
+		testing.expect_value(w.t, err, actor.Call_Error.Call_Target_Crashed, loc = loc)
+	} else {
+		testing.expect_value(w.t, err, actor.Call_Error.None, loc = loc)
+		testing.expect_value(w.t, rep.err, forseti.Session_Error.None, loc = loc)
+	}
+}
+
+upon_waiting_for_tenant_recovery :: proc(
+	w: ^Actor_World,
+	rt_label: string,
+	tenant_name: string,
+	min_gen: u32,
+	loc := #caller_location,
+) {
+	slot, has := w.tenant_runtimes[rt_label]
+	if !testing.expectf(w.t, has, "unknown tenant runtime %q", rt_label, loc = loc) {
+		return
+	}
+	recovered := false
+	for _ in 0 ..< 500 {
+		actor.scheduler_wait_idle(w.sched)
+		st, err := actors.tenant_runtime_try_call_name(
+			slot.rt,
+			tenant_name,
+			actors.Session_Msg(actors.Get_Session_Stats{}),
+			actors.Session_Stats_Reply,
+		)
+		if err == .None && st.generation >= min_gen {
+			recovered = true
+			break
+		}
+		time.sleep(200 * time.Microsecond)
+	}
+	testing.expectf(w.t, recovered, "tenant %q did not recover to generation >= %d", tenant_name, min_gen, loc = loc)
+}
+
+then_tenant_generation_is :: proc(
+	w: ^Actor_World,
+	rt_label: string,
+	tenant_name: string,
+	expected_gen: u32,
+	loc := #caller_location,
+) {
+	slot, has := w.tenant_runtimes[rt_label]
+	if !testing.expectf(w.t, has, "unknown tenant runtime %q", rt_label, loc = loc) {
+		return
+	}
+	st, err := actors.tenant_runtime_try_call_name(
+		slot.rt,
+		tenant_name,
+		actors.Session_Msg(actors.Get_Session_Stats{}),
+		actors.Session_Stats_Reply,
+	)
+	testing.expect_value(w.t, err, actor.Call_Error.None, loc = loc)
+	testing.expect_value(w.t, st.generation, expected_gen, loc = loc)
+}
+
+then_tenant_query_returns_count :: proc(
+	w: ^Actor_World,
+	rt_label: string,
+	tenant_name: string,
+	query_name: string,
+	expected_count: int,
+	loc := #caller_location,
+) {
+	slot, has := w.tenant_runtimes[rt_label]
+	if !testing.expectf(w.t, has, "unknown tenant runtime %q", rt_label, loc = loc) {
+		return
+	}
+	rep, err := actors.tenant_runtime_try_call_name(
+		slot.rt,
+		tenant_name,
+		actors.Session_Msg(actors.Run_Query{query_name = query_name}),
+		actors.Session_Query_Reply,
+	)
+	defer forseti.query_result_destroy(&rep.result)
+	testing.expect_value(w.t, err, actor.Call_Error.None, loc = loc)
+	testing.expect_value(w.t, rep.err, forseti.Session_Error.None, loc = loc)
+	testing.expect_value(w.t, len(rep.result.rows), expected_count, loc = loc)
+}
+
+upon_advancing_tenant_clock :: proc(w: ^Actor_World, rt_label: string, delta: time.Duration, loc := #caller_location) {
+	slot, has := w.tenant_runtimes[rt_label]
+	if !testing.expectf(w.t, has, "unknown tenant runtime %q", rt_label, loc = loc) {
+		return
+	}
+	intrinsics.atomic_add_explicit(&slot.clock_ns, i64(delta), .Acq_Rel)
+}
+
+upon_sweeping_idle_tenants :: proc(w: ^Actor_World, rt_label: string, expected_evicted: int, loc := #caller_location) {
+	slot, has := w.tenant_runtimes[rt_label]
+	if !testing.expectf(w.t, has, "unknown tenant runtime %q", rt_label, loc = loc) {
+		return
+	}
+	evicted := actors.tenant_runtime_sweep_idle(slot.rt)
+	testing.expect_value(w.t, evicted, expected_evicted, loc = loc)
+}
+
+then_tenant_runtime_active_count_is :: proc(w: ^Actor_World, rt_label: string, expected: int, loc := #caller_location) {
+	slot, has := w.tenant_runtimes[rt_label]
+	if !testing.expectf(w.t, has, "unknown tenant runtime %q", rt_label, loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, actors.tenant_runtime_count(slot.rt), expected, loc = loc)
+}
+
+@(private = "file")
+_test_enrich_effect_handler :: proc(
+	job: ^forseti.Effect_Job,
+	user_data: rawptr,
+	alloc: mem.Allocator,
+) -> (facts: []actors.Actor_Fact_Input, ok: bool, err_msg: string) {
+	crash_bad := (^bool)(user_data)^
+	org_id := ""
+	for f in job.fields {
+		if f.name == "org_id" {
+			org_id = f.str
+			break
+		}
+	}
+	if crash_bad && org_id == "org:bad" {
+		panic("simulated effect worker crash")
+	}
+	out := make([]actors.Actor_Fact_Input, 1, alloc)
+	fields := make([]actors.Actor_Field_Value, 2, alloc)
+	fields[0] = strings.clone(org_id, alloc)
+	fields[1] = strings.clone("DE" if org_id == "org:1" else "US", alloc)
+	out[0] = actors.Actor_Fact_Input{
+		binding_name = "Enriched",
+		key          = fmt.aprintf("enr:%s", org_id, allocator = alloc),
+		fields       = fields,
+	}
+	return out, true, ""
+}
+
+@(private = "file")
+_crash_bad_org_flag: bool = true
+
+given_effect_dispatcher :: proc(
+	w: ^Actor_World,
+	label: string,
+	crash_on_bad_org: bool,
+	loc := #caller_location,
+) {
+	_crash_bad_org_flag = crash_on_bad_org
+	disp := new(actors.Effect_Dispatcher)
+	err := actors.effect_dispatcher_init(disp, w.sched)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		free(disp)
+		return
+	}
+	r_err := actors.effect_dispatcher_register(disp, "enrich", _test_enrich_effect_handler, &_crash_bad_org_flag)
+	if !testing.expect_value(w.t, r_err, nil, loc = loc) {
+		actors.effect_dispatcher_destroy(disp)
+		free(disp)
+		return
+	}
+	slot := new(Effect_Disp_Slot)
+	slot.disp = disp
+	w.effect_disps[label] = slot
+}
+
+upon_dispatching_and_applying_effects :: proc(
+	w: ^Actor_World,
+	disp_label: string,
+	actor_label: string,
+	expected_jobs: int,
+	expected_applied: int,
+	expected_failed: int,
+	loc := #caller_location,
+) {
+	slot, has_d := w.effect_disps[disp_label]
+	sa, has_s := w.session_actors[actor_label]
+	if !testing.expectf(w.t, has_d && has_s, "unknown dispatcher %q or actor %q", disp_label, actor_label, loc = loc) {
+		return
+	}
+	summary := actors.effect_dispatcher_run_session(slot.disp, actor.pid(sa))
+	testing.expect_value(w.t, summary.total_jobs, expected_jobs, loc = loc)
+	testing.expect_value(w.t, summary.applied_count, expected_applied, loc = loc)
+	testing.expect_value(w.t, summary.failed_count, expected_failed, loc = loc)
+}
+
+upon_running_parallel_diff_replay :: proc(
+	w: ^Actor_World,
+	run_label: string,
+	snap_label: string,
+	baseline_label: string,
+	cands: []Parallel_Cand_Spec,
+	watched_paths: []string,
+	loc := #caller_location,
+) {
+	snap, has_s := w.snap_stores[snap_label]
+	base_pol, has_b := &w.policies[baseline_label]
+	if !testing.expectf(w.t, has_s && has_b && base_pol.rb != nil, "missing snap %q or baseline %q", snap_label, baseline_label, loc = loc) {
+		return
+	}
+	cand_defs := make([]actors.Parallel_Diff_Candidate, len(cands), context.temp_allocator)
+	for c, i in cands {
+		cp, has_c := &w.policies[c.policy_label]
+		if !testing.expectf(w.t, has_c && cp.rb != nil, "missing candidate %q", c.policy_label, loc = loc) {
+			return
+		}
+		cand_defs[i] = actors.Parallel_Diff_Candidate{
+			name = c.name,
+			rb   = cp.rb,
+		}
+	}
+
+	results, err := actors.parallel_diff_replay(w.sched, snap, base_pol.rb, cand_defs, watched_paths)
+	testing.expect_value(w.t, err, nil, loc = loc)
+	if prev, has := w.diff_runs[run_label]; has {
+		actors.parallel_diff_results_destroy(prev)
+	}
+	w.diff_runs[run_label] = results
+}
+
+then_parallel_diff_candidate_matches :: proc(
+	w: ^Actor_World,
+	run_label: string,
+	cand_name: string,
+	expected_added: int,
+	expected_removed: int,
+	expected_unchanged: int,
+	expected_moments: i64,
+	loc := #caller_location,
+) {
+	results, has := w.diff_runs[run_label]
+	if !testing.expectf(w.t, has, "unknown diff run %q", run_label, loc = loc) {
+		return
+	}
+	for &r in results {
+		if r.name == cand_name {
+			testing.expect_value(w.t, r.err, nil, loc = loc)
+			testing.expect_value(w.t, len(r.report.added), expected_added, loc = loc)
+			testing.expect_value(w.t, len(r.report.removed), expected_removed, loc = loc)
+			testing.expect_value(w.t, r.report.unchanged_count, expected_unchanged, loc = loc)
+			testing.expect_value(w.t, r.report.parent_moments_before, expected_moments, loc = loc)
+			testing.expect_value(w.t, r.report.parent_moments_after, expected_moments, loc = loc)
+			return
+		}
+	}
+	testing.expectf(w.t, false, "candidate %q not found in diff run %q", cand_name, run_label, loc = loc)
 }
