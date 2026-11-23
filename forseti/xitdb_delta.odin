@@ -189,100 +189,146 @@ _hash_bytes64 :: proc "contextless" (seed: u64, b: []u8) -> u64 {
 	return _mix64(h)
 }
 
+@(private)
+_Fp_Frame :: struct {
+	is_map:     bool,
+	it:         xitdb.Cursor_Iterator,
+	acc1:       u64,
+	acc2:       u64,
+	count:      u64,
+	pending_kh: u64,
+}
+
+@(private)
+_fold_fp_into_frame :: #force_inline proc(parent: ^_Fp_Frame, child_fp: u64) {
+	if !parent.is_map {
+		parent.acc1 = _mix64(parent.acc1 ~ child_fp)
+		return
+	}
+	eh := _mix64(parent.pending_kh ~ child_fp)
+	parent.acc1 ~= eh
+	parent.acc2 += eh
+	parent.count += 1
+}
+
 // Computes an offset-independent 64-bit structural fingerprint of a xitdb value/collection
 // so identical records produce identical hashes before and after compaction.
+// Uses an explicit scratch-allocated stack so deep nested structures never overflow OS thread stacks.
 @(private)
 _cursor_content_fingerprint :: proc(
-	cur: xitdb.Read_Cursor,
+	root_cur: xitdb.Read_Cursor,
 	scratch: mem.Allocator,
-	depth: int = 0,
 ) -> (fp: u64, err: Store_Error) {
-	if depth > 64 {
-		return 0, xitdb.Xitdb_Error.Key_Offset_Exceeded
+	frames := make([dynamic]_Fp_Frame, 0, 8, scratch)
+	defer delete(frames)
+
+	stack_buf: [258]u8 = ---
+	key_buf: [256]u8 = ---
+
+	eval_node :: proc(
+		cur: xitdb.Read_Cursor,
+		depth: int,
+		scratch: mem.Allocator,
+		stack_buf: []u8,
+	) -> (leaf_fp: u64, frame: _Fp_Frame, is_container: bool, err: Store_Error) {
+		if depth > 64 {
+			return 0, {}, false, xitdb.Xitdb_Error.Key_Offset_Exceeded
+		}
+		sp, sp_err := xitdb.cursor_resolved(cur)
+		if sp_err != nil {
+			return 0, {}, false, xitdb_to_store_err(sp_err)
+		}
+		#partial switch sp.slot.tag {
+		case .None:
+			return 0x1000000000000001, {}, false, nil
+		case .Int, .Uint, .Float, .Short_Bytes:
+			return _mix64(u64(sp.slot.tag) * 0x517cc1b727220a95 ~ u64(sp.slot.value) ~ (u64(1) if sp.slot.full else 0)), {}, false, nil
+		case .Bytes:
+			b_obj, b_err := xitdb.cursor_read_bytes_buf(cur, stack_buf)
+			if b_err == nil {
+				h := _hash_bytes64(0x2000000000000002, b_obj.value)
+				if b_obj.format_tag != nil {
+					h = _hash_bytes64(h, b_obj.format_tag)
+				}
+				return h, {}, false, nil
+			}
+			if b_err != .Stream_Too_Long {
+				return 0, {}, false, xitdb_to_store_err(b_err)
+			}
+			obj, o_err := xitdb.cursor_read_bytes_object(cur, 0, scratch)
+			if o_err != nil {
+				return 0, {}, false, xitdb_to_store_err(o_err)
+			}
+			h := _hash_bytes64(0x2000000000000002, obj.value)
+			if obj.format_tag != nil {
+				h = _hash_bytes64(h, obj.format_tag)
+			}
+			return h, {}, false, nil
+		case .Array_List, .Linked_Array_List:
+			it, it_err := xitdb.cursor_iterator(cur)
+			if it_err != nil {
+				return 0, {}, false, xitdb_to_store_err(it_err)
+			}
+			return 0, _Fp_Frame{is_map = false, it = it, acc1 = _mix64(u64(sp.slot.tag))}, true, nil
+		case .Hash_Map, .Counted_Hash_Map, .Hash_Set, .Counted_Hash_Set, .Sorted_Map, .Sorted_Set:
+			it, it_err := xitdb.cursor_iterator(cur)
+			if it_err != nil {
+				return 0, {}, false, xitdb_to_store_err(it_err)
+			}
+			return 0, _Fp_Frame{is_map = true, it = it, acc1 = _mix64(u64(sp.slot.tag))}, true, nil
+		}
+		return _mix64(u64(sp.slot.tag)), {}, false, nil
 	}
-	sp, sp_err := xitdb.cursor_resolved(cur)
-	if sp_err != nil {
-		return 0, xitdb_to_store_err(sp_err)
+
+	root_leaf, root_frame, root_is_container := eval_node(root_cur, 0, scratch, stack_buf[:]) or_return
+	if !root_is_container {
+		return root_leaf, nil
 	}
-	#partial switch sp.slot.tag {
-	case .None:
-		return 0x1000000000000001, nil
-	case .Int, .Uint, .Float, .Short_Bytes:
-		return _mix64(u64(sp.slot.tag) * 0x517cc1b727220a95 ~ u64(sp.slot.value) ~ (u64(1) if sp.slot.full else 0)), nil
-	case .Bytes:
-		stack_buf: [258]u8 = ---
-		b_obj, b_err := xitdb.cursor_read_bytes_buf(cur, stack_buf[:])
-		if b_err == nil {
-			h := _hash_bytes64(0x2000000000000002, b_obj.value)
-			if b_obj.format_tag != nil {
-				h = _hash_bytes64(h, b_obj.format_tag)
+	if _, a_err := append(&frames, root_frame); a_err != nil {
+		return 0, a_err
+	}
+
+	for len(frames) > 0 {
+		top_idx := len(frames) - 1
+		m, n_err := xitdb.cursor_iterator_next(&frames[top_idx].it)
+		if n_err != nil {
+			return 0, xitdb_to_store_err(n_err)
+		}
+		entry, ok := m.?
+		if !ok {
+			done := frames[top_idx]
+			pop(&frames)
+			res := _mix64(done.acc1 ~ done.acc2 ~ done.count) if done.is_map else done.acc1
+			if len(frames) == 0 {
+				return res, nil
 			}
-			return h, nil
+			_fold_fp_into_frame(&frames[len(frames) - 1], res)
+			continue
 		}
-		if b_err != .Stream_Too_Long {
-			return 0, xitdb_to_store_err(b_err)
-		}
-		obj, o_err := xitdb.cursor_read_bytes_object(cur, 0, scratch)
-		if o_err != nil {
-			return 0, xitdb_to_store_err(o_err)
-		}
-		h := _hash_bytes64(0x2000000000000002, obj.value)
-		if obj.format_tag != nil {
-			h = _hash_bytes64(h, obj.format_tag)
-		}
-		return h, nil
-	case .Array_List, .Linked_Array_List:
-		it, it_err := xitdb.cursor_iterator(cur)
-		if it_err != nil {
-			return 0, xitdb_to_store_err(it_err)
-		}
-		h := _mix64(u64(sp.slot.tag))
-		for {
-			m, n_err := xitdb.cursor_iterator_next(&it)
-			if n_err != nil {
-				return 0, xitdb_to_store_err(n_err)
-			}
-			elem, ok := m.?
-			if !ok {
-				break
-			}
-			eh := _cursor_content_fingerprint(elem, scratch, depth + 1) or_return
-			h = _mix64(h ~ eh)
-		}
-		return h, nil
-	case .Hash_Map, .Counted_Hash_Map, .Hash_Set, .Counted_Hash_Set, .Sorted_Map, .Sorted_Set:
-		it, it_err := xitdb.cursor_iterator(cur)
-		if it_err != nil {
-			return 0, xitdb_to_store_err(it_err)
-		}
-		acc_xor := _mix64(u64(sp.slot.tag))
-		acc_sum := u64(0)
-		count := u64(0)
-		key_buf: [256]u8 = ---
-		for {
-			m, n_err := xitdb.cursor_iterator_next(&it)
-			if n_err != nil {
-				return 0, xitdb_to_store_err(n_err)
-			}
-			entry, ok := m.?
-			if !ok {
-				break
-			}
+
+		child_cur: xitdb.Read_Cursor
+		if !frames[top_idx].is_map {
+			child_cur = entry
+		} else {
 			kc, vc, kv_err := xitdb.cursor_read_kv_pair_slots(entry)
 			if kv_err != nil {
 				return 0, xitdb_to_store_err(kv_err)
 			}
 			kbytes := _read_cursor_key_temp(kc, key_buf[:], scratch) or_return
-			kh := _hash_bytes64(0x3000000000000003, kbytes)
-			vh := _cursor_content_fingerprint(vc, scratch, depth + 1) or_return
-			eh := _mix64(kh ~ vh)
-			acc_xor ~= eh
-			acc_sum += eh
-			count += 1
+			frames[top_idx].pending_kh = _hash_bytes64(0x3000000000000003, kbytes)
+			child_cur = vc
 		}
-		return _mix64(acc_xor ~ acc_sum ~ count), nil
+
+		child_leaf, child_frame, child_is_container := eval_node(child_cur, len(frames), scratch, stack_buf[:]) or_return
+		if !child_is_container {
+			_fold_fp_into_frame(&frames[top_idx], child_leaf)
+			continue
+		}
+		if _, a_err := append(&frames, child_frame); a_err != nil {
+			return 0, a_err
+		}
 	}
-	return _mix64(u64(sp.slot.tag)), nil
+	return 0, nil
 }
 
 @(private)
