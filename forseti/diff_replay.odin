@@ -2,6 +2,7 @@ package forseti
 
 import "core:fmt"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:slice"
 import "core:strings"
 
@@ -129,8 +130,15 @@ session_diff_replay :: proc(
 		return {}, f_err
 	}
 
-	base_sigs := _collect_derived_signatures(baseline_sess, context.temp_allocator)
-	cand_sigs := _collect_derived_signatures(cand_sess, context.temp_allocator)
+	sig_arena: vmem.Arena
+	if s_a_err := vmem.arena_init_growing(&sig_arena); s_a_err != nil {
+		return {}, s_a_err
+	}
+	defer vmem.arena_destroy(&sig_arena)
+	sig_alloc := vmem.arena_allocator(&sig_arena)
+
+	base_sigs := _collect_derived_signatures(baseline_sess, sig_alloc)
+	cand_sigs := _collect_derived_signatures(cand_sess, sig_alloc)
 	moments_after := store_bridge_moment_count(parent_bridge) or_return
 
 	added := make([dynamic]Diff_Fact_Change, 0, 8, allocator)

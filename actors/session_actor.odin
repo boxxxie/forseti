@@ -3,6 +3,7 @@ package forseti_actors
 import "base:intrinsics"
 import "core:fmt"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:strings"
 import actor "actor:."
 import "../forseti"
@@ -109,11 +110,13 @@ Apply_Actor_Effects :: struct {
 }
 
 Swap_Rulebase :: struct {
-	rb:              ^forseti.Rulebase,
-	rehydrate_store: ^forseti.Store_Bridge,
-	watched_paths:   []string,
-	on_retired:      proc(old_rb: ^forseti.Rulebase, user_data: rawptr),
-	retired_ctx:     rawptr,
+	rb:               ^forseti.Rulebase,
+	rehydrate_store:  ^forseti.Store_Bridge,
+	watched_paths:    []string,
+	on_retired:       proc(old_rb: ^forseti.Rulebase, user_data: rawptr),
+	retired_ctx:      rawptr,
+	next_on_retired:  proc(old_rb: ^forseti.Rulebase, user_data: rawptr),
+	next_retired_ctx: rawptr,
 }
 
 Drain_SPSC :: struct {
@@ -228,6 +231,8 @@ Session_Actor_State :: struct {
 	sess:                 ^forseti.Session,
 	tel:                  forseti.Telemetry_Sink,
 	tel_inited:           bool,
+	temp_arena:           vmem.Arena,
+	temp_inited:          bool,
 	rehydrate_store:      ^forseti.Store_Bridge,
 	rehydrate_paths:      []string,
 	pre_fire_hook:        proc(state: ^Session_Actor_State),
@@ -291,6 +296,18 @@ session_actor_cleanup_state :: proc(state: ^Session_Actor_State) {
 	if state.tel_inited {
 		forseti.telemetry_destroy(&state.tel)
 		state.tel_inited = false
+	}
+	if state.temp_inited {
+		vmem.arena_destroy(&state.temp_arena)
+		state.temp_inited = false
+	}
+	if state.on_retired_rb != nil && state.rb != nil {
+		cb := state.on_retired_rb
+		ctx_ptr := state.retired_rb_ctx
+		state.on_retired_rb = nil
+		state.retired_rb_ctx = nil
+		state.rb = nil
+		cb(nil, ctx_ptr)
 	}
 }
 
@@ -556,6 +573,21 @@ _session_actor_fault_cleanup :: proc(arg: rawptr) {
 
 session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, msg: ^Session_Msg) {
 	state := &self.state
+	if !state.temp_inited {
+		if vmem.arena_init_growing(&state.temp_arena) == nil {
+			state.temp_inited = true
+		}
+	}
+	prev_temp := context.temp_allocator
+	if state.temp_inited {
+		context.temp_allocator = vmem.arena_allocator(&state.temp_arena)
+	}
+	defer {
+		if state.temp_inited {
+			vmem.arena_free_all(&state.temp_arena)
+		}
+		context.temp_allocator = prev_temp
+	}
 	actor.defer_on_fault(_session_actor_fault_cleanup, rawptr(state))
 	if init_err := _session_actor_ensure_init(state); init_err != .None {
 		switch m in msg^ {
@@ -755,8 +787,14 @@ session_actor_receive :: proc(ctx: ^actor.Context, self: ^Session_Actor_Handle, 
 		old_cb := m.on_retired if m.on_retired != nil else state.on_retired_rb
 		old_ctx := m.retired_ctx if m.on_retired != nil else state.retired_rb_ctx
 
+		// Clear before cleanup so cleanup doesn't double-release; release after session_destroy below.
+		state.on_retired_rb = nil
+		state.retired_rb_ctx = nil
 		session_actor_cleanup_state(state)
+
 		state.rb = m.rb
+		state.on_retired_rb = m.next_on_retired
+		state.retired_rb_ctx = m.next_retired_ctx
 		if m.rehydrate_store != nil {
 			state.rehydrate_store = m.rehydrate_store
 		}

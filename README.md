@@ -412,6 +412,7 @@ Every example compiles cleanly under strict `-vet -strict-style -warnings-as-err
 | [`05_accumulators_and_effects`](examples/05_accumulators_and_effects/main.odin) | Tied-minimum retractable accumulators & 3-phase `core:thread` async effects | `odin run examples/05_accumulators_and_effects -collection:xitdb=../xitdb/xitdb` |
 | [`06_internal_odin_dsl_and_aot`](examples/06_internal_odin_dsl_and_aot/main.odin) | Tier 2 `Ir_Builder` internal DSL & Tier 3 AOT Odin output | `odin run examples/06_internal_odin_dsl_and_aot -collection:xitdb=../xitdb/xitdb` |
 | [`07_telemetry_and_diff_replay`](examples/07_telemetry_and_diff_replay/main.odin) | Telemetry `JSONL` / Chrome Trace, `Core_Overlay` `diff_replay`, Mermaid export | `odin run examples/07_telemetry_and_diff_replay -collection:xitdb=../xitdb/xitdb` |
+| [`08_sleipnir_actor_runtime`](examples/08_sleipnir_actor_runtime/main.odin) | Sleipnir `Session_Actor`, `Xitdb_Commit_Actor`, `Partitioned_Supervisor`, hot-reload & parallel `diff_replay` | `odin run examples/08_sleipnir_actor_runtime -collection:xitdb=../xitdb/xitdb -collection:actor=../sleipnir/actor` |
 
 ---
 
@@ -433,10 +434,12 @@ Every example compiles cleanly under strict `-vet -strict-style -warnings-as-err
 ```text
 .
 ├── forseti/        # Core library: lexer, parser, IR, sema, DMN verifier/AOT, xitdb bridge, PHREAK, JTMS, Datalog, telemetry
+├── actors/         # Optional Sleipnir multi-threaded runtime (Session_Actor, Xitdb_Commit_Actor, Tenant_Rule_Runtime, Effect_Dispatcher)
 ├── cmd/forseti/    # Operational CLI (check, verify-tables, gen, ast, ir, run, explain, impact, diff-replay, telemetry, export-*)
 ├── specs/          # Black-box 4-layer ATDD executable specifications (package forseti_specs)
+├── specs_actors/   # Black-box 4-layer ATDD specs for Sleipnir actor runtime (package forseti_actors_specs)
 ├── tests/          # Pattern E unit tests, Pattern D t.seed property/oracle tests, doc-snippet & example verifiers
-├── examples/       # 7 standalone leak-checked runnable examples (01_decision_tables .. 07_telemetry_and_diff_replay)
+├── examples/       # 8 standalone leak-checked runnable examples (01_decision_tables .. 08_sleipnir_actor_runtime)
 ├── benchmarks/     # Longitudinal hugi + obench scaling suite (10 to 1,000,000 rules)
 ├── docs/           # Documentation hub, Odin embedding guide, DSL/CLI reference, xitdb modes & benchmark reports
 ├── conductor/      # Conductor specifications, architecture guidelines, and sequenced implementation tracks
@@ -450,8 +453,8 @@ Every example compiles cleanly under strict `-vet -strict-style -warnings-as-err
 Development is tracked sequentially in [`conductor/tracks.md`](conductor/tracks.md):
 
 - [x] **Tracks 1–7:** Core `.forseti` & Internal DSL, `Rulebase_IR`, Verified DMN Tables & AOT Codegen, `xitdb` Substrate & `Core_Overlay`, Lazy PHREAK + `#must_tail` Guard VM, Z-Set JTMS / Stratified Datalog / Semirings / Async Effects, `1M`-Rule Benchmarks, and Full CLI + Verified Examples.
-- [ ] **Track 8:** Cross-OS CI Matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`), Actions/Repo Hygiene & `v0.1.0` Release Prep ([spec](conductor/tracks/cross_os_ci_hygiene_and_v0_1_0_release_20261122/spec.md)).
-- [ ] **Track 9:** [**Sleipnir (`package actor`)**](https://github.com/boxxxie/sleipnir) Multi-Threaded Session Runtime — pinned `Session_Actor`s, `Chain=K` batching, single-writer `Xitdb_Commit_Actor`, OTP `Partitioned_Supervisor` tenant isolation, actor-native 3-phase async effects, parallel `Core_Overlay` `diff_replay`, and ref-counted hot-reload ([spec](conductor/tracks/sleipnir_actor_multithreaded_runtime_20261122/spec.md)).
+- [x] **Track 8:** Cross-OS CI Matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`), Actions/Repo Hygiene & `v0.1.0` Release Prep ([spec](conductor/tracks/cross_os_ci_hygiene_and_v0_1_0_release_20261122/spec.md)).
+- [~] **Track 9:** [**Sleipnir (`package actor`)**](https://github.com/boxxxie/sleipnir) Multi-Threaded Session Runtime — pinned `Session_Actor`s, `Chain=K` batching, single-writer `Xitdb_Commit_Actor`, OTP `Partitioned_Supervisor` tenant isolation, actor-native 3-phase async effects, parallel `Core_Overlay` `diff_replay`, and ref-counted hot-reload ([spec](conductor/tracks/sleipnir_actor_multithreaded_runtime_20261122/spec.md)).
 - [ ] **Track 10:** `.forseti` Language Server (LSP), Canonical Table-Aligning Formatter (`forseti fmt`) & TextMate / Tree-sitter Grammars ([spec](conductor/tracks/forseti_lsp_formatter_and_editor_tooling_20261122/spec.md)).
 - [ ] **Track 11:** Stable C99 ABI (`libforseti` + `forseti.h`), Typed Odin Struct Embeds & DSL v1.1 (`import` + pure built-ins) ([spec](conductor/tracks/c_abi_external_integration_and_dsl_v1_1_20261122/spec.md)).
 

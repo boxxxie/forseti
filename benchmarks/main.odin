@@ -9,6 +9,7 @@ import hugi "hugi:."
 import forseti "../forseti"
 
 g_bench_root_allocator: mem.Allocator
+g_bench_root_temp_allocator: mem.Allocator
 
 run_profile_1m :: proc() -> int {
 	scales := [6]int{10, 100, 1_000, 10_000, 100_000, 1_000_000}
@@ -125,6 +126,7 @@ run_profile_1m :: proc() -> int {
 
 main :: proc() {
 	g_bench_root_allocator = context.allocator
+	g_bench_root_temp_allocator = context.temp_allocator
 	for arg in os.args[1:] {
 		if arg == "--profile-1m" {
 			code := run_profile_1m()
@@ -153,6 +155,7 @@ main :: proc() {
 	register_recursive_benchmarks(&suite)
 	register_provenance_replay_benchmarks(&suite)
 	register_mdm_e2e_benchmarks(&suite)
+	register_sleipnir_actor_benchmarks(&suite)
 
 	if !hugi.suite_run(&suite) {
 		fmt.eprintln("forseti benchmarks failed")

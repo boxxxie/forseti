@@ -285,3 +285,18 @@ defer delete(chrome_trace) // Load directly into chrome://tracing or Perfetto UI
 ```
 
 To compile out all instrumentation overhead completely on ultra-tight production builds, pass `-define:FORSETI_TELEMETRY=false` to `odin build` / `odin test`.
+
+---
+
+## 9. Multi-Threaded Actor Runtime (`actors/` + Sleipnir)
+
+Core `package forseti` stays single-threaded, zero-lock, and zero-actor. When scaling across multiple OS threads or isolated tenants, import the sibling package **`actors/`** (`package forseti_actors`, requiring `-collection:actor=../sleipnir/actor`):
+
+- **`Session_Actor` (`actors/session_actor.odin`):** Owns a pinned `^forseti.Session` and per-actor `forseti.Telemetry_Sink`, sharing an immutable compiled `^forseti.Rulebase` across threads. Supports `Insert_Fact`, `Chain=K` slice batching via `actor.send`, `Session_SPSC_Mailbox` (`Drain_SPSC`), `Run_Query`, `Explain_Fact`, `Impact_Rule`, and `Commit_Derived_To_Writer`.
+- **`Xitdb_Commit_Actor` (`actors/commit_actor.odin`):** Single-writer `Store_Bridge` owner serializing derived/audit moments (`.decisions`, `.idx.*`, `.__tx`) and broadcasting `Commit_Notification` messages to subscribed `Session_Actor`s.
+- **`Tenant_Rule_Runtime` (`actors/tenant_supervisor.odin`):** Wraps Sleipnir's `actor.Partitioned_Supervisor` + `.One_For_One` per-tenant supervision, trapped panic recovery with `xitdb` rehydration, and `tenant_runtime_sweep_idle` TTL eviction.
+- **`Effect_Dispatcher` (`actors/effect_dispatcher.odin`):** Routes `Effect_Job`s by `kind` to supervised effect workers without touching `Session.interner`, recovering worker panics cleanly under `.One_For_One` and delivering results via `Apply_Actor_Effects`.
+- **`Parallel_Diff_Replay` (`actors/parallel_diff_replay.odin`):** Fans out concurrent `Core_Overlay` `diff_replay` actors over a frozen `Store_Bridge` snapshot and merges per-worker telemetry via `forseti.telemetry_merge`.
+- **`Rulebase_Coordinator` (`actors/rulebase_coordinator.odin`):** Compiles and validates updated `.forseti` policies off the hot path, atomically broadcasts `Swap_Rulebase` across subscribed `Session_Actor`s, rejects invalid policies without disrupting running sessions, and reclaims retired `Rulebase` instances via atomic reference counting (`Rulebase_Ref`).
+
+See [`examples/08_sleipnir_actor_runtime/main.odin`](../examples/08_sleipnir_actor_runtime/main.odin) for a full leak-checked end-to-end walkthrough.

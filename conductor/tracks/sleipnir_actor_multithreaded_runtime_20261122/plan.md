@@ -45,10 +45,10 @@
 
 ## Phase 4: Hot-Reload `Rulebase_Coordinator`, Example `08` & `hugi` Concurrency Benchmarks
 
-- [ ] Task: Implement off-hot-path `Rulebase_Coordinator` with ref-counted `^Rulebase` grace reclamation (Red-First 4-Layer ATDD)
-    - [ ] Write failing Layer 1 specs verifying live `.forseti` recompile, atomic `Swap_Rulebase` rollout across active `Session_Actor`s, rejection of invalid policies without disrupting running sessions, and zero leaks of retired `Rulebase`s
-    - [ ] Implement `actors/rulebase_coordinator.odin`
-- [ ] Task: Create leak-checked `examples/08_sleipnir_actor_runtime/`, update `tests/test_examples_verify.odin`, and add `hugi` concurrency benchmarks
-    - [ ] Implement `examples/08_sleipnir_actor_runtime/main.odin`, register in `tests/test_examples_verify.odin` (passing `-collection:actor=../sleipnir/actor`), and document actor embedding in `docs/odin-api.md` / `README.md`
-    - [ ] Add `hugi` actor scaling benchmarks (`1..8` workers, `Chain=K`, parallel `diff_replay`), run full strict check + `specs` + `specs_actors` + `tests` (`ODIN_TEST_FAIL_ON_BAD_MEMORY=true`) + ASan
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Hot-Reload Coordinator, Example 08 & Concurrency Benchmarks' (Protocol in workflow.md)
+- [x] Task: Implement off-hot-path `Rulebase_Coordinator` with ref-counted `^Rulebase` grace reclamation (Red-First 4-Layer ATDD)
+    - [x] Write failing Layer 1 specs verifying live `.forseti` recompile, atomic `Swap_Rulebase` rollout across active `Session_Actor`s, rejection of invalid policies without disrupting running sessions, and zero leaks of retired `Rulebase`s
+    - [x] Implement `actors/rulebase_coordinator.odin`
+- [x] Task: Create leak-checked `examples/08_sleipnir_actor_runtime/`, update `tests/test_examples_verify.odin`, and add `hugi` concurrency benchmarks
+    - [x] Implement `examples/08_sleipnir_actor_runtime/main.odin`, register in `tests/test_examples_verify.odin` (passing `-collection:actor=../sleipnir/actor`), and document actor embedding in `docs/odin-api.md` / `README.md`
+    - [x] Add `hugi` actor scaling benchmarks (`1..8` workers, `Chain=K`, parallel `diff_replay`), run full strict check + `specs` + `specs_actors` + `tests` (`ODIN_TEST_FAIL_ON_BAD_MEMORY=true`) + ASan
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Hot-Reload Coordinator, Example 08 & Concurrency Benchmarks' (Protocol in workflow.md)

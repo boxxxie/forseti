@@ -56,6 +56,7 @@ Actor_World :: struct {
 	snap_stores:     map[string]^forseti.Store_Bridge,
 	tenant_runtimes: map[string]^Tenant_Runtime_Slot,
 	effect_disps:    map[string]^Effect_Disp_Slot,
+	coordinators:    map[string]^actors.Rulebase_Coordinator_Handle,
 	diff_runs:       map[string][]actors.Parallel_Diff_Candidate_Result,
 	scratch_facts:   [dynamic][]actors.Actor_Fact_Input,
 	scratch_fields:  [dynamic][]actors.Actor_Field_Value,
@@ -80,6 +81,7 @@ actor_world_init :: proc(w: ^Actor_World, t: ^testing.T, num_workers := 4, loc :
 	w.snap_stores = make(map[string]^forseti.Store_Bridge, 8)
 	w.tenant_runtimes = make(map[string]^Tenant_Runtime_Slot, 8)
 	w.effect_disps = make(map[string]^Effect_Disp_Slot, 8)
+	w.coordinators = make(map[string]^actors.Rulebase_Coordinator_Handle, 8)
 	w.diff_runs = make(map[string][]actors.Parallel_Diff_Candidate_Result, 8)
 	w.scratch_facts = make([dynamic][]actors.Actor_Fact_Input, 0, 8)
 	w.scratch_fields = make([dynamic][]actors.Actor_Field_Value, 0, 16)
@@ -122,6 +124,7 @@ actor_world_destroy :: proc(w: ^Actor_World) {
 	delete(w.spsc_boxes)
 	delete(w.session_actors)
 	delete(w.commit_actors)
+	delete(w.coordinators)
 
 	for _, &p in w.policies {
 		if p.rb != nil {
@@ -817,4 +820,86 @@ then_parallel_diff_candidate_matches :: proc(
 		}
 	}
 	testing.expectf(w.t, false, "candidate %q not found in diff run %q", cand_name, run_label, loc = loc)
+}
+
+given_rulebase_coordinator :: proc(
+	w: ^Actor_World,
+	coord_label: string,
+	initial_source: string,
+	rehyd_snap_label: string,
+	watched_paths: []string,
+	loc := #caller_location,
+) {
+	snap, has_s := w.snap_stores[rehyd_snap_label]
+	if !testing.expectf(w.t, has_s, "unknown snapshot store %q", rehyd_snap_label, loc = loc) {
+		return
+	}
+	ch, err := actors.rulebase_coordinator_spawn(w.sched, initial_source, "v1.forseti", snap, watched_paths)
+	if !testing.expect_value(w.t, err, forseti.Compile_Error.None, loc = loc) {
+		return
+	}
+	w.coordinators[coord_label] = ch
+}
+
+given_coordinated_session_actor :: proc(
+	w: ^Actor_World,
+	coord_label: string,
+	actor_label: string,
+	loc := #caller_location,
+) {
+	ch, has := w.coordinators[coord_label]
+	if !testing.expectf(w.t, has, "unknown coordinator %q", coord_label, loc = loc) {
+		return
+	}
+	sa, err := actors.rulebase_coordinator_spawn_session(w.sched, ch)
+	if !testing.expect_value(w.t, err, nil, loc = loc) {
+		return
+	}
+	w.session_actors[actor_label] = sa
+}
+
+upon_reloading_coordinator_policy :: proc(
+	w: ^Actor_World,
+	coord_label: string,
+	new_source: string,
+	expect_ok: bool,
+	loc := #caller_location,
+) {
+	ch, has := w.coordinators[coord_label]
+	if !testing.expectf(w.t, has, "unknown coordinator %q", coord_label, loc = loc) {
+		return
+	}
+	rep := actor.call(w.sched, ch, actors.Coordinator_Msg(actors.Reload_Policy{
+		source   = new_source,
+		filename = "reload.forseti",
+	}), actors.Coordinator_Reload_Reply)
+	testing.expect_value(w.t, rep.ok, expect_ok, loc = loc)
+}
+
+then_coordinator_version_is :: proc(
+	w: ^Actor_World,
+	coord_label: string,
+	expected_version: u64,
+	loc := #caller_location,
+) {
+	ch, has := w.coordinators[coord_label]
+	if !testing.expectf(w.t, has, "unknown coordinator %q", coord_label, loc = loc) {
+		return
+	}
+	rep := actor.call(w.sched, ch, actors.Coordinator_Msg(actors.Get_Coordinator_Stats{}), actors.Coordinator_Stats_Reply)
+	testing.expect_value(w.t, rep.version, expected_version, loc = loc)
+}
+
+then_coordinator_retired_count_is :: proc(
+	w: ^Actor_World,
+	coord_label: string,
+	expected_retired: u64,
+	loc := #caller_location,
+) {
+	ch, has := w.coordinators[coord_label]
+	if !testing.expectf(w.t, has, "unknown coordinator %q", coord_label, loc = loc) {
+		return
+	}
+	rep := actor.call(w.sched, ch, actors.Coordinator_Msg(actors.Get_Coordinator_Stats{}), actors.Coordinator_Stats_Reply)
+	testing.expect_value(w.t, rep.retired_freed, expected_retired, loc = loc)
 }

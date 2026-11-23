@@ -1,6 +1,7 @@
 package forseti_actors
 
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:strings"
 import actor "actor:."
 import "../forseti"
@@ -186,10 +187,18 @@ parallel_diff_replay :: proc(
 		req:       _Diff_Task_Req,
 		collector: actor.PID(_Diff_Collector_Msg),
 	}
-	workers := make([]^actor.Actor(_Diff_Worker_State, Worker_Task), len(candidates), context.temp_allocator)
 	for cand, i in candidates {
 		w_actor, w_err := actor.spawn(sched, _Diff_Worker_State{alloc = allocator}, proc(ctx: ^actor.Context, self: ^actor.Actor(_Diff_Worker_State, Worker_Task), msg: ^Worker_Task) {
 			_ = self
+			local_temp: vmem.Arena
+			prev_temp := context.temp_allocator
+			if vmem.arena_init_growing(&local_temp) == nil {
+				context.temp_allocator = vmem.arena_allocator(&local_temp)
+			}
+			defer {
+				context.temp_allocator = prev_temp
+				vmem.arena_destroy(&local_temp)
+			}
 			tel: forseti.Telemetry_Sink
 			_ = forseti.telemetry_init(&tel, enabled = true, allocator = msg.req.alloc)
 			rep, r_err := forseti.diff_replay(
@@ -212,7 +221,6 @@ parallel_diff_replay :: proc(
 			parallel_diff_results_destroy(results)
 			return nil, w_err
 		}
-		workers[i] = w_actor
 		actor.send(sched, w_actor, Worker_Task{
 			req = _Diff_Task_Req{
 				idx           = i,

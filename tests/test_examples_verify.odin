@@ -7,7 +7,7 @@ import "core:strings"
 import "core:testing"
 
 @(private = "file")
-_verify_example_dir :: proc(t: ^testing.T, rel_dir: string, expected_marker: string) {
+_verify_example_dir :: proc(t: ^testing.T, rel_dir: string, expected_marker: string, needs_actor := false) {
 	main_path, _ := filepath.join({rel_dir, "main.odin"}, context.temp_allocator)
 	raw, r_err := os.read_entire_file(main_path, context.allocator)
 	testing.expectf(t, r_err == nil, "unable to read %q: %v", main_path, r_err)
@@ -28,17 +28,13 @@ _verify_example_dir :: proc(t: ^testing.T, rel_dir: string, expected_marker: str
 		}
 	}
 
-	check_cmd := []string{
-		"odin",
-		"check",
-		rel_dir,
-		"-collection:xitdb=../xitdb/xitdb",
-		"-vet",
-		"-vet-tabs",
-		"-strict-style",
-		"-warnings-as-errors",
+	check_cmd := make([dynamic]string, 0, 10, context.temp_allocator)
+	append(&check_cmd, "odin", "check", rel_dir, "-collection:xitdb=../xitdb/xitdb")
+	if needs_actor {
+		append(&check_cmd, "-collection:actor=../sleipnir/actor")
 	}
-	cs, cout, cerr, cex := os.process_exec(os.Process_Desc{command = check_cmd}, context.temp_allocator)
+	append(&check_cmd, "-vet", "-vet-tabs", "-strict-style", "-warnings-as-errors")
+	cs, cout, cerr, cex := os.process_exec(os.Process_Desc{command = check_cmd[:]}, context.temp_allocator)
 	testing.expectf(
 		t,
 		cex == nil && cs.exit_code == 0,
@@ -62,14 +58,12 @@ _verify_example_dir :: proc(t: ^testing.T, rel_dir: string, expected_marker: str
 	bin_name := "example_bin.exe" when ODIN_OS == .Windows else "example_bin"
 	bin_path, _ := filepath.join({tmp_dir, bin_name}, context.temp_allocator)
 	out_flag := fmt.tprintf("-out:%s", bin_path)
-	build_cmd := []string{
-		"odin",
-		"build",
-		rel_dir,
-		out_flag,
-		"-collection:xitdb=../xitdb/xitdb",
+	build_cmd := make([dynamic]string, 0, 8, context.temp_allocator)
+	append(&build_cmd, "odin", "build", rel_dir, out_flag, "-collection:xitdb=../xitdb/xitdb")
+	if needs_actor {
+		append(&build_cmd, "-collection:actor=../sleipnir/actor")
 	}
-	bs, bout, berr, bex := os.process_exec(os.Process_Desc{command = build_cmd}, context.temp_allocator)
+	bs, bout, berr, bex := os.process_exec(os.Process_Desc{command = build_cmd[:]}, context.temp_allocator)
 	testing.expectf(
 		t,
 		bex == nil && bs.exit_code == 0,
@@ -130,4 +124,9 @@ test_example_06_internal_odin_dsl_and_aot :: proc(t: ^testing.T) {
 @(test)
 test_example_07_telemetry_and_diff_replay :: proc(t: ^testing.T) {
 	_verify_example_dir(t, "examples/07_telemetry_and_diff_replay", "[ex07] OK")
+}
+
+@(test)
+test_example_08_sleipnir_actor_runtime :: proc(t: ^testing.T) {
+	_verify_example_dir(t, "examples/08_sleipnir_actor_runtime", "[ex08] OK", needs_actor = true)
 }

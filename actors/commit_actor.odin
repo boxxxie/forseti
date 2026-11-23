@@ -2,6 +2,7 @@ package forseti_actors
 
 import "core:fmt"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:strings"
 import actor "actor:."
 import xitdb "xitdb:."
@@ -99,6 +100,8 @@ Commit_Actor_State :: struct {
 	bridge:            ^forseti.Store_Bridge,
 	tel:               forseti.Telemetry_Sink,
 	tel_inited:        bool,
+	temp_arena:        vmem.Arena,
+	temp_inited:       bool,
 	next_dec_seq:      u64,
 	subscribers:       [dynamic]actor.PID(Session_Msg),
 	prev_destroy_proc: proc(base: ^actor.Actor_Base),
@@ -179,6 +182,10 @@ commit_actor_cleanup_state :: proc(state: ^Commit_Actor_State) {
 	if state.tel_inited {
 		forseti.telemetry_destroy(&state.tel)
 		state.tel_inited = false
+	}
+	if state.temp_inited {
+		vmem.arena_destroy(&state.temp_arena)
+		state.temp_inited = false
 	}
 }
 
@@ -346,6 +353,21 @@ _broadcast_commit_notification :: proc(
 
 commit_actor_receive :: proc(ctx: ^actor.Context, self: ^Commit_Actor_Handle, msg: ^Commit_Msg) {
 	state := &self.state
+	if !state.temp_inited {
+		if vmem.arena_init_growing(&state.temp_arena) == nil {
+			state.temp_inited = true
+		}
+	}
+	prev_temp := context.temp_allocator
+	if state.temp_inited {
+		context.temp_allocator = vmem.arena_allocator(&state.temp_arena)
+	}
+	defer {
+		if state.temp_inited {
+			vmem.arena_free_all(&state.temp_arena)
+		}
+		context.temp_allocator = prev_temp
+	}
 	switch &m in msg^ {
 	case Commit_Derived_Batch:
 		rec_cnt := len(m.records)
