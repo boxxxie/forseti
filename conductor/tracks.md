@@ -54,5 +54,5 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [~] **Track 11: External Consumer Integration, Stable C99 ABI (`libforseti`) & DSL v1.1 Ergonomics (`import` & Pure Built-Ins)** *(Priority: Step 11 — Depends on Tracks 7, 8, 9)*
+- [x] **Track 11: External Consumer Integration, Stable C99 ABI (`libforseti`) & DSL v1.1 Ergonomics (`import` & Pure Built-Ins)** *(Priority: Step 11 — Depends on Tracks 7, 8, 9)*
   *Link: [./tracks/c_abi_external_integration_and_dsl_v1_1_20261122/](./tracks/c_abi_external_integration_and_dsl_v1_1_20261122/)*
