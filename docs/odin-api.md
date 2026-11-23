@@ -1,23 +1,25 @@
-[README](../README.md) · [Docs Hub](README.md) · **Odin API** · [DSL Reference](dsl-reference.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
+[README](../README.md) · [Docs Hub](README.md) · **Odin API** · [DSL Reference](dsl-reference.md) · [C99 ABI](c-api.md) · [Editors & LSP](editors.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
 
 # Forseti Odin Embedding & Runtime Guide
 
-Practical guide to embedding `package forseti` in Odin applications: compilation, memory lifetimes, standalone decision tables, incremental `xitdb` sync, JTMS queries, provenance semirings, counterfactual replay, 3-phase async effects, and telemetry.
+Practical guide to embedding `package forseti` (and optional `package forseti_actors`) in Odin applications: compilation, `import` resolution, memory lifetimes, standalone decision tables, working memory, typed struct helpers, incremental `xitdb` sync, JTMS queries, provenance semirings, counterfactual replay, 3-phase async effects, telemetry, and multi-threaded Sleipnir actors.
 
 > [!NOTE]
-> For `.forseti` language syntax, EBNF grammar, and the full diagnostic catalog, see [`docs/dsl-reference.md`](dsl-reference.md).
+> For `.forseti` language syntax, EBNF grammar, built-ins, and the full diagnostic catalog, see [`docs/dsl-reference.md`](dsl-reference.md). For the C99 shared-library ABI, see [`docs/c-api.md`](c-api.md).
 
 ## Contents
 
 - [1. Memory Ownership & LIFO Lifecycle](#1-memory-ownership--lifo-lifecycle)
-- [2. Compiling Policies & Formatting Diagnostics](#2-compiling-policies--formatting-diagnostics)
+- [2. Compiling Policies, Imports, Diagnostics & Formatting](#2-compiling-policies-imports-diagnostics--formatting)
 - [3. Standalone Decision Tables & Lazy Column Thunks](#3-standalone-decision-tables--lazy-column-thunks)
 - [4. Working Memory, Provenance Modes & Queries](#4-working-memory-provenance-modes--queries)
-- [5. `xitdb` Persistence, `Delta_Syncer` & Atomic Audit Layout](#5-xitdb-persistence-delta_syncer--atomic-audit-layout)
-- [6. Causal Explanations, Impact, Semirings, `diff_replay` & Graphs](#6-causal-explanations-impact-semirings-diff_replay--graphs)
-- [7. Three-Phase Async Effects (`Prepare -> Execute -> Apply`)](#7-three-phase-async-effects-prepare---execute---apply)
-- [8. Tier 2 Internal Odin DSL & Tier 3 AOT Codegen](#8-tier-2-internal-odin-dsl--tier-3-aot-codegen)
-- [9. Built-In Telemetry & Compile-Time Toggle](#9-built-in-telemetry--compile-time-toggle)
+- [5. Typed Odin Struct Embeds (`forseti/typed_api.odin`)](#5-typed-odin-struct-embeds-forsetityped_apiodin)
+- [6. `xitdb` Persistence, `Delta_Syncer` & Atomic Audit Layout](#6-xitdb-persistence-delta_syncer--atomic-audit-layout)
+- [7. Causal Explanations, Impact, Semirings, `diff_replay` & Graphs](#7-causal-explanations-impact-semirings-diff_replay--graphs)
+- [8. Three-Phase Async Effects (`Prepare -> Execute -> Apply`)](#8-three-phase-async-effects-prepare---execute---apply)
+- [9. Tier 2 Internal Odin DSL & Tier 3 AOT Codegen](#9-tier-2-internal-odin-dsl--tier-3-aot-codegen)
+- [10. Built-In Telemetry & Compile-Time Toggle](#10-built-in-telemetry--compile-time-toggle)
+- [11. Multi-Threaded Actor Runtime (`actors/` + Sleipnir)](#11-multi-threaded-actor-runtime-actors--sleipnir)
 
 ---
 
@@ -66,32 +68,39 @@ Interning via `intern_session_string(&rb.interner, &sess.interner, text)` reuses
 
 ---
 
-## 2. Compiling Policies & Formatting Diagnostics
+## 2. Compiling Policies, Imports, Diagnostics & Formatting
 
-`compile_source` runs lexing (`lexer.odin`), Pratt parsing (`parser.odin`), IR lowering (`lower.odin`), semantic/type/binding analysis (`sema.odin`), static decision-table verification (`table_verify.odin`), and Tarjan SCC stratification (`stratify.odin`) in one call:
+Choose the compiler entrypoint based on whether the policy uses `import "..."`:
+
+- `compile_source(src, source_name, &diags, &tel)` — Single in-memory `.forseti` string (fastest when there are no `import` statements).
+- `compile_source_with_imports(src, source_name, include_paths, &diags, &tel)` — In-memory root policy resolving transitive `import` files relative to `source_name` and `include_paths` (diamond-deduplicated; cycles report `E2006`).
+- `compile_file(file_path, include_paths, &diags, &tel)` — Reads `file_path` from disk and resolves all transitive imports.
+- `format_source(src)` — Formats `.forseti` text canonically, preserving comments and aligning DMN table pipes (caller owns the returned string via `delete`).
+
+Each compilation entrypoint runs lexing (`lexer.odin`), Pratt parsing (`parser.odin`), IR lowering (`lower.odin`), semantic/type/binding analysis (`sema.odin`), static decision-table verification (`table_verify.odin`), and Tarjan SCC stratification (`stratify.odin`) automatically:
 
 ```odin
 diags: forseti.Diagnostic_List
 _ = forseti.diag_list_init(&diags)
 defer forseti.diag_list_destroy(&diags)
 
-ir, c_err := forseti.compile_source(src, "policy.forseti", &diags)
+ir, c_err := forseti.compile_file("policies/root.forseti", {"policies/shared"}, &diags)
 defer forseti.ir_destroy(&ir)
 
 if c_err != nil || forseti.diag_has_errors(&diags) {
 	for d in diags.items {
-		txt, _ := forseti.format_diagnostic_human(d, src, "policy.forseti")
+		txt, _ := forseti.format_diagnostic_human(d, src, "policies/root.forseti")
 		defer delete(txt)
 		fmt.eprint(txt)
 	}
 	// Or emit machine-readable JSON for tooling:
-	json_txt, _ := forseti.format_diagnostics_json(&diags, "policy.forseti")
+	json_txt, _ := forseti.format_diagnostics_json(&diags, "policies/root.forseti")
 	defer delete(json_txt)
 }
 ```
 
 > [!TIP]
-> `compile_source` and `ir_builder_build` already run `analyze_ir` internally. Do **not** call `analyze_ir` a second time on the same `Diagnostic_List` unless you manually mutate `Rulebase_IR` afterward.
+> `compile_source`, `compile_file`, `compile_source_with_imports`, and `ir_builder_build` already run `analyze_ir` internally. Do **not** call `analyze_ir` a second time on the same `Diagnostic_List` unless you manually mutate `Rulebase_IR` afterward.
 
 ---
 
@@ -165,8 +174,9 @@ _, _ = forseti.session_fire(sess)
 // Retract by Fact_Id or (binding, key) -> automatically cascades logical assertions in .Audit_Full / .Support_Only
 _ = forseti.session_retract_fact(sess, fid)
 
-// Execute a compiled parameterized query
+// Execute a compiled parameterized query (string args must be interned to String_Id)
 qres: forseti.Query_Result
+tier_sid, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "enterprise")
 q_err := forseti.session_query(sess, "golden_by_tier", {{name = "tier", value = tier_sid}}, &qres)
 assert(q_err == .None)
 defer forseti.query_result_destroy(&qres)
@@ -178,7 +188,56 @@ for row in qres.rows {
 
 ---
 
-## 5. `xitdb` Persistence, `Delta_Syncer` & Atomic Audit Layout
+## 5. Typed Odin Struct Embeds (`forseti/typed_api.odin`)
+
+For pure-Odin hosts, `session_insert_struct`, `session_modify_struct`, `decide_table_struct`, `decide_struct`, and `query_unmarshal` map Odin struct fields using `forseti:"field_name"` tags (falling back to the Odin field name, and skipping `forseti:"-"`). Every non-skipped field required by the target schema or table must be present on the input struct:
+
+```odin
+Org_Input :: struct {
+	id:        string `forseti:"org_id"`,
+	employees: i64    `forseti:"employees"`,
+	active:    bool   `forseti:"active"`,
+	ignored:   string `forseti:"-"`,
+}
+
+Tier_Out :: struct {
+	tier: string `forseti:"tier"`,
+}
+
+Org_Row :: struct {
+	org_id:    string `forseti:"oid"`,
+	tier:      string `forseti:"tier"`,
+	employees: i64    `forseti:"emp"`,
+}
+
+_, _ = forseti.session_insert_struct(sess, "raw_orgs", "org:acme", Org_Input{id = "org:acme", employees = 250, active = true})
+_, _ = forseti.session_fire(sess)
+
+// Update by key later using a typed struct:
+_ = forseti.session_modify_struct(sess, "raw_orgs", "org:acme", Org_Input{id = "org:acme", employees = 300, active = true})
+_, _ = forseti.session_fire(sess)
+
+// Evaluate a compiled table directly on ^Rulebase without manual String_Id plumbing:
+tier_out: Tier_Out
+_, _ = forseti.decide_struct(&rb, "tier_gate", Org_Input{id = "org:acme", employees = 300, active = true}, &tier_out)
+
+// Query and unmarshal rows into typed Odin structs:
+qr: forseti.Query_Result
+defer forseti.query_result_destroy(&qr)
+tier_sid, _ := forseti.intern_session_string(&rb.interner, &sess.interner, "enterprise")
+_ = forseti.session_query(sess, "list_tiered", {{name = "tier", value = tier_sid}}, &qr)
+
+rows: [dynamic]Org_Row
+defer delete(rows)
+_ = forseti.query_unmarshal(sess, &qr, &rows)
+```
+
+> [!NOTE]
+> String fields written into `Tier_Out` (`decide_struct` / `decide_table_struct`) borrow storage from the table interner (`rb` / `ct`), and string fields written into `rows` (`query_unmarshal`) borrow storage from `sess` / `qr`. Clone strings with `strings.clone` if you retain them past teardown.
+
+---
+
+## 6. `xitdb` Persistence, `Delta_Syncer` & Atomic Audit Layout
 
 ### Opening or Attaching a Store (`Store_Bridge`)
 
@@ -199,7 +258,7 @@ See [`examples/02_mdm_xitdb_pipeline`](../examples/02_mdm_xitdb_pipeline/main.od
 
 ---
 
-## 6. Causal Explanations, Impact, Semirings, `diff_replay` & Graphs
+## 7. Causal Explanations, Impact, Semirings, `diff_replay` & Graphs
 
 All inspection reports own their returned strings/slices and provide dedicated `*_destroy` helpers:
 
@@ -238,7 +297,7 @@ defer delete(dot)
 
 ---
 
-## 7. Three-Phase Async Effects (`Prepare -> Execute -> Apply`)
+## 8. Three-Phase Async Effects (`Prepare -> Execute -> Apply`)
 
 Rules declaring `effect "kind" { ... }` stage pure `Effect_Job` payloads during `session_fire` instead of executing blocking I/O inside matching:
 
@@ -253,7 +312,7 @@ See [`examples/05_accumulators_and_effects`](../examples/05_accumulators_and_eff
 
 ---
 
-## 8. Tier 2 Internal Odin DSL & Tier 3 AOT Codegen
+## 9. Tier 2 Internal Odin DSL & Tier 3 AOT Codegen
 
 - **Tier 2 (`Ir_Builder`, [`forseti/dsl_odin.odin`](../forseti/dsl_odin.odin)):** Assemble schemas (`ir_schema`), `xitdb` bindings (`ir_source`, `ir_derived`), tables (`ir_table`), rules (`ir_rule` with `when_clauses` and `then_actions`), and queries (`ir_query`), then call `ir_builder_build(&b, &diags)`.
 - **Tier 3 (`codegen_odin_module`, [`forseti/codegen_odin.odin`](../forseti/codegen_odin.odin)):** Emits standalone `"contextless"` Odin structs (`<Table>_Input`, `<Table>_Output`) and evaluator procedures (`decide_<table_name>`) for `First`, `Unique`, `Any`, `Priority`, `Collect*`, `Merge`, and `Reverse_Merge` tables:
@@ -266,9 +325,9 @@ defer delete(aot_src)
 
 ---
 
-## 9. Built-In Telemetry & Compile-Time Toggle
+## 10. Built-In Telemetry & Compile-Time Toggle
 
-Pass `&tel` (`Telemetry_Sink`) into `compile_source`, `rulebase_compile`, `session_init`, `store_bridge_*`, or `delta_syncer_init` to capture hierarchical phase spans (`lex`, `parse`, `ir_lower`, `analyze`, `table_verify`, `compile`, `sync`, `match`, `tms`, `commit`), counters (`alpha_tests`, `alpha_hits`, `segments_skipped_unlinked`, `rules_fired`, `slots_skipped`, `derivations_recorded`), and peak memory watermarks:
+Pass `&tel` (`Telemetry_Sink`) into `compile_source`, `compile_file`, `rulebase_compile`, `session_init`, `store_bridge_*`, or `delta_syncer_init` to capture hierarchical phase spans (`lex`, `parse`, `ir_lower`, `analyze`, `table_verify`, `compile`, `sync`, `match`, `tms`, `commit`), counters (`alpha_tests`, `alpha_hits`, `segments_skipped_unlinked`, `rules_fired`, `slots_skipped`, `derivations_recorded`), and peak memory watermarks:
 
 ```odin
 tel: forseti.Telemetry_Sink
@@ -288,7 +347,7 @@ To compile out all instrumentation overhead completely on ultra-tight production
 
 ---
 
-## 9. Multi-Threaded Actor Runtime (`actors/` + Sleipnir)
+## 11. Multi-Threaded Actor Runtime (`actors/` + Sleipnir)
 
 Core `package forseti` stays single-threaded, zero-lock, and zero-actor. When scaling across multiple OS threads or isolated tenants, import the sibling package **`actors/`** (`package forseti_actors`, requiring `-collection:actor=../sleipnir/actor`):
 
@@ -300,35 +359,3 @@ Core `package forseti` stays single-threaded, zero-lock, and zero-actor. When sc
 - **`Rulebase_Coordinator` (`actors/rulebase_coordinator.odin`):** Compiles and validates updated `.forseti` policies off the hot path, atomically broadcasts `Swap_Rulebase` across subscribed `Session_Actor`s, rejects invalid policies without disrupting running sessions, and reclaims retired `Rulebase` instances via atomic reference counting (`Rulebase_Ref`).
 
 See [`examples/08_sleipnir_actor_runtime/main.odin`](../examples/08_sleipnir_actor_runtime/main.odin) for a full leak-checked end-to-end walkthrough.
-
----
-
-## 10. Typed Odin Struct Embeds (`forseti/typed_api.odin`)
-
-For pure-Odin hosts, `session_insert_struct`, `session_modify_struct`, `decide_struct` / `decide_table_struct`, and `query_unmarshal` map Odin struct fields using `forseti:"field_name"` tags (falling back to the Odin field name, and skipping `forseti:"-"`):
-
-```odin
-Org_Input :: struct {
-	id:        string `forseti:"org_id"`,
-	employees: i64    `forseti:"employees"`,
-	active:    bool   `forseti:"active"`,
-	ignored:   string `forseti:"-"`,
-}
-
-Org_Row :: struct {
-	org_id:    string `forseti:"oid"`,
-	tier:      string `forseti:"tier"`,
-	employees: i64    `forseti:"emp"`,
-}
-
-_, _ = forseti.session_insert_struct(sess, "raw_orgs", "org:acme", Org_Input{id = "org:acme", employees = 250, active = true})
-_, _ = forseti.session_fire(sess)
-
-qr: forseti.Query_Result
-defer forseti.query_result_destroy(&qr)
-_ = forseti.session_query(sess, "list_tiered", {{name = "tier", value = "enterprise"}}, &qr)
-
-rows: [dynamic]Org_Row
-defer delete(rows)
-_ = forseti.query_unmarshal(sess, &qr, &rows) // String fields borrow `sess`/`qr` storage
-```

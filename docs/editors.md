@@ -1,4 +1,4 @@
-[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · [Benchmarks](benchmarks.md) · **Editors & Tooling** · [Agent Rules](../usage-rules.md)
+[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · [C99 ABI](c-api.md) · **Editors & LSP** · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
 
 # Editor Integrations, Formatter & Language Server
 

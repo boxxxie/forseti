@@ -1,4 +1,4 @@
-[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · **DSL Reference** · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
+[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · **DSL Reference** · [C99 ABI](c-api.md) · [Editors & LSP](editors.md) · [Benchmarks](benchmarks.md) · [Agent Rules](../usage-rules.md)
 
 # Forseti DSL Reference
 
@@ -31,7 +31,7 @@
 ## 2. Lexical Conventions
 
 - **Identifiers:** `[A-Za-z_][A-Za-z0-9_]*`
-- **Keywords (35):** `module`, `version`, `schema`, `source`, `derived`, `at`, `table`, `hit`, `verify`, `inputs`, `outputs`, `rows`, `cost`, `rule`, `phase`, `salience`, `when`, `then`, `effect`, `where`, `decide`, `assert`, `assert!`, `unconditional`, `retract`, `not`, `exists`, `from`, `query`, `true`, `false`, `and`, `or`, `in`, `enum`
+- **Keywords (36):** `module`, `import`, `version`, `schema`, `source`, `derived`, `at`, `table`, `hit`, `verify`, `inputs`, `outputs`, `rows`, `cost`, `rule`, `phase`, `salience`, `when`, `then`, `effect`, `where`, `decide`, `assert`, `assert!`, `unconditional`, `retract`, `not`, `exists`, `from`, `query`, `true`, `false`, `and`, `or`, `in`, `enum`
 - **Variables:** `?name` (prefix `?_name` marks an intentionally unused binding and suppresses `W2001`)
 - **Strings:** `"..."` supporting escapes `\"`, `\\`, `\n`, `\t`, `\r`, `\0` (note: backslash-newline escapes advance the lexer's line map accurately)
 - **Numbers:** integers (`42`, `1_000`, `-7`) and floats (`0.85`, `1.5e-3`)
@@ -99,6 +99,42 @@ QueryDecl   ::= "query" Ident ("(" (Ident ":" TypeSpec ("," Ident ":" TypeSpec)*
 - **Scalar types:** `bool`, `i32` (`-2147483648..2147483647`), `i64`, `f64`, `string`, `entity` (`u64`), `time` (nanoseconds `i64`), and closed `enum("a", "b", ...)`.
 - **Literal narrowing for `i32`:** Integer literals written in expressions, `==`/ordering predicates, ranges (`1..=10`), and `in (1, 2)` lists automatically check against `i32` bounds at compile time and reject out-of-range constants cleanly without wrap-around.
 - **Collection selectors (`at .path[?id]`):** Dot segments map to `xitdb` nested `Hash_Map` containers (e.g. `.orgs.raw[?id]`). Source facts sync incrementally via [`Delta_Syncer`](../forseti/xitdb_delta.odin), and derived facts/audit moments commit atomically into `.orgs.canon` (etc.), `.decisions`, `.idx.decisions_by_rule`, `.idx.decisions_by_entity`, and `.__tx`.
+
+### Pure Scalar Built-In Functions (DSL v1.1)
+
+Use pure scalar built-ins in `:=` bindings and `where` guards inside rules and queries (compiled into zero-allocation `#must_tail` VM opcodes):
+
+| Built-In | Signature | Semantics |
+| :--- | :--- | :--- |
+| `lower(s)` | `(string) -> string` | ASCII lowercase copy of `s` (interned in session) |
+| `upper(s)` | `(string) -> string` | ASCII uppercase copy of `s` (interned in session) |
+| `len(s)` | `(string) -> i64` | Byte length of `s` |
+| `starts_with(s, prefix)` | `(string, string) -> bool` | True when `s` starts with `prefix` |
+| `contains(s, sub)` | `(string, string) -> bool` | True when `sub` occurs inside `s` |
+| `abs(x)` | `(i32\|i64\|f64) -> same numeric` | Absolute value preserving `x`'s numeric type |
+| `min(a, b)` / `max(a, b)` | `(numeric, numeric) -> promoted numeric` | Element-wise minimum or maximum (`f64 > i64 > i32`) |
+
+```forseti
+module builtin_demo version "1.0"
+
+schema Lead { id: string, domain: string, delta: i64, cap: i64 }
+schema NormalizedLead { id: string, domain: string, bounded: i64 }
+
+source RawLead : Lead at .leads.raw[?id]
+derived CleanLead : NormalizedLead at .leads.clean[?id]
+
+rule normalize_lead {
+  when {
+    ?_l := RawLead(id: ?id, domain: ?dom, delta: ?d, cap: ?c)
+    ?norm := lower(?dom)
+    ?bounded := min(abs(?d), max(?c, 10))
+    where len(?norm) > 0 and (starts_with(?norm, "corp.") or contains(?norm, ".io"))
+  }
+  then {
+    assert CleanLead(id: ?id, domain: ?norm, bounded: ?bounded)
+  }
+}
+```
 
 ---
 
@@ -450,26 +486,28 @@ query q() { ?_g := decide review(score: 5, active: false) }
 
 ## 8. Complete `cmd/forseti` CLI Reference
 
-Build or run the CLI from repo root with sibling collections:
+Build or run the CLI from repo root with `-collection:xitdb=../xitdb/xitdb`:
 
 ```bash
-odin run cmd/forseti -collection:xitdb=../xitdb/xitdb -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -- check policy.forseti
+odin run cmd/forseti -collection:xitdb=../xitdb/xitdb -- check --include shared policy.forseti
 ```
 
 | Command | Purpose | Key Options |
 | :--- | :--- | :--- |
-| `check` | Parse, typecheck, lint, verify tables & stratify | `--format=human\|json`, `--warnings-as-errors`, `--telemetry` |
-| `verify-tables` | Static domain verification for all decision tables | `--format=human\|json`, `--warnings-as-errors` |
-| `gen` | Generate `"contextless"` AOT Odin table evaluators | `--package <name>`, `--out <file.odin>`, `--warnings-as-errors` |
+| `check` | Parse, resolve `import`s, typecheck, lint, verify tables & stratify | `--include` / `-I <dir>`, `--format=human\|json`, `--warnings-as-errors`, `--telemetry` |
+| `verify-tables` | Static domain verification for all decision tables | `--include` / `-I <dir>`, `--format=human\|json`, `--warnings-as-errors` |
+| `fmt` | Canonical `.forseti` formatting with aligned decision-table pipes | `--write` / `-w`, `--check`, `<file... \| ->` |
+| `lsp` | Start JSON-RPC 2.0 `.forseti` Language Server on stdio (also `cmd/forseti-lsp`) | stdio transport (`Content-Length`) |
+| `gen` | Generate `"contextless"` AOT Odin table evaluators | `--include` / `-I <dir>`, `--package <name>`, `--out <file.odin>`, `--warnings-as-errors` |
 | `ast` | Print deterministic S-expression AST | `--out <file>` |
-| `ir` | Print lowered canonical `Rulebase_IR` summary | `--out <file>`, `--warnings-as-errors` |
-| `run` | Compile & execute against JSON facts / `xitdb` store | `--facts`, `--store`, `--mode=audit\|support\|fast`, `--format=human\|json` |
-| `explain` | Print minimal proof tree(s) for derived facts | `--facts`, `--store`, `--binding`, `--key`, `--fact-id`, `--format=human\|json` |
-| `impact` | List direct/transitive facts & derivations for a rule | `--rule <name>`, `--version <ver>`, `--facts`, `--store`, `--format=human\|json` |
-| `diff-replay` | Compare baseline vs `--candidate` over `Core_Overlay` | `--candidate`, `--facts`, `--store`, `--format=human\|json` |
-| `telemetry` | Capture phase timings, counters & watermarks | `--facts`, `--store`, `--format=human\|jsonl\|json\|chrome-trace`, `--out` |
-| `export-dot` | Export rulebase or derivation DAG as Graphviz DOT | `--graph=rulebase\|derivations` / `--derivations`, `--facts`, `--binding`, `--key`, `--out` |
-| `export-mermaid` | Export rulebase or derivation DAG as Mermaid | `--graph=rulebase\|derivations` / `--derivations`, `--facts`, `--binding`, `--key`, `--out` |
+| `ir` | Print lowered canonical `Rulebase_IR` summary | `--include` / `-I <dir>`, `--out <file>`, `--warnings-as-errors` |
+| `run` | Compile & execute against JSON facts / `xitdb` store | `--include` / `-I <dir>`, `--facts`, `--store`, `--mode=audit\|support\|fast`, `--format=human\|json` |
+| `explain` | Print minimal proof tree(s) for derived facts | `--include` / `-I <dir>`, `--facts`, `--store`, `--binding`, `--key`, `--fact-id`, `--format=human\|json` |
+| `impact` | List direct/transitive facts & derivations for a rule | `--include` / `-I <dir>`, `--rule <name>`, `--version <ver>`, `--facts`, `--store`, `--format=human\|json` |
+| `diff-replay` | Compare baseline vs `--candidate` over `Core_Overlay` | `--include` / `-I <dir>`, `--candidate`, `--facts`, `--store`, `--format=human\|json` |
+| `telemetry` | Capture phase timings, counters & watermarks | `--include` / `-I <dir>`, `--facts`, `--store`, `--format=human\|jsonl\|json\|chrome-trace`, `--out` |
+| `export-dot` | Export rulebase or derivation DAG as Graphviz DOT | `--include` / `-I <dir>`, `--graph=rulebase\|derivations` / `--derivations`, `--facts`, `--binding`, `--key`, `--out` |
+| `export-mermaid` | Export rulebase or derivation DAG as Mermaid | `--include` / `-I <dir>`, `--graph=rulebase\|derivations` / `--derivations`, `--facts`, `--binding`, `--key`, `--out` |
 
 ### JSON Input Schema (`--facts facts.json`)
 

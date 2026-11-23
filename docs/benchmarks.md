@@ -1,16 +1,17 @@
-[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · **Benchmarks** · [Agent Rules](../usage-rules.md)
+[README](../README.md) · [Docs Hub](README.md) · [Odin API](odin-api.md) · [DSL Reference](dsl-reference.md) · [C99 ABI](c-api.md) · [Editors & LSP](editors.md) · **Benchmarks** · [Agent Rules](../usage-rules.md)
 
 # Forseti Benchmarks & Scaling Architecture
 
-This report documents Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) / [`obench`](https://github.com/zeybek/obench) benchmark suite across `7` benchmark groups (`93` parameterized benchmarks in `e9cd4fc`, later expanded to `207` benchmarks in `benchmarks/history.hugidb` at `05b9229bba93` covering frontend, verifier, VM, file-backed `xitdb`, cyclic strata, and provenance) scaling up to `1,000,000` rules, `10,000` working-memory facts, `10,000`-row JTMS cascades, and `5,000`-edge transitive closures, along with before/after measurements from the Phase 2 telemetry-guided optimization pass (`be8f675` -> `e9cd4fc`).
+This report documents Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) / [`obench`](https://github.com/zeybek/obench) benchmark suite—scaling from `93` parameterized benchmarks (`e9cd4fc`) to `253` benchmarks across `9` groups in the **`v0.1.0` release snapshot (`434960b`)** in [`benchmarks/history.hugidb`](../benchmarks/history.hugidb). It covers frontend compilation, decision-table verification/AOT, `#must_tail` VM, file-backed `xitdb`, cyclic strata, Z-set JTMS, causal provenance/`diff_replay`, Sleipnir multi-threaded actors, and `10` to `1,000,000`-rule scaling.
 
 > [!IMPORTANT]
-> **TL;DR Scaling Scorecard (`e9cd4fc` on Ryzen 7 7735U, `-o:speed -microarch:native`):**
-> - **AOT Table (`10,000` rows):** `716.48 ps` (`2.0` CPU cycles, `0` allocs)
-> - **Lazy Cost Tree (`10,000` rows):** `28.80 ns` (`O(1)`, `0` allocs)
-> - **`1,000,000`-Rule Compile & Sparse Init:** `1.772 s` compile (`~556 B/rule`), `19.48 us` `session_init` (`O(1)`), `2.27 us` single-rule match
-> - **`@zero_alloc` PHREAK Hot Match (`.Fast`):** `1.32 ms` at `1,000` background facts (`12.14x` speedup, `0` allocs)
-> - **Incremental `xitdb` v2 Diff (`10 / 10k`):** `3.56 us` (`2.81 M items/s`, `0` allocs)
+> **TL;DR Scorecard — `v0.1.0` Release (`434960b`, Ryzen 7 7735U, `-o:speed -microarch:native`):**
+> - **AOT Table (`10,000` rows):** `775.58 ps` (`0` allocs, `1.29B ops/s`; `716.48 ps` / `2.0` cycles in PMU counter run)
+> - **Lazy Cost Tree (`10,000` rows):** `42.90 ns` (`O(1)`, `0` allocs)
+> - **`1,000,000`-Rule Compile & Sparse Init:** `1.942 s` compile, `20.17 us` `session_init` (`O(1)`, `R^2 = 0.994`), `1.87 us` sparse match (`2.64 us` `.Audit_Full`)
+> - **`@zero_alloc` PHREAK Hot Match (`.Fast`):** `3.16 us` at `10,000` background facts (`O(1)`, `0` allocs)
+> - **Incremental `xitdb` v2 Diff (`10 / 10k`) & MDM Sync:** `3.93 us` (`0` allocs) HAMT diff; `352.65 us` `.Audit_Full` (`119.58 us` `.Fast`) end-to-end sync+fire at `10,000` orgs
+> - **Parallel Sleipnir `diff_replay` (`4` candidates, `4` workers):** `939.51 us` (`3.27x` speedup vs baseline)
 
 ## Contents
 
@@ -193,11 +194,15 @@ Recorded on idle hardware (`geomean: 20.12 us`, `11,989` samples) after flatteni
 
 ```bash
 # 1. Full leak-checked ATDD + Unit specs and ASan checks
-COLS="-collection:xitdb=../xitdb/xitdb -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench"
+XITDB="-collection:xitdb=../xitdb/xitdb"
+ACTOR="-collection:actor=../sleipnir/actor"
+HUGI="-collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench"
 VET="-vet -vet-tabs -strict-style -warnings-as-errors"
-odin test specs -all-packages $COLS $VET -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
-odin test tests -all-packages $COLS $VET -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
-odin test tests -sanitize:address $COLS -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+
+odin test tests $XITDB $ACTOR -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+odin test specs $XITDB -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+odin test specs_actors $XITDB $ACTOR -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+odin test tests -sanitize:address $XITDB $ACTOR -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
 # 2. Verify @zero_alloc + smoke assertions across functional workloads
 hugi run --test --groups decision_tables,xitdb_modes,beta_joins,jtms_churn,recursive_strata,mdm_e2e
@@ -208,6 +213,6 @@ hugi history
 hugi compare --last --format md
 
 # 4. Run 10..1,000,000 rule telemetry sweep directly
-odin build benchmarks -out:/tmp/forseti_bench -o:speed -microarch:native $COLS $VET
+odin build benchmarks -out:/tmp/forseti_bench -o:speed -microarch:native $XITDB $ACTOR $HUGI $VET -vet-packages:forseti,main
 /tmp/forseti_bench --profile-1m
 ```

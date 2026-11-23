@@ -130,9 +130,13 @@ test_doc_forseti_snippets_compile_and_match_expected_diagnostics :: proc(t: ^tes
 	readme_cnt := _verify_doc_forseti_snippets(t, "README.md")
 	dsl_cnt := _verify_doc_forseti_snippets(t, "docs/dsl-reference.md")
 	usage_cnt := _verify_doc_forseti_snippets(t, "usage-rules.md")
+	docs_readme_cnt := _verify_doc_forseti_snippets(t, "docs/README.md")
+	capi_cnt := _verify_doc_forseti_snippets(t, "docs/c-api.md")
 	testing.expect(t, readme_cnt >= 1)
 	testing.expect(t, dsl_cnt >= 1)
 	testing.expect(t, usage_cnt >= 1)
+	_ = docs_readme_cnt
+	_ = capi_cnt
 }
 
 @(test)
