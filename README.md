@@ -20,11 +20,13 @@ Forseti replaces tangled `if`/`else` business logic, unverified spreadsheet rule
 
 ## Why Forseti?
 
-- **Three Authoring Tiers over One Canonical IR:** Author policies in the **External `.forseti` DSL** (zero-copy lexer, hot-reload, compiler diagnostics), build rules programmatically with the **Internal Odin DSL** (`Ir_Builder`), or freeze hot tables into `"contextless"` **AOT Odin procedures** (`forseti gen`).
+- **Three Authoring Tiers over One Canonical IR:** Author policies in the **External `.forseti` DSL** (zero-copy lexer, multi-file `import` with `--include`, pure scalar built-ins, hot-reload, compiler diagnostics), build rules programmatically with the **Internal Odin DSL** (`Ir_Builder`), or freeze hot tables into `"contextless"` **AOT Odin procedures** (`forseti gen`).
 - **Compiler-Verified DMN Decision Tables (`Tablex++` / `ZEN`):** Supports `First`, `Unique`, `Any`, `Priority`, `Collect` (`_Sum`, `_Min`, `_Max`, `_Count`), `Merge`, and `Reverse_Merge`. Static domain partitioning catches overlaps, dead/shadowed rules, unsatisfiable predicates, and coverage gaps with **concrete counterexample witnesses** before deployment.
 - **Lazy PHREAK Matcher & `1,000,000`-Rule Scale:** Shared alpha DAG, `u64` segment bitmasks, Left/Right unlinking, 32-bit `#must_tail` guard VM, and lazy per-session memory allocation keep `session_init` at `O(1)` (`19.48 us`) even across `1,000,000` rules (`~556 B/rule`).
 - **Z-Set JTMS + Stratified Semi-Naive Datalog:** Logical `assert` derivations retract automatically in cascade when premises vanish, while `assert! ... unconditional` preserves permanent audit entries. Supports `not`/`exists`, retractable accumulators (`count`, `sum`, `min`, `max`, `avg`, `distinct`), and Tarjan SCC recursion over cyclic hierarchies.
 - **Universal `xitdb` Substrate & Causal Provenance:** Syncs incrementally from `Core_Memory` (`~3M+ items/s`), durable `Core_Buffered_File`, or zero-copy `Core_Overlay` counterfactual forks (`diff_replay`). Records `#soa` derivation DAGs, commits `.decisions` + `.idx.*` + `.__tx` atomically, and answers `explain`, `impact`, and algebraic semiring (`Boolean`, `Why`, `How`, `Viterbi`) queries.
+- **Sleipnir Multi-Threaded Runtime (`actors/`):** Optional [`sleipnir`](https://github.com/boxxxie/sleipnir) layer pinning each `Session` to an actor (`Session_Actor` + SPSC ingest), single-writer `Xitdb_Commit_Actor`, OTP `Partitioned_Supervisor` tenant isolation, supervised `Effect_Dispatcher`, parallel `diff_replay`, and ref-counted hot-reload while keeping core `forseti/` zero-dependency.
+- **Typed Odin Structs, Stable C99 ABI & Editor Tooling:** Struct-tag helpers (`session_insert_struct`, `decide_struct`, `query_unmarshal`), opaque C99 ABI (`capi/` -> `libforseti` + [`include/forseti.h`](include/forseti.h)), canonical formatter (`forseti fmt`), JSON-RPC 2.0 LSP (`forseti lsp`), and TextMate / Tree-sitter grammars (`editors/`).
 - **Built-In Telemetry & Longitudinal Benchmarking:** Captures phase timings, rule/memory counters, and memory watermarks (`JSONL` / Chrome Trace) and ships [`hugi`](https://github.com/boxxxie/hugi) + [`obench`](https://github.com/zeybek/obench) benchmarks spanning `10` to `1,000,000` rules.
 
 ---
@@ -296,6 +298,35 @@ defer forseti.diff_replay_report_destroy(&diff_rep)
 
 ---
 
+### 5. Typed Odin Structs & C99 ABI (`capi/` + `include/forseti.h`)
+
+Insert facts, evaluate tables, and unmarshal query rows directly with `forseti:"..."` Odin struct tags—or embed Forseti from C, Rust, Elixir, Python, or Go via the opaque-handle C99 ABI (`forseti_rulebase_t`, `forseti_session_t`, `forseti_store_t`):
+
+```odin
+Account_Row :: struct {
+	id:        string `forseti:"id"`,
+	employees: i64    `forseti:"employees"`,
+	active:    bool   `forseti:"active"`,
+}
+Golden_Row :: struct {
+	id:   string `forseti:"?aid"`,
+	tier: string `forseti:"?tier"`,
+}
+
+_, _ = forseti.session_insert_struct(sess, "RawAccount", "acct:1", Account_Row{"acct:1", 250, true})
+_, _ = forseti.session_fire(sess)
+
+qr: forseti.Query_Result
+defer forseti.query_result_destroy(&qr)
+_ = forseti.session_query(sess, "golden_by_tier", {{"tier", "enterprise"}}, &qr)
+
+rows: [dynamic]Golden_Row
+defer delete(rows)
+_ = forseti.query_unmarshal(sess, &qr, &rows)
+```
+
+---
+
 ## Performance Highlights (`10` to `1,000,000` Rules)
 
 Measured on Linux `x86_64` (`AMD Ryzen 7 7735U`, `-o:speed -microarch:native`, `e9cd4fc`) using [`hugi`](https://github.com/boxxxie/hugi) + [`obench`](https://github.com/zeybek/obench) in [`benchmarks/history.hugidb`](benchmarks/history.hugidb). See the full methodology, hardware PMU counters, and complexity curves in [`docs/benchmarks.md`](docs/benchmarks.md).
@@ -318,9 +349,10 @@ Measured on Linux `x86_64` (`AMD Ryzen 7 7735U`, `-o:speed -microarch:native`, `
 ```bash
 COLS="-collection:xitdb=../xitdb/xitdb -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench"
 
-# 1. Compile, lint, and verify decision tables statically
-odin run cmd/forseti $COLS -- check policy.forseti --warnings-as-errors
+# 1. Compile, lint, verify decision tables, and check formatting (supports --include / -I for imports)
+odin run cmd/forseti $COLS -- check --include shared --warnings-as-errors policy.forseti
 odin run cmd/forseti $COLS -- verify-tables policy.forseti
+odin run cmd/forseti $COLS -- fmt --check policy.forseti
 
 # 2. Execute against JSON facts or a persisted xitdb v2 store
 odin run cmd/forseti $COLS -- run --facts facts.json --store mdm.xit --format=json policy.forseti
@@ -330,18 +362,19 @@ odin run cmd/forseti $COLS -- explain --facts facts.json --binding CanonOrg poli
 odin run cmd/forseti $COLS -- impact --facts facts.json --rule canonicalize --format=json policy.forseti
 odin run cmd/forseti $COLS -- diff-replay --candidate v2.forseti --facts facts.json --format=json v1.forseti
 
-# 4. Capture telemetry, export visual graphs, or emit AOT Odin tables
+# 4. Capture telemetry, export visual graphs, emit AOT Odin tables, or launch the stdio LSP
 odin run cmd/forseti $COLS -- telemetry --facts facts.json --format=chrome-trace --out trace.json policy.forseti
 odin run cmd/forseti $COLS -- export-mermaid --graph=rulebase policy.forseti
 odin run cmd/forseti $COLS -- gen --package generated_tables --out generated_tables.odin policy.forseti
+odin run cmd/forseti $COLS -- lsp
 ```
 
 <details>
-<summary>All 12 CLI Subcommands</summary>
+<summary>All 14 CLI Subcommands</summary>
 
 | Command | Purpose |
 | :--- | :--- |
-| `check` | Parse, typecheck, lint (`E1xxx–E4xxx`, `W2xxx–W3xxx`), and stratify |
+| `check` | Parse, resolve `import`s (`--include` / `-I`), typecheck, lint (`E1xxx–E4xxx`, `W2xxx–W3xxx`), and stratify |
 | `verify-tables` | Static gap/overlap/dead-rule proofs across all DMN tables |
 | `gen` | Emit `"contextless"` AOT Odin evaluators |
 | `ast` | Print deterministic S-expression AST |
@@ -353,6 +386,8 @@ odin run cmd/forseti $COLS -- gen --package generated_tables --out generated_tab
 | `telemetry` | Export phase spans, counters, and watermarks (`jsonl` / `chrome-trace`) |
 | `export-dot` | Export rulebase or derivation DAG as Graphviz DOT |
 | `export-mermaid` | Export rulebase or derivation DAG as Mermaid flowchart |
+| `fmt` | Format `.forseti` files canonically (`--write` / `-w`, `--check`, aligned table pipes) |
+| `lsp` | Run the JSON-RPC 2.0 `.forseti` Language Server over stdio (also `cmd/forseti-lsp`) |
 
 </details>
 
@@ -368,32 +403,44 @@ Forseti has **zero external C dependencies** (`base:*` and `core:*` plus sibling
 mkdir -p odin-workspace && cd odin-workspace
 git clone https://github.com/boxxxie/forseti.git
 git clone https://github.com/boxxxie/odin-xitdb.git xitdb
+git clone https://github.com/boxxxie/sleipnir.git
 git clone https://github.com/boxxxie/hugi.git
 git -C hugi submodule update --init deps/obench
 cd forseti
 ```
 
-### 2. Static Checks, Leak-Checked Tests & Benchmarks
+### 2. Static Checks, Leak-Checked Tests, C99 Shared Library & Benchmarks
 
-Every test target runs under strict compiler vetting and `-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`:
+Every test target runs under strict compiler vetting and `-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true` (matching [`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
 ```bash
-COLS="-collection:xitdb=../xitdb/xitdb -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench"
-VET="-vet -vet-tabs -strict-style -disallow-do -warnings-as-errors"
+XITDB="-collection:xitdb=../xitdb/xitdb"
+ACTOR="-collection:actor=../sleipnir/actor"
+HUGI="-collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench"
+VET="-vet -vet-tabs -strict-style -warnings-as-errors"
 
-# Strict static checks across library, CLI, tests, and specs
-odin check forseti -no-entry-point $COLS $VET
-odin check cmd/forseti $COLS $VET
+# Strict static checks across all packages
+odin check forseti -no-entry-point $XITDB $VET -vet-packages:forseti
+odin check lsp -no-entry-point $XITDB $VET -vet-packages:forseti,forseti_lsp
+odin check actors -no-entry-point $XITDB $ACTOR $VET -vet-packages:forseti,forseti_actors
+odin check capi -no-entry-point $XITDB $VET -vet-packages:forseti,forseti_capi
+odin check cmd/forseti $XITDB $VET -vet-packages:forseti,forseti_lsp,main
+odin check cmd/forseti-lsp $XITDB $VET -vet-packages:forseti,forseti_lsp,main
 
 # Full leak-checked unit/property/doc/example tests & 4-layer ATDD specs
-odin test tests -all-packages $COLS $VET -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
-odin test specs -all-packages $COLS $VET -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+odin test tests $XITDB $ACTOR -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+odin test specs $XITDB -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+odin test specs_actors $XITDB $ACTOR -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
-# AddressSanitizer differential / oracle fuzz checks
-odin test tests -sanitize:address -collection:xitdb=../xitdb/xitdb -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+# AddressSanitizer checks (Linux)
+odin test tests -sanitize:address $XITDB $ACTOR -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+odin test specs_actors -sanitize:address $XITDB $ACTOR -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+
+# Build C99 shared library (add -linker:lld on Windows when linking with MSVC cl/link.exe)
+odin build capi -build-mode:shared $XITDB -out:libforseti.so
 
 # Package docs verification & longitudinal benchmarks
-odin doc forseti -collection:xitdb=../xitdb/xitdb > /dev/null
+odin doc forseti $XITDB > /dev/null
 hugi run
 ```
 
@@ -434,15 +481,20 @@ Every example compiles cleanly under strict `-vet -strict-style -warnings-as-err
 
 ```text
 .
-├── forseti/        # Core library: lexer, parser, IR, sema, DMN verifier/AOT, xitdb bridge, PHREAK, JTMS, Datalog, telemetry
+├── forseti/        # Core library: lexer, parser, imports, IR, sema, DMN verifier/AOT, xitdb bridge, PHREAK, JTMS, Datalog, typed API, fmt
 ├── actors/         # Optional Sleipnir multi-threaded runtime (Session_Actor, Xitdb_Commit_Actor, Tenant_Rule_Runtime, Effect_Dispatcher)
-├── cmd/forseti/    # Operational CLI (check, verify-tables, gen, ast, ir, run, explain, impact, diff-replay, telemetry, export-*)
+├── lsp/            # Pure-Odin JSON-RPC 2.0 Language Server (diagnostics, hover, definition, symbols, completion, formatting, codeAction)
+├── capi/           # Stable C99 ABI shared/static wrapper (libforseti)
+├── include/        # Public C99 header (forseti.h)
+├── cmd/forseti/    # Operational CLI (check, verify-tables, gen, ast, ir, run, explain, impact, diff-replay, telemetry, export-*, fmt, lsp)
+├── cmd/forseti-lsp/# Standalone stdio LSP binary entrypoint
+├── editors/        # TextMate grammar, Tree-sitter grammar + highlights.scm, and comprehensive smoke fixtures
 ├── specs/          # Black-box 4-layer ATDD executable specifications (package forseti_specs)
 ├── specs_actors/   # Black-box 4-layer ATDD specs for Sleipnir actor runtime (package forseti_actors_specs)
-├── tests/          # Pattern E unit tests, Pattern D t.seed property/oracle tests, doc-snippet & example verifiers
+├── tests/          # Pattern E unit tests, Pattern D t.seed property/oracle tests, C99 ASan smoke test, doc-snippet & example verifiers
 ├── examples/       # 8 standalone leak-checked runnable examples (01_decision_tables .. 08_sleipnir_actor_runtime)
 ├── benchmarks/     # Longitudinal hugi + obench scaling suite (10 to 1,000,000 rules)
-├── docs/           # Documentation hub, Odin embedding guide, DSL/CLI reference, xitdb modes & benchmark reports
+├── docs/           # Documentation hub, Odin embedding guide, DSL/CLI reference, editor setup, xitdb modes & benchmark reports
 ├── conductor/      # Conductor specifications, architecture guidelines, and sequenced implementation tracks
 └── scripts/        # Optional upstream reference repo fetcher (reference/README.md)
 ```
