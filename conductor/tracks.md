@@ -39,7 +39,7 @@ Sequenced implementation roadmap for **Forseti**. Tracks are ordered by dependen
 
 ---
 
-- [ ] **Track 8: Cross-OS CI Matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`), Repo/Actions Hygiene & `v0.1.0` Release Prep** *(Priority: Step 8 — Depends on Track 7)*
+- [~] **Track 8: Cross-OS CI Matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`), Repo/Actions Hygiene & `v0.1.0` Release Prep** *(Priority: Step 8 — Depends on Track 7)*
   *Link: [./tracks/cross_os_ci_hygiene_and_v0_1_0_release_20261122/](./tracks/cross_os_ci_hygiene_and_v0_1_0_release_20261122/)*
 
 ---

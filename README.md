@@ -1,6 +1,7 @@
 # Forseti
 
 [![CI](https://github.com/boxxxie/forseti/actions/workflows/ci.yml/badge.svg)](https://github.com/boxxxie/forseti/actions/workflows/ci.yml)
+[![Release: v0.1.0](https://img.shields.io/badge/Release-v0.1.0-1E88E5)](CHANGELOG.md)
 [![Odin](https://img.shields.io/badge/Odin-dev--2026--10%2B-3882D2?logo=odin&logoColor=white)](https://odin-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Scale: 1M Rules](https://img.shields.io/badge/Scale-1%2C000%2C000%20Rules-7C4DFF)](docs/benchmarks.md)

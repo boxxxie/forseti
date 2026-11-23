@@ -2,7 +2,7 @@
 
 # Forseti Benchmarks & Scaling Architecture
 
-This report documents Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) / [`obench`](https://github.com/zeybek/obench) benchmark suite across `7` benchmark groups (`93` parameterized benchmarks total) scaling up to `1,000,000` rules, `10,000` working-memory facts, `10,000`-row JTMS cascades, and `5,000`-edge transitive closures, along with before/after measurements from the Phase 2 telemetry-guided optimization pass (`be8f675` -> `e9cd4fc`).
+This report documents Forseti's longitudinal [`hugi`](https://github.com/boxxxie/hugi) / [`obench`](https://github.com/zeybek/obench) benchmark suite across `7` benchmark groups (`93` parameterized benchmarks in `e9cd4fc`, later expanded to `207` benchmarks in `benchmarks/history.hugidb` at `05b9229bba93` covering frontend, verifier, VM, file-backed `xitdb`, cyclic strata, and provenance) scaling up to `1,000,000` rules, `10,000` working-memory facts, `10,000`-row JTMS cascades, and `5,000`-edge transitive closures, along with before/after measurements from the Phase 2 telemetry-guided optimization pass (`be8f675` -> `e9cd4fc`).
 
 > [!IMPORTANT]
 > **TL;DR Scaling Scorecard (`e9cd4fc` on Ryzen 7 7735U, `-o:speed -microarch:native`):**

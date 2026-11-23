@@ -33,8 +33,6 @@ _verify_example_dir :: proc(t: ^testing.T, rel_dir: string, expected_marker: str
 		"check",
 		rel_dir,
 		"-collection:xitdb=../xitdb/xitdb",
-		"-collection:hugi=../hugi/hugi",
-		"-collection:obench=../hugi/deps/obench/obench",
 		"-vet",
 		"-vet-tabs",
 		"-strict-style",
@@ -61,7 +59,8 @@ _verify_example_dir :: proc(t: ^testing.T, rel_dir: string, expected_marker: str
 		delete(tmp_dir)
 	}
 
-	bin_path, _ := filepath.join({tmp_dir, "example_bin"}, context.temp_allocator)
+	bin_name := "example_bin.exe" when ODIN_OS == .Windows else "example_bin"
+	bin_path, _ := filepath.join({tmp_dir, bin_name}, context.temp_allocator)
 	out_flag := fmt.tprintf("-out:%s", bin_path)
 	build_cmd := []string{
 		"odin",
@@ -69,8 +68,6 @@ _verify_example_dir :: proc(t: ^testing.T, rel_dir: string, expected_marker: str
 		rel_dir,
 		out_flag,
 		"-collection:xitdb=../xitdb/xitdb",
-		"-collection:hugi=../hugi/hugi",
-		"-collection:obench=../hugi/deps/obench/obench",
 	}
 	bs, bout, berr, bex := os.process_exec(os.Process_Desc{command = build_cmd}, context.temp_allocator)
 	testing.expectf(

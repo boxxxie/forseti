@@ -15,19 +15,27 @@ concurrency:
 
 jobs:
   check-and-test:
-    name: Check & Test (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: Check & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: forseti
 
       # Sibling paths (../xitdb/xitdb, ../hugi/hugi, ../hugi/deps/obench/obench)
-      # match ols.json, tests/test_examples_verify.odin, and specs/driver_test.odin.
+      # match ols.json and benchmarks/.
       - name: Checkout odin-xitdb
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: boxxxie/odin-xitdb
           ref: v2.2.0
@@ -36,7 +44,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout hugi v0.2.0 (runner only)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: boxxxie/hugi
           ref: v0.2.0
@@ -46,6 +54,10 @@ jobs:
 
       - name: Init hugi obench submodule
         run: git -C hugi submodule update --init deps/obench
+
+      - name: Setup MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Setup Odin compiler
         uses: laytan/setup-odin@v2
@@ -79,3 +91,37 @@ jobs:
       - name: Verify package documentation generation
         working-directory: forseti
         run: odin doc forseti -collection:xitdb=../xitdb/xitdb > /dev/null
+
+  asan:
+    name: AddressSanitizer Tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          path: forseti
+
+      - name: Checkout odin-xitdb
+        uses: actions/checkout@v7
+        with:
+          repository: boxxxie/odin-xitdb
+          ref: v2.2.0
+          path: xitdb
+          submodules: false
+          persist-credentials: false
+
+      - name: Setup Odin compiler
+        uses: laytan/setup-odin@v2
+        with:
+          release: dev-2026-10
+          token: ${{ secrets.GITHUB_TOKEN }}
+          cache: false
+
+      - name: Run AddressSanitizer unit, doc & example tests
+        working-directory: forseti
+        run: odin test tests -sanitize:address -collection:xitdb=../xitdb/xitdb -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true

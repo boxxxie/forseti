@@ -253,7 +253,8 @@ driver_prepare_cli_binary :: proc(w: ^World) -> string {
 
 	w.cli_dir = dir
 
-	bin_path, join_err := filepath.join({dir, "forseti"}, arena_alloc)
+	bin_name := "forseti.exe" when ODIN_OS == .Windows else "forseti"
+	bin_path, join_err := filepath.join({dir, bin_name}, arena_alloc)
 	if join_err != nil {
 		return "filepath.join failed"
 	}
@@ -265,8 +266,6 @@ driver_prepare_cli_binary :: proc(w: ^World) -> string {
 		"cmd/forseti",
 		out_flag,
 		"-collection:xitdb=../xitdb/xitdb",
-		"-collection:hugi=../hugi/hugi",
-		"-collection:obench=../hugi/deps/obench/obench",
 	}
 	state, stdout, stderr, exec_err := os.process_exec(os.Process_Desc{command = cmd}, context.temp_allocator)
 	if exec_err != nil {
