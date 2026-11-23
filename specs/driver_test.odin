@@ -1497,3 +1497,21 @@ driver_unmarshal_typed_orgs :: proc(
 	err = forseti.query_unmarshal(sess, res, &rows)
 	return rows, err
 }
+
+driver_insert_typed_empty :: proc(sess: ^forseti.Session, binding_name, key: string) -> forseti.Typed_Error {
+	Empty_Fact :: struct {
+		other: string,
+	}
+	_, err := forseti.session_insert_struct(sess, binding_name, key, Empty_Fact{other = "x"})
+	return err
+}
+
+driver_decide_typed_mismatched :: proc(rb: ^forseti.Rulebase, table_name: string) -> forseti.Typed_Error {
+	Bad_In :: struct {
+		employees: string,
+		active:    bool,
+	}
+	out: Typed_Tier_Out
+	_, err := forseti.decide_struct(rb, table_name, Bad_In{employees = "nope", active = true}, &out)
+	return err
+}

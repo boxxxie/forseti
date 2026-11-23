@@ -2428,6 +2428,33 @@ upon_deciding_typed_tier :: proc(
 	w.typed_tier_out = out
 }
 
+upon_inserting_typed_org_missing_field :: proc(
+	w: ^World,
+	sess_label: string,
+	binding_name: string,
+	key: string,
+	loc := #caller_location,
+) {
+	sess, ok := w.sessions[sess_label]
+	if !testing.expectf(w.t, ok, "unknown session %q", sess_label, loc = loc) {
+		return
+	}
+	w.last_typed_err = driver_insert_typed_empty(sess, binding_name, key)
+}
+
+upon_deciding_typed_tier_mismatched :: proc(
+	w: ^World,
+	rb_label: string,
+	table_name: string,
+	loc := #caller_location,
+) {
+	rb, ok := w.rulebases[rb_label]
+	if !testing.expectf(w.t, ok, "unknown rulebase %q", rb_label, loc = loc) {
+		return
+	}
+	w.last_typed_err = driver_decide_typed_mismatched(rb, table_name)
+}
+
 then_typed_error_is :: proc(w: ^World, expected: forseti.Typed_Error, loc := #caller_location) {
 	testing.expect_value(w.t, w.last_typed_err, expected, loc = loc)
 }

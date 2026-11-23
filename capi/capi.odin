@@ -3,6 +3,7 @@ package forseti_capi
 import "base:runtime"
 import "core:c"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:strings"
 import xitdb "xitdb:."
@@ -437,7 +438,7 @@ forseti_session_retract_fact_id :: proc "c" (
 	context = runtime.default_context()
 	defer free_all(context.temp_allocator)
 
-	if sess == nil {
+	if sess == nil || fact_id > u64(max(u32)) {
 		return .ERR_INVALID_ARG
 	}
 	return _map_session_err(forseti.session_retract_fact(&sess.sess, forseti.Fact_Id(fact_id)))
@@ -498,7 +499,11 @@ _write_query_value_json :: proc(b: ^strings.Builder, s: ^forseti.Session, v: for
 	case i64:
 		fmt.sbprintf(b, "%d", x)
 	case f64:
-		fmt.sbprintf(b, "%v", x)
+		if math.is_nan(x) || math.is_inf(x, 0) {
+			strings.write_string(b, "null")
+		} else {
+			fmt.sbprintf(b, "%v", x)
+		}
 	case forseti.String_Id:
 		_write_json_str(b, forseti.session_string(s, x))
 	case forseti.Entity_Id:
@@ -859,7 +864,7 @@ forseti_session_explain_json :: proc "c" (
 	if out_json != nil {
 		out_json^ = nil
 	}
-	if sess == nil || out_json == nil {
+	if sess == nil || out_json == nil || fact_id > u64(max(u32)) {
 		return .ERR_INVALID_ARG
 	}
 

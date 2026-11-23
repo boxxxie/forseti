@@ -640,7 +640,7 @@ compile_source_to_rulebase :: proc(
 	diags: ^forseti.Diagnostic_List,
 	telemetry: ^forseti.Telemetry_Sink,
 	warnings_as_errors: bool,
-	include_paths: []string = nil,
+	include_paths: []string,
 ) -> (
 	rb: forseti.Rulebase,
 	exit_code: int,
@@ -877,7 +877,7 @@ run_cmd_diff_replay :: proc(
 	}
 	defer loaded_facts_destroy(&bundle)
 
-	base_rb, base_code, base_ok := compile_source_to_rulebase(base_src, file_path, diags, telemetry, opts.warnings_as_errors)
+	base_rb, base_code, base_ok := compile_source_to_rulebase(base_src, file_path, diags, telemetry, opts.warnings_as_errors, opts.include_paths[:])
 	if !base_ok {
 		return base_code
 	}
@@ -890,7 +890,7 @@ run_cmd_diff_replay :: proc(
 	}
 	defer forseti.diag_list_destroy(&cand_diags)
 
-	cand_rb, cand_code, cand_ok := compile_source_to_rulebase(cand_src, opts.candidate_path, &cand_diags, telemetry, opts.warnings_as_errors)
+	cand_rb, cand_code, cand_ok := compile_source_to_rulebase(cand_src, opts.candidate_path, &cand_diags, telemetry, opts.warnings_as_errors, opts.include_paths[:])
 	if !cand_ok {
 		return cand_code
 	}
@@ -1236,7 +1236,7 @@ run_cli :: proc() -> int {
 		}
 		defer loaded_facts_destroy(&bundle)
 
-		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors, opts.include_paths[:])
 		if !rb_ok {
 			return comp_code
 		}
@@ -1278,7 +1278,7 @@ run_cli :: proc() -> int {
 		}
 		defer loaded_facts_destroy(&bundle)
 
-		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors, opts.include_paths[:])
 		if !rb_ok {
 			return comp_code
 		}
@@ -1363,7 +1363,7 @@ run_cli :: proc() -> int {
 		}
 		defer loaded_facts_destroy(&bundle)
 
-		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors, opts.include_paths[:])
 		if !rb_ok {
 			return comp_code
 		}
@@ -1433,7 +1433,7 @@ run_cli :: proc() -> int {
 		}
 		defer loaded_facts_destroy(&bundle)
 
-		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors, opts.include_paths[:])
 		if !rb_ok {
 			return comp_code
 		}
@@ -1482,7 +1482,7 @@ run_cli :: proc() -> int {
 		return 0
 
 	case "export-dot", "export-mermaid":
-		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors)
+		rb, comp_code, rb_ok := compile_source_to_rulebase(src, opts.file_path, &diags, &telemetry, opts.warnings_as_errors, opts.include_paths[:])
 		if !rb_ok {
 			return comp_code
 		}

@@ -301,3 +301,14 @@ r_line : >= 20 // line break inside row
 	defer forseti.ir_destroy(&ir)
 	testing.expect_value(t, diags.error_count, 0)
 }
+
+@(test)
+test_format_source_groups_consecutive_imports :: proc(t: ^testing.T) {
+	src := "module m version \"1.0\"\nimport \"a.forseti\"\nimport \"b.forseti\"\nschema S { id: string }\n"
+	expected := "module m version \"1.0\"\n\nimport \"a.forseti\"\nimport \"b.forseti\"\n\nschema S { id: string }\n"
+
+	out, err := forseti.format_source(src)
+	testing.expect_value(t, err, nil)
+	defer delete(out)
+	testing.expect_value(t, out, expected)
+}

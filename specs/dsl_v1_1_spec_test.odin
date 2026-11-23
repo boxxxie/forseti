@@ -45,9 +45,14 @@ rule canon {
 	upon_compiling_workspace_file(&w, "p_ok", "main.forseti", {"inc"})
 	then_compilation_has_zero_diagnostics(&w, "p_ok")
 
-	// Also verify CLI `forseti check --include inc main.forseti` succeeds.
+	// Also verify CLI `forseti check --include inc main.forseti` and `forseti run --include inc` succeed.
 	upon_running_cli(&w, "cli_inc_ok", {"check", "--include", "inc", "main.forseti"})
 	then_cli_exits_with(&w, "cli_inc_ok", 0)
+
+	given_workspace_file(&w, "facts.json", `{"facts":[{"binding":"raw_orgs","key":"o1","fields":{"id":"o1","name":"ACME"}}]}`)
+	upon_running_cli(&w, "cli_run_inc", {"run", "--include", "inc", "--facts", "facts.json", "--format=json", "main.forseti"})
+	then_cli_exits_with(&w, "cli_run_inc", 0)
+	then_cli_output_contains(&w, "cli_run_inc", `"fired":1`)
 
 	// Circular import a.forseti -> b.forseti -> a.forseti triggers E2006 with trace.
 	given_workspace_file(&w, "cycle/a.forseti", `module cyc version "1.0"

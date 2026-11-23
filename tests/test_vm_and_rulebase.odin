@@ -388,3 +388,54 @@ test_vm_pure_builtin_opcodes_and_string_scoping :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, forseti.interner_len(&sess_int), before_len)
 }
+
+@(test)
+test_typed_api_integer_widths_and_embedded_struct :: proc(t: ^testing.T) {
+	src := `module widths version "1.0"
+schema Item { id: string, n: i64 }
+source items: Item at .items[?id]
+query all_items() { items(id: ?id, n: ?n) }
+`
+	diags: forseti.Diagnostic_List
+	testing.expect_value(t, forseti.diag_list_init(&diags), nil)
+	defer forseti.diag_list_destroy(&diags)
+	ir, c_err := forseti.compile_source(src, "widths.forseti", &diags)
+	testing.expect_value(t, c_err, nil)
+	defer forseti.ir_destroy(&ir)
+	rb, rb_err := forseti.rulebase_compile(&ir)
+	testing.expect_value(t, rb_err, forseti.Compile_Error.None)
+	defer forseti.rulebase_destroy(&rb)
+
+	sess := new(forseti.Session)
+	defer {
+		forseti.session_destroy(sess)
+		free(sess)
+	}
+	testing.expect_value(t, forseti.session_init(sess, &rb), forseti.Session_Error.None)
+
+	In_Item :: struct {
+		id: string,
+		n:  i16,
+	}
+	_, ins_err := forseti.session_insert_struct(sess, "items", "k1", In_Item{id = "k1", n = 42})
+	testing.expect_value(t, ins_err, forseti.Typed_Error.None)
+
+	qr: forseti.Query_Result
+	defer forseti.query_result_destroy(&qr)
+	testing.expect_value(t, forseti.session_query(sess, "all_items", nil, &qr), forseti.Session_Error.None)
+
+	Embedded :: struct {
+		unused: int,
+	}
+	Out_Item :: struct {
+		using _: Embedded,
+		id:      string,
+		n:       u16,
+	}
+	rows: [dynamic]Out_Item
+	defer delete(rows)
+	testing.expect_value(t, forseti.query_unmarshal(sess, &qr, &rows), forseti.Typed_Error.None)
+	testing.expect_value(t, len(rows), 1)
+	testing.expect_value(t, rows[0].id, "k1")
+	testing.expect_value(t, rows[0].n, u16(42))
+}

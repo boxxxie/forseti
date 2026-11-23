@@ -215,6 +215,18 @@ _write_struct_field_value :: proc(
 		}
 		if v.signed {
 			switch base.size {
+			case 1:
+				if iv < i64(min(i8)) || iv > i64(max(i8)) {
+					return .Type_Mismatch
+				}
+				(^i8)(ptr)^ = i8(iv)
+				return .None
+			case 2:
+				if iv < i64(min(i16)) || iv > i64(max(i16)) {
+					return .Type_Mismatch
+				}
+				(^i16)(ptr)^ = i16(iv)
+				return .None
 			case 4:
 				if iv < i64(min(i32)) || iv > i64(max(i32)) {
 					return .Type_Mismatch
@@ -225,9 +237,30 @@ _write_struct_field_value :: proc(
 				(^i64)(ptr)^ = iv
 				return .None
 			}
-		} else if iv >= 0 && base.size == 8 {
-			(^u64)(ptr)^ = u64(iv)
-			return .None
+		} else if iv >= 0 {
+			switch base.size {
+			case 1:
+				if iv > i64(max(u8)) {
+					return .Type_Mismatch
+				}
+				(^u8)(ptr)^ = u8(iv)
+				return .None
+			case 2:
+				if iv > i64(max(u16)) {
+					return .Type_Mismatch
+				}
+				(^u16)(ptr)^ = u16(iv)
+				return .None
+			case 4:
+				if iv > i64(max(u32)) {
+					return .Type_Mismatch
+				}
+				(^u32)(ptr)^ = u32(iv)
+				return .None
+			case 8:
+				(^u64)(ptr)^ = u64(iv)
+				return .None
+			}
 		}
 		return .Type_Mismatch
 
@@ -496,7 +529,7 @@ query_unmarshal :: proc(
 				continue
 			}
 			for vn, vi in row.var_names {
-				vn_norm := vn[1:] if len(vn) > 1 && vn[0] == '?' && fname[0] != '?' else vn
+				vn_norm := vn[1:] if len(vn) > 1 && vn[0] == '?' && len(fname) > 0 && fname[0] != '?' else vn
 				if vn_norm == fname {
 					w_err := _write_struct_field_value(rawptr(base_ptr + sf.offset), sf.type, row.var_values[vi], s, nil)
 					if w_err != .None {

@@ -204,6 +204,40 @@ int main(void) {
 	st = forseti_session_retract_fact_id(sess, o1_id);
 	assert(st == FORSETI_OK);
 
+	/* Out-of-range u32 fact_id (> UINT32_MAX) is rejected instead of truncated. */
+	st = forseti_session_retract_fact_id(sess, 0x100000001ULL);
+	assert(st == FORSETI_ERR_INVALID_ARG);
+	char *bad_exp = NULL;
+	st = forseti_session_explain_json(sess, 0x100000001ULL, &bad_exp);
+	assert(st == FORSETI_ERR_INVALID_ARG && bad_exp == NULL);
+
+	/* Non-finite f64 query output serializes as JSON null rather than NaN. */
+	const char *nan_src =
+		"module nan_test version \"1.0\"\n"
+		"schema Metric { id: string, v: f64 }\n"
+		"source metrics: Metric at .metrics[?id]\n"
+		"query get_metrics() { metrics(id: ?id, v: ?v) }\n";
+	forseti_rulebase_t *nan_rb = NULL;
+	st = forseti_rulebase_compile(nan_src, "nan.forseti", true, &nan_rb, NULL);
+	assert(st == FORSETI_OK);
+	forseti_session_t *nan_sess = NULL;
+	st = forseti_session_create(nan_rb, FORSETI_PROV_FAST, 0, &nan_sess);
+	assert(st == FORSETI_OK);
+	forseti_value_t nan_fields[2];
+	nan_fields[0] = val_str("m1");
+	memset(&nan_fields[1], 0, sizeof(nan_fields[1]));
+	nan_fields[1].kind = FORSETI_VAL_F64;
+	nan_fields[1].as.f64 = 0.0 / 0.0;
+	st = forseti_session_insert_fact(nan_sess, "metrics", "m1", nan_fields, 2, NULL);
+	assert(st == FORSETI_OK);
+	char *nan_json = NULL;
+	st = forseti_session_query_json(nan_sess, "get_metrics", NULL, NULL, 0, &nan_json);
+	assert(st == FORSETI_OK);
+	expect_substr(nan_json, "\"?v\":null", "nan_as_null");
+	forseti_free_string(nan_json);
+	forseti_session_destroy(nan_sess);
+	forseti_rulebase_destroy(nan_rb);
+
 	/* Free NULL is safe no-op. */
 	forseti_free_string(NULL);
 

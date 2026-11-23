@@ -83,10 +83,16 @@ table tier_gate version "1.0" hit First verify(complete) {
 	then_typed_error_is(&w, .None)
 	then_typed_decide_result_is(&w, matched = true, tier = "standard", limit = 1000)
 
-	// Error paths: unknown table, unknown binding, type mismatch on query unmarshal.
+	// Error paths: unknown table, unknown binding, missing field, type mismatch.
 	upon_deciding_typed_tier(&w, "rb1", "missing_tbl", employees = 10, active = true)
 	then_typed_error_is(&w, .Unknown_Table)
 
 	upon_inserting_typed_org(&w, "s1", "missing_binding", "k1", "k1", employees = 10, active = true)
 	then_typed_error_is(&w, .Unknown_Binding)
+
+	upon_inserting_typed_org_missing_field(&w, "s1", "dummy", "d1")
+	then_typed_error_is(&w, .Missing_Field)
+
+	upon_deciding_typed_tier_mismatched(&w, "rb1", "tier_gate")
+	then_typed_error_is(&w, .Type_Mismatch)
 }

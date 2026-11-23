@@ -567,6 +567,7 @@ format_source :: proc(
 	need_top_sep := false
 	in_binding_header := false
 	in_module_header := false
+	in_import_header := false
 	in_source_at := false
 	prev_is_at_dot := false
 	has_prev_tok := false
@@ -611,15 +612,16 @@ format_source :: proc(
 
 		cur := it.tok.kind
 
-		// Close module/source/derived header once the next top-level keyword or EOF starts.
-		if depth == 0 && (in_module_header || in_binding_header || in_source_at) {
+		// Close module/import/source/derived header once the next top-level keyword or EOF starts.
+		if depth == 0 && (in_module_header || in_import_header || in_binding_header || in_source_at) {
 			if _is_top_decl_kw(cur) {
 				if !at_line_start {
 					strings.write_byte(&b, '\n')
 					at_line_start = true
 				}
-				need_top_sep = true
+				need_top_sep = !(in_import_header && cur == .Kw_Import)
 				in_module_header = false
+				in_import_header = false
 				in_binding_header = false
 				in_source_at = false
 				has_prev_tok = false
@@ -636,8 +638,10 @@ format_source :: proc(
 			has_prev_tok = false
 		}
 
-		if cur == .Kw_Module || cur == .Kw_Import {
+		if cur == .Kw_Module {
 			in_module_header = true
+		} else if cur == .Kw_Import {
+			in_import_header = true
 		} else if cur == .Kw_Source || cur == .Kw_Derived {
 			in_binding_header = true
 		} else if cur == .Kw_At && in_binding_header {
@@ -781,9 +785,16 @@ format_source :: proc(
 		prev_tok = cur
 		has_prev_tok = true
 
-		if depth == 0 && (in_module_header || in_source_at) && has_next && _is_top_decl_kw(next_kind) {
-			need_top_sep = true
+		if depth == 0 && (in_module_header || in_import_header || in_source_at) && has_next && _is_top_decl_kw(next_kind) {
+			if in_import_header && next_kind == .Kw_Import {
+				strings.write_byte(&b, '\n')
+				at_line_start = true
+				has_prev_tok = false
+			} else {
+				need_top_sep = true
+			}
 			in_module_header = false
+			in_import_header = false
 			in_source_at = false
 			in_binding_header = false
 		}

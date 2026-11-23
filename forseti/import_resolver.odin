@@ -84,19 +84,28 @@ _format_import_cycle :: proc(stack: []string, repeat_path: string) -> string {
 }
 
 @(private)
+_destroy_import_frame :: proc(frame: ^_Import_Frame, allocator: mem.Allocator) {
+	if frame.owns_src {
+		delete(frame.abs_path, allocator)
+		delete(frame.src, allocator)
+	}
+	parsed_ast_destroy(&frame.parsed)
+}
+
+@(private)
 _collect_imports_dfs :: proc(
 	ctx: ^_Import_Ctx,
 	frame_in: _Import_Frame,
-) -> mem.Allocator_Error {
+) -> (err: mem.Allocator_Error) {
 	frame := frame_in
+	transferred := false
+	defer if !transferred {
+		_destroy_import_frame(&frame, ctx.allocator)
+	}
 	canon := strings.clone(_canonical_import_key(frame.abs_path), ctx.allocator) or_return
 	defer delete(canon, ctx.allocator)
 
 	if canon in ctx.visited {
-		if frame.owns_src {
-			delete(frame.src, ctx.allocator)
-		}
-		parsed_ast_destroy(&frame.parsed)
 		return nil
 	}
 
@@ -176,6 +185,7 @@ _collect_imports_dfs :: proc(
 	delete_key(&ctx.visiting, canon)
 	ctx.visited[strings.clone(canon, ctx.allocator) or_return] = true
 	append(&ctx.units, frame) or_return
+	transferred = true
 	return nil
 }
 
@@ -225,11 +235,7 @@ compile_source_with_imports :: proc(
 		delete(ctx.visited)
 		delete(ctx.stack)
 		for &u in ctx.units {
-			if u.owns_src {
-				delete(u.abs_path, allocator)
-				delete(u.src, allocator)
-			}
-			parsed_ast_destroy(&u.parsed)
+			_destroy_import_frame(&u, allocator)
 		}
 		delete(ctx.units)
 	}
