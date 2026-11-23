@@ -149,6 +149,25 @@ Measured on `10,000` HAMT records (default `xitdb` v2 SHA-1 with hardware SHA-NI
 
 At `N = 10`–`1,000`, `Audit_Full` provenance plus incremental derived + audit persistence (`decisions`, `idx.*`, `__tx`) adds `~147 us` (`10`) to `~500 us` (`1,000`) with only `~6.52 KiB` per incremental transaction (`O(delta)` `xitdb` commit). At `N = 10,000`, runtime in `mdm_e2e` is dominated by re-evaluating the non-LIA `not Suppress` / `count(...)` accumulator rules over the `10,000`-fact `RawOrg` / `CanonOrg` working set rather than `xitdb` hashing or provenance writes.
 
+### 3.7 `v0.1.0` Release Snapshot (`434960b`, `253` Benchmarks)
+
+Recorded on idle hardware (`geomean: 20.12 us`, `11,989` samples) after flattening pools, removing `Fast_Memory`, adding `sleipnir_actors`, and reusing fingerprint frames and `syncer.scratch_arena` in [`session_diff_replay`](../forseti/diff_replay.odin):
+
+| Group / Benchmark | `434960b` Median `p50` | Allocs / op | Notes |
+| --- | ---: | ---: | --- |
+| `scale_rules::compile_rules[1000000]` | `1.942 s` | `61.0 / 658.95 MiB` | `1M` rules compiled |
+| `scale_rules::lazy_session_init[1000000]` | `20.17 us` | `71.0 / 55.17 KiB` | `O(1)` (`R^2 = 0.994`) |
+| `scale_rules::sparse_alpha_match[1000000]` | `1.87 us` | `6.1 / 2.56 KiB` | `O(log N)` |
+| `scale_rules::audit_full_sparse_match[1000000]` | `2.64 us` | `7.4 / 3.04 KiB` | `O(1)` (`R^2 = 0.989`) |
+| `beta_joins::phreak_hot_match_zero_alloc[10000]` | `3.16 us` | **`0`** | `@zero_alloc` (`O(1)`, `R^2 = 0.991`) |
+| `mdm_e2e::incremental_sync_fire_audit_full_safe_v2[10000]` | `352.65 us` | `6.5 / 337.31 KiB` | `48.9x` faster vs `05b9229` (`17.24 ms`) |
+| `mdm_e2e::incremental_sync_fire_fast_safe_v2[10000]` | `119.58 us` | `3.6 / 106.70 KiB` | `142.2x` faster vs `05b9229` (`17.01 ms`) |
+| `provenance_and_replay::overlay_diff_replay[10]` / `[100]` | `111.24 us` / `297.67 us` | `116 / 76.89 KiB` · `322 / 217.97 KiB` | `2.34x` / `3.31x` faster vs `7444ff0` |
+| `provenance_and_replay::overlay_diff_replay[1000]` / `[5000]` | `6.09 ms` / `32.35 ms` | `1282 / 2.29 MiB` · `5360 / 14.48 MiB` | `1.81x` / `1.76x` faster vs `7444ff0` |
+| `sleipnir_actors::session_actor_chain_k_batch[1..8]` | `1.11 ms` -> `703.18 us` (`686.03 us` at `4w`) | `1297.0 / 1.22 MiB` | Per-actor serialized mailbox |
+| `sleipnir_actors::tenant_runtime_fanout[1..8]` | `72.48 us` -> `131.90 us` | `22.2 / 4.52 KiB` -> `22.0 / 928 B` | Sub-`100 us` burst wakeup overhead |
+| `sleipnir_actors::parallel_diff_replay_4_cands[1..8]` | `1.62 ms` -> `939.51 us` (`4w`) / `980.19 us` (`8w`) | `733 / 1017 KiB` -> `739 / 1.64 MiB` | `3.27x` / `2.83x` faster vs `7444ff0` |
+
 ---
 
 ## 4. Telemetry-Guided Optimizations Implemented
