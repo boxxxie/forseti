@@ -5,7 +5,7 @@
 		{ "name": "actor", "path": "../sleipnir/actor" },
 		{ "name": "hugi", "path": "../hugi/hugi" },
 		{ "name": "obench", "path": "../hugi/deps/obench/obench" },
-		{ "name": "temple", "path": "../temple" }
+		{ "name": "runa", "path": "../runa" }
 	],
 	"enable_format": true,
 	"enable_hover": true,

@@ -23,7 +23,7 @@ test_duration_and_throughput_formatting :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_temple_templates_render_clean_svg_and_markdown :: proc(t: ^testing.T) {
+test_runa_templates_render_clean_svg_and_markdown :: proc(t: ^testing.T) {
 	x_labels := [2]string{"10", "100"}
 	vals := [2]Maybe(f64){100.0, 200.0}
 	v_line, ok := build_line_chart_view(

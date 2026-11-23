@@ -211,7 +211,7 @@ hugi run --test --groups decision_tables,xitdb_modes,beta_joins,jtms_churn,recur
 hugi run --runs 1 --warmup 1
 hugi history
 hugi compare --last --format md
-odin run benchmarks/render -collection:temple=../temple
+odin run benchmarks/render -collection:runa=../runa
 
 # 4. Run 10..1,000,000 rule telemetry sweep directly
 odin build benchmarks -out:/tmp/forseti_bench -o:speed -microarch:native $XITDB $ACTOR $HUGI $VET -vet-packages:forseti,main

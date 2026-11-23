@@ -67,4 +67,4 @@ Total footprint across all 16 shallow/sparse checkouts: ~361 MB.
 - **Odin Sibling Libraries (Idioms & Storage):**
   - [xitdb](file:///home/pauli/projects/odin/xitdb/README.md) — persistent immutable database, 5-layer DSL, Datalog query engine (`xitdb/dsl.odin`)
   - [hfsm](file:///home/pauli/projects/odin/hfsm/README.md) — zero-alloc enum-indexed state machine + `core:odin/parser` AST codegen (`tools/hfsm_gen`)
-  - [temple](file:///home/pauli/projects/odin/temple/README.md) — compile-time transpilation to `"contextless"` Odin procedures
+  - [runa](file:///home/pauli/projects/odin/runa/README.md) — compile-time transpilation to `"contextless"` Odin procedures

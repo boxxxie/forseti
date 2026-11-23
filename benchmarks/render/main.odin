@@ -188,9 +188,9 @@ Bar_Input :: struct {
 	color: string,
 }
 
-line_chart_tmpl := compiled("templates/line_chart.temple.twig", Line_Chart_View)
-bar_chart_tmpl := compiled("templates/bar_chart.temple.twig", Bar_Chart_View)
-suite_report_tmpl := compiled("templates/suite_report.temple.twig", Suite_Report_View)
+line_chart_tmpl := compiled("templates/line_chart.runa.twig", Line_Chart_View)
+bar_chart_tmpl := compiled("templates/bar_chart.runa.twig", Bar_Chart_View)
+suite_report_tmpl := compiled("templates/suite_report.runa.twig", Suite_Report_View)
 
 @(require_results)
 fmt_commas_u64 :: proc(val: u64, allocator := context.allocator) -> string {
@@ -958,12 +958,12 @@ render_all :: proc(db_path: string, commit_arg: string, allocator := context.all
 		return false
 	}
 
-	// 6. Render benchmarks/README.md via AOT temple template
+	// 6. Render benchmarks/README.md via AOT runa template
 	rep_view := build_suite_report_view(latest_rows, commit, arena_alloc)
 	sb := strings.builder_make(0, suite_report_tmpl.approx_bytes, allocator)
 	defer strings.builder_destroy(&sb)
 	if _, werr := suite_report_tmpl.with(strings.to_writer(&sb), rep_view); werr != nil {
-		fmt.eprintfln("bench_render: failed rendering suite_report.temple.twig: %v", werr)
+		fmt.eprintfln("bench_render: failed rendering suite_report.runa.twig: %v", werr)
 		return false
 	}
 	if os.write_entire_file(README_PATH, transmute([]byte)strings.to_string(sb)) != nil {
