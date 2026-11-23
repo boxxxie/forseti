@@ -9,10 +9,10 @@
 
 ## Phase 1: Stable C ABI (`capi/` -> `libforseti` + `include/forseti.h`)
 
-- [ ] Task: Design and implement C99 header `include/forseti.h` and `capi/` shared library exports (TDD + C FFI Harness)
-    - [ ] Write failing C99 FFI harness test (`tests/capi_smoke.c` + Odin runner) exercising rulebase compile, session lifecycle, fact CRUD, fire, JSON `explain`/`diff_replay`, and string reclamation
-    - [ ] Implement `include/forseti.h` and `capi/*.odin` (`-build-mode:shared`), verifying clean compilation and zero leaks under ASan/LSan
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Stable C ABI (libforseti)' (Protocol in workflow.md)
+- [x] Task: Design and implement C99 header `include/forseti.h` and `capi/` shared library exports (TDD + C FFI Harness)
+    - [x] Write failing C99 FFI harness test (`tests/capi_smoke.c` + Odin runner) exercising rulebase compile, session lifecycle, fact CRUD, fire, JSON `explain`/`diff_replay`, and string reclamation
+    - [x] Implement `include/forseti.h` and `capi/*.odin` (`-build-mode:shared`), verifying clean compilation and zero leaks under ASan/LSan
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Stable C ABI (libforseti)' (Protocol in workflow.md)
 
 ---
 

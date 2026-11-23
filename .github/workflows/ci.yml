@@ -86,6 +86,7 @@ jobs:
           odin check forseti -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti
           odin check lsp -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp
           odin check actors -no-entry-point -collection:xitdb=../xitdb/xitdb -collection:actor=../sleipnir/actor -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_actors
+          odin check capi -no-entry-point -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_capi
           odin check cmd/forseti -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp,main
           odin check cmd/forseti-lsp -collection:xitdb=../xitdb/xitdb -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,forseti_lsp,main
           odin check benchmarks -collection:xitdb=../xitdb/xitdb -collection:actor=../sleipnir/actor -collection:hugi=../hugi/hugi -collection:obench=../hugi/deps/obench/obench -vet -vet-tabs -strict-style -warnings-as-errors -vet-packages:forseti,main
